@@ -38,7 +38,8 @@ ENV NODE_ENV=production
 
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 LABEL org.opencontainers.image.title="hn-mcp-server"
-LABEL org.opencontainers.image.description=""
+LABEL org.opencontainers.image.description="MCP server for Hacker News — feeds, threads, users, and search via Firebase and Algolia APIs"
+LABEL org.opencontainers.image.source="https://github.com/cyanheads/hn-mcp-server"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Copy dependency manifests

@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "hn-mcp-server",
+  "name": "io.github.cyanheads/hn-mcp-server",
   "description": "MCP server for Hacker News — feeds, threads, users, and search via Firebase and Algolia APIs",
   "repository": {
-    "url": "https://github.com/cyanheads/hn-mcp-server.git",
+    "url": "https://github.com/cyanheads/hn-mcp-server",
     "source": "github"
   },
   "version": "0.1.0",
@@ -12,7 +12,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "hn-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "bun",
       "version": "0.1.0",
       "packageArguments": [
         {
@@ -25,6 +25,13 @@
         }
       ],
       "environmentVariables": [
+        {
+          "name": "HN_CONCURRENCY_LIMIT",
+          "description": "Max concurrent HTTP requests for batch item fetches (1–50).",
+          "format": "string",
+          "isRequired": false,
+          "default": "10"
+        },
         {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
@@ -41,7 +48,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "hn-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "bun",
       "version": "0.1.0",
       "packageArguments": [
         {
@@ -54,6 +61,13 @@
         }
       ],
       "environmentVariables": [
+        {
+          "name": "HN_CONCURRENCY_LIMIT",
+          "description": "Max concurrent HTTP requests for batch item fetches (1–50).",
+          "format": "string",
+          "isRequired": false,
+          "default": "10"
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",
