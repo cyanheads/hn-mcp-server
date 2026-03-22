@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3] — 2026-03-21
+
+### Changed
+
+- Bumped `@cyanheads/mcp-ts-core` from `^0.1.23` to `^0.1.25`
+- Added publishing instructions to `CLAUDE.md` agent protocol
+
 ## [0.1.2] — 2026-03-21
 
 ### Changed
