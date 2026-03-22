@@ -30,8 +30,6 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 - **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. Plain `Error` is fine; the framework catches, classifies, and formats. Use error factories (`notFound()`, `validationError()`, etc.) when the error code matters.
 - **Use `ctx.log`** for request-scoped logging. No `console` calls.
-- **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
-- **Check `ctx.elicit` / `ctx.sample`** for presence before calling.
 - **Secrets in env vars only** — never hardcoded.
 
 ---
@@ -42,63 +40,36 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { getHnService, filterLiveItems, normalizeUrl, stripHtml } from '@/services/hn/hn-service.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
+export const getStories = tool('get_stories', {
+  description: 'Fetch stories from an HN feed (top, new, best, ask, show, jobs).',
   annotations: { readOnlyHint: true },
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    feed: z.enum(['top', 'new', 'best', 'ask', 'show', 'jobs']).describe('Which HN feed to fetch.'),
+    count: z.number().min(1).max(100).default(30).describe('Number of stories to return.'),
+    offset: z.number().min(0).default(0).describe('Number of stories to skip for pagination.'),
   }),
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    stories: z.array(z.object({
+      id: z.number().describe('Item ID.'),
+      title: z.string().describe('Story title.'),
+      // ...
+    })).describe('Stories from the feed.'),
+    feed: z.string().describe('Which feed was fetched.'),
+    total: z.number().describe('Total items in the feed.'),
   }),
-  auth: ['inventory:read'],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const hn = getHnService();
+    const feedIds = await hn.fetchFeed(input.feed);
+    const sliced = feedIds.slice(input.offset, input.offset + input.count);
+    const items = filterLiveItems(await hn.fetchItems(sliced));
+    ctx.log.info('Fetched stories', { feed: input.feed, count: items.length });
+    return { stories: items.map(/* ... */), feed: input.feed, total: feedIds.length };
   },
 
-  format: (result) => [{ type: 'text', text: `Found ${result.items.length} items` }],
-});
-```
-
-### Resource
-
-```ts
-import { resource, z } from '@cyanheads/mcp-ts-core';
-
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
-    if (!item) throw new Error(`Item ${params.itemId} not found`);
-    return item;
-  },
-});
-```
-
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
+  format: (result) => [{ type: 'text', text: `${result.feed} stories (${result.stories.length})` }],
 });
 ```
 
@@ -107,14 +78,13 @@ export const reviewCode = prompt('review_code', {
 ```ts
 // src/config/server-config.ts — lazy-parsed, separate from framework config
 const ServerConfigSchema = z.object({
-  myApiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
+  concurrencyLimit: z.coerce.number().min(1).max(50).default(10)
+    .describe('Max concurrent HTTP requests for batch item fetches.'),
 });
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= ServerConfigSchema.parse({
-    myApiKey: process.env.MY_API_KEY,
-    maxResults: process.env.MY_MAX_RESULTS,
+    concurrencyLimit: process.env.HN_CONCURRENCY_LIMIT,
   });
   return _config;
 }
@@ -129,13 +99,8 @@ Handlers receive a unified `ctx` object. Key properties:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
-| `ctx.elicit` | Ask user for structured input. **Check for presence first:** `if (ctx.elicit) { ... }` |
-| `ctx.sample` | Request LLM completion from the client. **Check for presence first:** `if (ctx.sample) { ... }` |
 | `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.progress` | Task progress (present when `task: true`) — `.setTotal(n)`, `.increment()`, `.update(message)`. |
 | `ctx.requestId` | Unique request ID. |
-| `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio. |
 
 ---
 
@@ -175,7 +140,10 @@ src/
       types.ts                          # HN domain types
   mcp-server/
     tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
+      get-stories.tool.ts              # Fetch stories from an HN feed
+      get-thread.tool.ts               # Get item + comment tree
+      get-user.tool.ts                 # Fetch user profile + submissions
+      search-hn.tool.ts                # Search via Algolia
 ```
 
 ---
@@ -235,6 +203,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run devcheck` | Lint + format + typecheck + security |
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting |
+| `bun run lint:mcp` | Validate MCP tool/resource definitions |
 | `bun run test` | Run tests |
 | `bun run dev:stdio` | Dev mode (stdio) |
 | `bun run dev:http` | Dev mode (HTTP) |
@@ -251,7 +220,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 // Server's own code — via path alias
-import { getMyService } from '@/services/my-domain/my-service.js';
+import { getHnService } from '@/services/hn/hn-service.js';
 ```
 
 ---
@@ -260,8 +229,8 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 
 - [ ] Zod schemas: all fields have `.describe()`
 - [ ] JSDoc `@fileoverview` + `@module` on every file
-- [ ] `ctx.log` for logging, `ctx.state` for storage
-- [ ] Handlers throw on failure — error factories or plain `Error`, no try/catch
-- [ ] Registered in `createApp()` arrays (directly or via barrel exports)
+- [ ] `ctx.log` for logging — no `console` calls
+- [ ] Handlers throw on failure — plain `Error` or error factories, no try/catch
+- [ ] Registered in `createApp()` tools array
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
 - [ ] `bun run devcheck` passes

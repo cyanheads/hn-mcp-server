@@ -1,66 +1,13 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-03-22 01:03:49
+Generated on: 2026-03-22 01:37:06
 
 ```text
 hn-mcp-server/
 ├── .claude/
-│   ├── skills/
-│   │   ├── add-prompt/
-│   │   │   └── SKILL.md
-│   │   ├── add-resource/
-│   │   │   └── SKILL.md
-│   │   ├── add-service/
-│   │   │   └── SKILL.md
-│   │   ├── add-test/
-│   │   │   └── SKILL.md
-│   │   ├── add-tool/
-│   │   │   └── SKILL.md
-│   │   ├── api-auth/
-│   │   │   └── SKILL.md
-│   │   ├── api-config/
-│   │   │   └── SKILL.md
-│   │   ├── api-context/
-│   │   │   └── SKILL.md
-│   │   ├── api-errors/
-│   │   │   └── SKILL.md
-│   │   ├── api-services/
-│   │   │   ├── references/
-│   │   │   │   ├── graph.md
-│   │   │   │   ├── llm.md
-│   │   │   │   └── speech.md
-│   │   │   └── SKILL.md
-│   │   ├── api-testing/
-│   │   │   └── SKILL.md
-│   │   ├── api-utils/
-│   │   │   ├── references/
-│   │   │   │   ├── formatting.md
-│   │   │   │   ├── parsing.md
-│   │   │   │   └── security.md
-│   │   │   └── SKILL.md
-│   │   ├── api-workers/
-│   │   │   └── SKILL.md
-│   │   ├── design-mcp-server/
-│   │   │   └── SKILL.md
-│   │   ├── devcheck/
-│   │   │   └── SKILL.md
-│   │   ├── field-test/
-│   │   │   └── SKILL.md
-│   │   ├── maintenance/
-│   │   │   └── SKILL.md
-│   │   ├── migrate-mcp-ts-template/
-│   │   │   └── SKILL.md
-│   │   ├── polish-docs-meta/
-│   │   │   ├── references/
-│   │   │   │   ├── agent-protocol.md
-│   │   │   │   ├── package-meta.md
-│   │   │   │   ├── readme.md
-│   │   │   │   └── server-json.md
-│   │   │   └── SKILL.md
-│   │   └── setup/
-│   │       └── SKILL.md
-│   └── settings.json
 ├── .vscode/
+│   ├── extensions.json
+│   └── settings.json
 ├── claude-plans/
 ├── docs/
 │   ├── design.md
@@ -132,6 +79,7 @@ hn-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── get-stories.tool.ts
+│   │           ├── get-thread.tool.test.ts
 │   │           ├── get-thread.tool.ts
 │   │           ├── get-user.tool.ts
 │   │           └── search-hn.tool.ts
@@ -141,17 +89,30 @@ hn-mcp-server/
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
+│   ├── config/
+│   │   └── server-config.test.ts
+│   ├── services/
+│   │   └── hn/
+│   │       └── hn-service.test.ts
+│   └── tools/
+│       ├── get-stories.tool.test.ts
+│       ├── get-thread.tool.test.ts
+│       ├── get-user.tool.test.ts
+│       └── search-hn.tool.test.ts
 ├── .env.example
 ├── .gitignore
 ├── biome.json
 ├── bun.lock
+├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
+├── LICENSE
 ├── package.json
+├── README.md
 ├── server.json
 ├── tsconfig.build.json
-├── tsconfig.build.tsbuildinfo
 ├── tsconfig.json
 └── vitest.config.ts
 ```
