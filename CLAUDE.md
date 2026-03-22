@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** hn-mcp-server
-**Version:** 0.1.1
+**Version:** 0.1.2
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -221,6 +221,23 @@ import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 // Server's own code — via path alias
 import { getHnService } from '@/services/hn/hn-service.js';
+```
+
+---
+
+## Publishing
+
+After version bump and final commit:
+
+```bash
+bun publish --access public
+
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t ghcr.io/cyanheads/hn-mcp-server:<version> \
+  -t ghcr.io/cyanheads/hn-mcp-server:latest \
+  --push .
+
+mcp-publisher publish
 ```
 
 ---
