@@ -6,14 +6,14 @@
     "url": "https://github.com/cyanheads/hn-mcp-server",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "hn-mcp-server",
+      "identifier": "@cyanheads/hn-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "packageArguments": [
         {
           "type": "positional",
@@ -47,9 +47,9 @@
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "hn-mcp-server",
+      "identifier": "@cyanheads/hn-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "packageArguments": [
         {
           "type": "positional",

@@ -1,11 +1,11 @@
 <div align="center">
-  <h1>hn-mcp-server</h1>
+  <h1>@cyanheads/hn-mcp-server</h1>
   <p><b>MCP server for Hacker News. Feeds, threaded discussions, user profiles, and full-text search via the HN Firebase and Algolia APIs. Runs over stdio or HTTP.</b></p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun->=1.2.0-f9f1e1.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun->=1.2.0-f9f1e1.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -89,7 +89,7 @@ Add to your MCP client config (e.g., `claude_desktop_config.json`):
     "hn-mcp-server": {
       "type": "stdio",
       "command": "bunx",
-      "args": ["hn-mcp-server@latest"]
+      "args": ["@cyanheads/hn-mcp-server@latest"]
     }
   }
 }
@@ -103,7 +103,7 @@ Or with npx:
     "hn-mcp-server": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "hn-mcp-server"]
+      "args": ["-y", "@cyanheads/hn-mcp-server"]
     }
   }
 }

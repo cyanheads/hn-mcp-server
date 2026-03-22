@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.1] — 2026-03-21
+
+### Changed
+
+- Renamed package from `hn-mcp-server` to `@cyanheads/hn-mcp-server` (scoped npm package)
+- Bumped `@cyanheads/mcp-ts-core` from `^0.1.22` to `^0.1.23`
+- Added `@hono/otel` dependency for OpenTelemetry integration
+- Dockerfile now conditionally installs OpenTelemetry peer dependencies via `OTEL_ENABLED` build arg (defaults to true)
+- Updated `server.json` npm identifiers to scoped package name
+- Updated README install commands to use scoped package name
+
 ## [0.1.0] — 2026-03-21
 
 Initial release.
