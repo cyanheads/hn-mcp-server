@@ -105,7 +105,7 @@ export const searchHn = tool('search_hn', {
       hits,
       totalHits: result.nbHits,
       page: result.page,
-      totalPages: result.nbPages,
+      totalPages: Math.ceil(result.nbHits / input.count),
       query: input.query,
     };
   },
