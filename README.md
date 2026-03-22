@@ -9,6 +9,12 @@
 
 </div>
 
+<div align="center">
+
+**Public Hosted Server:** [https://hn.caseyjhand.com/mcp](https://hn.caseyjhand.com/mcp)
+
+</div>
+
 ---
 
 ## Tools
@@ -79,7 +85,22 @@ HN-specific:
 
 ## Getting Started
 
-### MCP Client Config
+### Public Hosted Instance
+
+A public instance is available at `https://hn.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "hn": {
+      "type": "streamable-http",
+      "url": "https://hn.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+### Self-Hosted / Local
 
 Add to your MCP client config (e.g., `claude_desktop_config.json`):
 
