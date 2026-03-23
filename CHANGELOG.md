@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.5] — 2026-03-23
+
+### Changed
+
+- Renamed all tools with `hn_` prefix for namespacing: `get_stories` → `hn_get_stories`, `get_thread` → `hn_get_thread`, `get_user` → `hn_get_user`, `search_hn` → `hn_search_content`
+- Renamed `search-hn.tool.ts` → `search-content.tool.ts` (and corresponding test) to match new tool name
+- Updated cross-reference descriptions in tool schemas to use new prefixed names
+- Updated README, CLAUDE.md, and test suites with new tool names
+
 ## [0.1.4] — 2026-03-23
 
 ### Changed

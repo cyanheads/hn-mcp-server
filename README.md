@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/hn-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/hn-mcp-server) [![Version](https://img.shields.io/badge/Version-0.1.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun->=1.2.0-f9f1e1.svg?style=flat-square)](https://bun.sh/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/hn-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/hn-mcp-server) [![Version](https://img.shields.io/badge/Version-0.1.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun->=1.2.0-f9f1e1.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -25,12 +25,12 @@ Four read-only tools for accessing Hacker News data:
 
 | Tool Name | Description |
 |:----------|:------------|
-| `get_stories` | Fetch stories from an HN feed (top, new, best, ask, show, jobs) with pagination. |
-| `get_thread` | Get an item and its comment tree as a threaded discussion with depth/count controls. |
-| `get_user` | Fetch a user profile with karma, about, and optionally their recent submissions. |
-| `search_hn` | Search stories and comments via Algolia with type, author, date, and score filters. |
+| `hn_get_stories` | Fetch stories from an HN feed (top, new, best, ask, show, jobs) with pagination. |
+| `hn_get_thread` | Get an item and its comment tree as a threaded discussion with depth/count controls. |
+| `hn_get_user` | Fetch a user profile with karma, about, and optionally their recent submissions. |
+| `hn_search_content` | Search stories and comments via Algolia with type, author, date, and score filters. |
 
-### `get_stories`
+### `hn_get_stories`
 
 Fetch stories from any HN feed with pagination support.
 
@@ -40,7 +40,7 @@ Fetch stories from any HN feed with pagination support.
 
 ---
 
-### `get_thread`
+### `hn_get_thread`
 
 Retrieve an item and its full comment tree via ranked breadth-first traversal.
 
@@ -51,7 +51,7 @@ Retrieve an item and its full comment tree via ranked breadth-first traversal.
 
 ---
 
-### `get_user`
+### `hn_get_user`
 
 Fetch a user profile with optional recent submission resolution.
 
@@ -61,7 +61,7 @@ Fetch a user profile with optional recent submission resolution.
 
 ---
 
-### `search_hn`
+### `hn_search_content`
 
 Full-text search via the Algolia HN Search API.
 

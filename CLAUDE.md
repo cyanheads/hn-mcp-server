@@ -42,7 +42,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getHnService, filterLiveItems, normalizeUrl, stripHtml } from '@/services/hn/hn-service.js';
 
-export const getStories = tool('get_stories', {
+export const getStories = tool('hn_get_stories', {
   description: 'Fetch stories from an HN feed (top, new, best, ask, show, jobs).',
   annotations: { readOnlyHint: true },
   input: z.object({
@@ -140,10 +140,10 @@ src/
       types.ts                          # HN domain types
   mcp-server/
     tools/definitions/
-      get-stories.tool.ts              # Fetch stories from an HN feed
-      get-thread.tool.ts               # Get item + comment tree
-      get-user.tool.ts                 # Fetch user profile + submissions
-      search-hn.tool.ts                # Search via Algolia
+      get-stories.tool.ts              # hn_get_stories — Fetch stories from an HN feed
+      get-thread.tool.ts               # hn_get_thread — Get item + comment tree
+      get-user.tool.ts                 # hn_get_user — Fetch user profile + submissions
+      search-content.tool.ts           # hn_search_content — Search via Algolia
 ```
 
 ---
@@ -153,7 +153,7 @@ src/
 | What | Convention | Example |
 |:-----|:-----------|:--------|
 | Files | kebab-case with suffix | `search-docs.tool.ts` |
-| Tool/resource/prompt names | snake_case | `search_docs` |
+| Tool/resource/prompt names | snake_case with `hn_` prefix | `hn_search_content` |
 | Directories | kebab-case | `src/services/doc-search/` |
 | Descriptions | Single string or template literal, no `+` concatenation | `'Search items by query and filter.'` |
 

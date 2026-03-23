@@ -1,6 +1,6 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-03-22 01:37:06
+Generated on: 2026-03-23 17:38:11
 
 ```text
 hn-mcp-server/
@@ -79,10 +79,9 @@ hn-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── get-stories.tool.ts
-│   │           ├── get-thread.tool.test.ts
 │   │           ├── get-thread.tool.ts
 │   │           ├── get-user.tool.ts
-│   │           └── search-hn.tool.ts
+│   │           └── search-content.tool.ts
 │   ├── services/
 │   │   └── hn/
 │   │       ├── hn-service.ts
@@ -98,7 +97,7 @@ hn-mcp-server/
 │       ├── get-stories.tool.test.ts
 │       ├── get-thread.tool.test.ts
 │       ├── get-user.tool.test.ts
-│       └── search-hn.tool.test.ts
+│       └── search-content.tool.test.ts
 ├── .env.example
 ├── .gitignore
 ├── biome.json
