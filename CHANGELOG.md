@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.4] — 2026-03-23
+
+### Changed
+
+- Bumped `@cyanheads/mcp-ts-core` from `^0.1.25` to `^0.1.28`
+- Bumped `typescript` from `^5.9.3` to `^6.0.2`
+- Bumped `vitest` from `^4.1.0` to `^4.1.1`
+- Added `remotes` entry to `server.json` with public streamable-http URL
+- Simplified `tsconfig.json`: removed `baseUrl`, updated path alias to relative form
+
 ## [0.1.3] — 2026-03-21
 
 ### Changed
