@@ -11,7 +11,7 @@ import {
   stripHtml,
 } from '@/services/hn/hn-service.js';
 
-export const getStories = tool('get_stories', {
+export const getStories = tool('hn_get_stories', {
   description:
     'Fetch stories from an HN feed (top, new, best, ask, show, jobs). Returns enriched story objects with title, URL, score, author, and comment count.',
   annotations: { readOnlyHint: true },
@@ -41,7 +41,7 @@ export const getStories = tool('get_stories', {
     stories: z
       .array(
         z.object({
-          id: z.number().describe('Item ID — use with get_thread to read comments.'),
+          id: z.number().describe('Item ID — use with hn_get_thread to read comments.'),
           title: z.string().describe('Story title.'),
           url: z.string().optional().describe('External link URL. Absent for Ask HN / text posts.'),
           score: z.number().describe('Upvote count.'),
@@ -51,7 +51,7 @@ export const getStories = tool('get_stories', {
           text: z
             .string()
             .optional()
-            .describe('Body text for Ask HN / text posts. Use get_thread for full discussion.'),
+            .describe('Body text for Ask HN / text posts. Use hn_get_thread for full discussion.'),
           type: z.string().describe('Item type (story, job).'),
         }),
       )

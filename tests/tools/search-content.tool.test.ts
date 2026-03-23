@@ -1,6 +1,6 @@
 /**
- * @fileoverview Tests for the search_hn tool — handler, format, and input validation.
- * @module mcp-server/tools/definitions/search-hn.tool.test
+ * @fileoverview Tests for the hn_search_content tool — handler, format, and input validation.
+ * @module mcp-server/tools/definitions/search-content.tool.test
  */
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
@@ -13,7 +13,7 @@ vi.mock('@/services/hn/hn-service.js', () => ({
   normalizeUrl: vi.fn((url?: string | null) => url?.trim() || undefined),
 }));
 
-import { searchHn } from '@/mcp-server/tools/definitions/search-hn.tool.js';
+import { searchHn } from '@/mcp-server/tools/definitions/search-content.tool.js';
 import { getHnService, stripHtml } from '@/services/hn/hn-service.js';
 
 const mockSearch = vi.fn<(...args: unknown[]) => Promise<AlgoliaResponse>>();
@@ -71,7 +71,7 @@ afterEach(() => {
 // Handler
 // ---------------------------------------------------------------------------
 
-describe('search_hn handler', () => {
+describe('hn_search_content handler', () => {
   const ctx = createMockContext();
 
   it('maps Algolia response correctly', async () => {
@@ -223,7 +223,7 @@ describe('search_hn handler', () => {
 // Format
 // ---------------------------------------------------------------------------
 
-describe('search_hn format', () => {
+describe('hn_search_content format', () => {
   it('shows no-results message for empty hits', () => {
     const content = searchHn.format!({
       hits: [],
@@ -379,7 +379,7 @@ describe('search_hn format', () => {
 // Input validation
 // ---------------------------------------------------------------------------
 
-describe('search_hn input validation', () => {
+describe('hn_search_content input validation', () => {
   it('requires query', () => {
     expect(() => searchHn.input.parse({})).toThrow();
   });

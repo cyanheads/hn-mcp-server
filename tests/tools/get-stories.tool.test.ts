@@ -1,5 +1,5 @@
 /**
- * @fileoverview Tests for the get_stories tool.
+ * @fileoverview Tests for the hn_get_stories tool.
  * @module mcp-server/tools/definitions/get-stories.tool.test
  */
 

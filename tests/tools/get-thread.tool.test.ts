@@ -1,5 +1,5 @@
 /**
- * @fileoverview Tests for the get_thread tool — item lookup and ranked BFS comment traversal.
+ * @fileoverview Tests for the hn_get_thread tool — item lookup and ranked BFS comment traversal.
  * @module mcp-server/tools/definitions/get-thread.tool.test
  */
 
@@ -82,7 +82,7 @@ function parse(overrides: Record<string, unknown> = {}) {
 // Handler tests
 // ---------------------------------------------------------------------------
 
-describe('get_thread handler', () => {
+describe('hn_get_thread handler', () => {
   let hn: ReturnType<typeof createMockHnService>;
   let ctx: ReturnType<typeof createMockContext>;
 
@@ -202,7 +202,7 @@ describe('get_thread handler', () => {
 // Format tests
 // ---------------------------------------------------------------------------
 
-describe('get_thread format', () => {
+describe('hn_get_thread format', () => {
   const format = getThread.format!;
 
   it('formats story with no comments', () => {
@@ -302,7 +302,7 @@ describe('get_thread format', () => {
 // Input validation tests
 // ---------------------------------------------------------------------------
 
-describe('get_thread input validation', () => {
+describe('hn_get_thread input validation', () => {
   it('requires itemId', () => {
     expect(() => getThread.input.parse({})).toThrow();
   });

@@ -1,5 +1,5 @@
 /**
- * @fileoverview Tests for the get_user tool.
+ * @fileoverview Tests for the hn_get_user tool.
  * @module mcp-server/tools/definitions/get-user.tool.test
  */
 
@@ -83,7 +83,7 @@ function parse(overrides: Record<string, unknown> = {}) {
 // Handler
 // ---------------------------------------------------------------------------
 
-describe('get_user handler', () => {
+describe('hn_get_user handler', () => {
   it('throws when user is not found', async () => {
     const ctx = createMockContext();
     mockFetchUser.mockResolvedValue(null);
@@ -169,7 +169,7 @@ describe('get_user handler', () => {
 // Format
 // ---------------------------------------------------------------------------
 
-describe('get_user format', () => {
+describe('hn_get_user format', () => {
   it('renders id, karma, and join date', () => {
     const joined = new Date(1600000000 * 1000).toLocaleDateString('en-US', {
       month: 'short',
@@ -217,7 +217,7 @@ describe('get_user format', () => {
 // Input validation
 // ---------------------------------------------------------------------------
 
-describe('get_user input validation', () => {
+describe('hn_get_user input validation', () => {
   it('requires username', () => {
     expect(() => getUser.input.parse({})).toThrow();
   });

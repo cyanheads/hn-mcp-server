@@ -1,12 +1,12 @@
 /**
  * @fileoverview Search Hacker News via Algolia with filtering and pagination.
- * @module mcp-server/tools/definitions/search-hn.tool
+ * @module mcp-server/tools/definitions/search-content.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getHnService, normalizeUrl, stripHtml } from '@/services/hn/hn-service.js';
 
-export const searchHn = tool('search_hn', {
+export const searchHn = tool('hn_search_content', {
   description:
     'Search Hacker News stories and comments via Algolia. Supports filtering by content type, author, date range, and minimum points.',
   annotations: { readOnlyHint: true },
@@ -22,7 +22,7 @@ export const searchHn = tool('search_hn', {
       .string()
       .optional()
       .describe(
-        `Filter results to a specific author. Useful for finding a user's posts on a topic (get_user only shows recent submissions).`,
+        `Filter results to a specific author. Useful for finding a user's posts on a topic (hn_get_user only shows recent submissions).`,
       ),
     sort: z
       .enum(['relevance', 'date'])
@@ -53,7 +53,7 @@ export const searchHn = tool('search_hn', {
     hits: z
       .array(
         z.object({
-          id: z.number().describe('HN item ID — use with get_thread to read the discussion.'),
+          id: z.number().describe('HN item ID — use with hn_get_thread to read the discussion.'),
           title: z.string().optional().describe('Story title (present for stories).'),
           url: z.string().optional().describe('External link URL.'),
           author: z.string().describe('Author username.'),

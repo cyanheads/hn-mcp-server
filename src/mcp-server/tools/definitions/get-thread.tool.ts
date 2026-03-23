@@ -6,7 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getHnService, normalizeUrl, stripHtml } from '@/services/hn/hn-service.js';
 
-export const getThread = tool('get_thread', {
+export const getThread = tool('hn_get_thread', {
   description:
     'Get an item and its comment tree as a threaded discussion. Recursively resolves child comments. With depth 0, returns just the item — doubles as an item lookup.',
   annotations: { readOnlyHint: true },

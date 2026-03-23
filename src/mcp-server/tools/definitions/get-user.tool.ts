@@ -11,7 +11,7 @@ import {
   stripHtml,
 } from '@/services/hn/hn-service.js';
 
-export const getUser = tool('get_user', {
+export const getUser = tool('hn_get_user', {
   description:
     'Get an HN user profile with karma, about, and optionally their most recent submissions resolved into full items.',
   annotations: { readOnlyHint: true },
@@ -45,7 +45,7 @@ export const getUser = tool('get_user', {
     submissions: z
       .array(
         z.object({
-          id: z.number().describe('Item ID — use with get_thread to read comments.'),
+          id: z.number().describe('Item ID — use with hn_get_thread to read comments.'),
           type: z.string().describe('Item type (story, comment, job, poll).'),
           title: z.string().optional().describe('Title (stories/jobs/polls).'),
           url: z.string().optional().describe('External link URL.'),
