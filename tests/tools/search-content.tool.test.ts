@@ -259,8 +259,9 @@ describe('hn_search_content format', () => {
     });
 
     const text = content[0]!.text;
-    expect(text).toContain('"rust" — 500 results (page 1/17)');
-    expect(text).toContain('[1] Rust is Great — alice | 200 pts | 80 comments | 2024-06-15');
+    expect(text).toContain('## "rust" — 500 results (page 1/17)');
+    expect(text).toContain('### Rust is Great');
+    expect(text).toContain('id:123 | alice | 200 pts | 80 comments | 2024-06-15');
     expect(text).toContain('https://rust.dev');
   });
 
@@ -287,12 +288,13 @@ describe('hn_search_content format', () => {
     });
 
     const text = content[0]!.text;
-    expect(text).toContain('"best language" — 42 results (page 2/2)');
-    expect(text).toContain('[1] Comment on "Ask HN: Best Language?" — bob | 10 pts | 2024-03-20');
+    expect(text).toContain('## "best language" — 42 results (page 2/2)');
+    expect(text).toContain('### Comment on "Ask HN: Best Language?"');
+    expect(text).toContain('id:456 | bob | 10 pts | story id:100 | 2024-03-20');
     expect(text).toContain('I think Rust is the best choice for systems programming.');
   });
 
-  it('truncates long text at 200 chars with "..."', () => {
+  it('renders full comment text without truncation', () => {
     const longText = 'a'.repeat(250);
     const content = searchHn.format!({
       hits: [
@@ -316,8 +318,7 @@ describe('hn_search_content format', () => {
     });
 
     const text = content[0]!.text;
-    expect(text).toContain(`${'a'.repeat(200)}...`);
-    expect(text).not.toContain('a'.repeat(201));
+    expect(text).toContain('a'.repeat(250));
   });
 
   it('header shows correct page info (1-indexed display)', () => {
@@ -369,9 +370,8 @@ describe('hn_search_content format', () => {
     });
 
     const text = content[0]!.text;
-    const lines = text.split('\n').filter((l: string) => l.trim());
-    const storyLine = lines.find((l: string) => l.includes('[1]'));
-    expect(storyLine).not.toContain('http');
+    expect(text).toContain('### Ask HN: Something');
+    expect(text).not.toContain('http');
   });
 });
 

@@ -101,13 +101,23 @@ export const getStories = tool('hn_get_stories', {
 
     const lines = result.stories.map((s, i) => {
       const rank = result.offset + i + 1;
-      const comments = s.descendants != null ? ` | ${s.descendants} comments` : '';
-      const url = s.url ? `\n    ${s.url}` : '';
-      return `[${rank}] ${s.title} (${s.score} pts${comments})${url}`;
+      const date = new Date(s.time * 1000).toISOString().slice(0, 10);
+      const meta = [
+        `${s.score} pts`,
+        `by ${s.by}`,
+        s.descendants != null ? `${s.descendants} comments` : null,
+        date,
+        `id:${s.id}`,
+      ]
+        .filter(Boolean)
+        .join(' | ');
+      const url = s.url ? `\n${s.url}` : '';
+      const text = s.text ? `\n${s.text}` : '';
+      return `[${rank}] ${s.title}\n${meta}${url}${text}`;
     });
 
     const end = result.offset + result.stories.length;
-    const header = `${result.feed} stories (${result.offset + 1}–${end} of ${result.total})`;
+    const header = `## ${result.feed} stories (${result.offset + 1}–${end} of ${result.total})${result.hasMore ? ' — more available' : ''}`;
     return [{ type: 'text' as const, text: `${header}\n\n${lines.join('\n\n')}` }];
   },
 });

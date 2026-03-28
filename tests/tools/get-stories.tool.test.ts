@@ -225,8 +225,10 @@ describe('getStories', () => {
 
       expect(blocks).toHaveLength(1);
       const text = blocks[0]!.text;
-      expect(text).toContain('top stories (1–1 of 100)');
-      expect(text).toContain('[1] Test Story (200 pts | 55 comments)');
+      expect(text).toContain('## top stories (1–1 of 100)');
+      expect(text).toContain('[1] Test Story');
+      expect(text).toContain('200 pts | by author | 55 comments');
+      expect(text).toContain('id:1');
       expect(text).toContain('https://example.com');
     });
 
@@ -285,7 +287,9 @@ describe('getStories', () => {
       });
 
       const text = blocks[0]!.text;
-      expect(text).toContain('[1] Job Post (10 pts)');
+      expect(text).toContain('[1] Job Post');
+      expect(text).toContain('10 pts | by employer');
+      expect(text).toContain('id:1');
       expect(text).not.toContain('comments');
     });
 
@@ -309,8 +313,9 @@ describe('getStories', () => {
       });
 
       const text = blocks[0]!.text;
-      expect(text).toContain('[1] Ask HN: Something (75 pts | 30 comments)');
-      expect(text).not.toMatch(/\n {4}https?:/);
+      expect(text).toContain('[1] Ask HN: Something');
+      expect(text).toContain('75 pts | by curious | 30 comments');
+      expect(text).not.toMatch(/\nhttps?:/);
     });
   });
 });

@@ -179,7 +179,11 @@ describe('hn_get_user format', () => {
       user: { id: 'pg', karma: 1000, created: 1600000000, totalSubmissions: 0 },
     });
 
-    expect(blocks).toEqual([{ type: 'text', text: `pg | 1000 karma | joined ${joined}` }]);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('## pg');
+    expect(text).toContain('**Karma:** 1000');
+    expect(text).toContain(`**Joined:** ${joined}`);
+    expect(text).toContain('**Total submissions:** 0');
   });
 
   it('includes about text when present', () => {
@@ -207,9 +211,9 @@ describe('hn_get_user format', () => {
     });
     const text = (blocks[0] as { text: string }).text;
 
-    expect(text).toContain('Recent submissions:');
-    expect(text).toContain('1. First Post (42 pts, 10 comments)');
-    expect(text).toContain('2. [comment]');
+    expect(text).toContain('### Recent submissions');
+    expect(text).toContain('**First Post** — id:1 | story | 42 pts | 10 comments');
+    expect(text).toContain('**[comment]** — id:2 | comment');
   });
 });
 

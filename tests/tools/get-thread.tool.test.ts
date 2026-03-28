@@ -251,9 +251,10 @@ describe('hn_get_thread format', () => {
 
     const blocks = format(result as Parameters<typeof format>[0]);
     const text = blocks[0].text;
-    expect(text).toContain('[bob]');
+    expect(text).toContain('**bob** (id:10');
+    expect(text).toContain('1 replies');
     expect(text).toContain('Top-level');
-    expect(text).toContain('  [carol]');
+    expect(text).toContain('**carol** (id:20');
     expect(text).toContain('  Nested reply');
   });
 
@@ -283,7 +284,7 @@ describe('hn_get_thread format', () => {
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
-    expect(blocks[0].text).toContain('(1/500 comments loaded)');
+    expect(blocks[0].text).toContain('(1/500 comments loaded — increase maxComments or depth for more)');
   });
 
   it('formats comment as root with "Comment by author"', () => {

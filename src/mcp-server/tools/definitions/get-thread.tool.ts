@@ -152,33 +152,40 @@ export const getThread = tool('hn_get_thread', {
     const { item, comments, totalLoaded, totalAvailable } = result;
     const lines: string[] = [];
 
-    // Root item summary
+    // Root item
     const title = item.title ?? `Comment by ${item.by ?? 'unknown'}`;
+    const date = item.time ? new Date(item.time * 1000).toISOString().slice(0, 10) : '';
     const meta = [
+      `id:${item.id}`,
       item.score != null ? `${item.score} pts` : null,
       item.by ? `by ${item.by}` : null,
       item.descendants != null ? `${item.descendants} comments` : null,
+      date,
     ]
       .filter(Boolean)
       .join(' | ');
-    lines.push(`${title}${meta ? ` | ${meta}` : ''}`);
+    lines.push(`## ${title}\n${meta}`);
     if (item.url) lines.push(item.url);
     if (item.text) lines.push(item.text);
 
     // Comment tree
     if (comments.length > 0) {
-      lines.push('\n---');
+      lines.push('\n---\n');
       for (const c of comments) {
         const indent = '  '.repeat(c.depth);
         const author = c.by ?? '[deleted]';
-        lines.push(`${indent}[${author}]`);
+        const cDate = c.time
+          ? new Date(c.time * 1000).toISOString().slice(0, 16).replace('T', ' ')
+          : '';
+        const replies = c.childCount > 0 ? ` | ${c.childCount} replies` : '';
+        lines.push(`${indent}**${author}** (id:${c.id}${replies} | ${cDate})`);
         if (c.text) lines.push(`${indent}${c.text.replace(/\n/g, `\n${indent}`)}`);
       }
     }
 
     const summary =
       totalAvailable != null && totalLoaded < totalAvailable
-        ? `\n\n(${totalLoaded}/${totalAvailable} comments loaded)`
+        ? `\n\n(${totalLoaded}/${totalAvailable} comments loaded — increase maxComments or depth for more)`
         : '';
 
     return [{ type: 'text' as const, text: lines.join('\n') + summary }];

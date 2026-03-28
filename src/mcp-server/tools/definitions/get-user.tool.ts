@@ -101,21 +101,30 @@ export const getUser = tool('hn_get_user', {
       month: 'short',
       year: 'numeric',
     });
-    const lines: string[] = [`${user.id} | ${user.karma} karma | joined ${joined}`];
+    const lines: string[] = [
+      `## ${user.id}`,
+      `**Karma:** ${user.karma} | **Joined:** ${joined} | **Total submissions:** ${user.totalSubmissions}`,
+    ];
 
-    if (user.about) lines.push(user.about);
+    if (user.about) lines.push(`\n${user.about}`);
 
     if (result.submissions?.length) {
-      lines.push('\nRecent submissions:');
-      for (const [i, s] of result.submissions.entries()) {
+      lines.push('\n### Recent submissions');
+      for (const s of result.submissions) {
         const title = s.title ?? `[${s.type}]`;
+        const date = s.time ? new Date(s.time * 1000).toISOString().slice(0, 10) : '';
         const meta = [
+          `id:${s.id}`,
+          s.type,
           s.score != null ? `${s.score} pts` : null,
           s.descendants != null ? `${s.descendants} comments` : null,
+          date,
         ]
           .filter(Boolean)
-          .join(', ');
-        lines.push(`${i + 1}. ${title}${meta ? ` (${meta})` : ''}`);
+          .join(' | ');
+        lines.push(`- **${title}** — ${meta}`);
+        if (s.url) lines.push(`  ${s.url}`);
+        if (s.text) lines.push(`  ${s.text}`);
       }
     }
 

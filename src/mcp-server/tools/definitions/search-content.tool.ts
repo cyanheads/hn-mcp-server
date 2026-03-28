@@ -115,10 +115,10 @@ export const searchHn = tool('hn_search_content', {
       return [{ type: 'text' as const, text: `"${result.query}" — no results` }];
     }
 
-    const lines = result.hits.map((h, i) => {
-      const num = i + 1;
+    const lines = result.hits.map((h) => {
       if (h.title) {
         const meta = [
+          `id:${h.id}`,
           h.author,
           h.points != null ? `${h.points} pts` : null,
           h.numComments != null ? `${h.numComments} comments` : null,
@@ -126,20 +126,25 @@ export const searchHn = tool('hn_search_content', {
         ]
           .filter(Boolean)
           .join(' | ');
-        const url = h.url ? `\n    ${h.url}` : '';
-        return `[${num}] ${h.title} — ${meta}${url}`;
+        const url = h.url ? `\n${h.url}` : '';
+        const text = h.text ? `\n${h.text}` : '';
+        return `### ${h.title}\n${meta}${url}${text}`;
       }
       // Comment result
-      const meta = [h.author, h.points != null ? `${h.points} pts` : null, h.createdAt.slice(0, 10)]
+      const meta = [
+        `id:${h.id}`,
+        h.author,
+        h.points != null ? `${h.points} pts` : null,
+        h.storyId != null ? `story id:${h.storyId}` : null,
+        h.createdAt.slice(0, 10),
+      ]
         .filter(Boolean)
         .join(' | ');
-      const preview = h.text
-        ? `\n    ${h.text.slice(0, 200)}${h.text.length > 200 ? '...' : ''}`
-        : '';
-      return `[${num}] Comment on "${h.storyTitle ?? 'unknown'}" — ${meta}${preview}`;
+      const text = h.text ? `\n${h.text}` : '';
+      return `### Comment on "${h.storyTitle ?? 'unknown'}"\n${meta}${text}`;
     });
 
-    const header = `"${result.query}" — ${result.totalHits} results (page ${result.page + 1}/${result.totalPages})`;
+    const header = `## "${result.query}" — ${result.totalHits} results (page ${result.page + 1}/${result.totalPages})`;
     return [{ type: 'text' as const, text: `${header}\n\n${lines.join('\n\n')}` }];
   },
 });
