@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.7] — 2026-03-28
+
+### Changed
+
+- Bumped `@cyanheads/mcp-ts-core` from `^0.2.4` to `^0.2.6`
+
 ## [0.1.6] — 2026-03-28
 
 ### Changed
