@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** hn-mcp-server
-**Version:** 0.1.4
+**Version:** 0.1.6
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -69,7 +69,15 @@ export const getStories = tool('hn_get_stories', {
     return { stories: items.map(/* ... */), feed: input.feed, total: feedIds.length };
   },
 
-  format: (result) => [{ type: 'text', text: `${result.feed} stories (${result.stories.length})` }],
+  // format() populates MCP content[] — the ONLY field most LLM clients forward to the model.
+  // structuredContent (from output) is for programmatic use. Make format() content-complete.
+  format: (result) => {
+    const lines = result.stories.map((s) => {
+      const meta = [`${s.score} pts`, `by ${s.by}`, `id:${s.id}`].join(' | ');
+      return `### ${s.title}\n${meta}${s.url ? `\n${s.url}` : ''}`;
+    });
+    return [{ type: 'text', text: `## ${result.feed} stories\n\n${lines.join('\n\n')}` }];
+  },
 });
 ```
 
@@ -188,6 +196,8 @@ Available skills:
 | `api-testing` | createMockContext, test patterns |
 | `api-utils` | Formatting, parsing, security, pagination, scheduling |
 | `api-workers` | Cloudflare Workers runtime |
+| `report-issue-framework` | Report a framework issue to mcp-ts-core |
+| `report-issue-local` | Report a local project issue |
 
 When you complete a skill's checklist, check the boxes and add a completion timestamp at the end (e.g., `Completed: 2026-03-11`).
 

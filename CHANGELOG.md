@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.6] — 2026-03-28
+
+### Changed
+
+- Bumped `@cyanheads/mcp-ts-core` from `^0.1.28` to `^0.2.4`
+- Bumped `@biomejs/biome` from `^2.4.8` to `^2.4.9`
+- Bumped `vitest` from `^4.1.1` to `^4.1.2`
+- Added `overrides` for `path-to-regexp`, `picomatch`, and `brace-expansion` (security patches)
+- Improved `format()` output across all 4 tools: markdown headers, item IDs, dates, full text rendering, and actionable hints
+- Updated test assertions to match new format output
+
+### Added
+
+- `report-issue-framework` skill for filing bugs against `@cyanheads/mcp-ts-core`
+- `report-issue-local` skill for filing bugs against this server
+- `LOGS_DIR` env var documented in README
+- GitHub repo metadata sync step in `polish-docs-meta` skill
+- Description propagation rule (package.json → README → server.json → Dockerfile)
+
 ## [0.1.5] — 2026-03-23
 
 ### Changed
