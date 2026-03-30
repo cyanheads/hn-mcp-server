@@ -284,7 +284,9 @@ describe('hn_get_thread format', () => {
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
-    expect(blocks[0].text).toContain('(1/500 comments loaded — increase maxComments or depth for more)');
+    expect(blocks[0].text).toContain(
+      '(1/500 comments loaded — increase maxComments or depth for more)',
+    );
   });
 
   it('formats comment as root with "Comment by author"', () => {

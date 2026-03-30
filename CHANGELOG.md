@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.9] — 2026-03-30
+
+### Changed
+
+- Bumped `@cyanheads/mcp-ts-core` from `^0.2.7` to `^0.2.10`
+- Bumped `@biomejs/biome` from `^2.4.9` to `^2.4.10`
+- Updated author field and added funding metadata in `package.json`
+- Updated `add-tool` skill (v1.1): expanded tool response design guidance — partial success, batch input, format function content-completeness, error classification
+- Updated `add-resource` skill (v1.1): added tool coverage guidance for resource definitions
+- Updated `design-mcp-server` skill (v2.1): live API probing, tool-first design philosophy, batch input design, error design patterns, resilience planning, naming conventions
+
+### Fixed
+
+- Formatting fix in `get-thread.tool.test.ts` assertion
+
 ## [0.1.8] — 2026-03-28
 
 ### Changed
