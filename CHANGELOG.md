@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.2.0] — 2026-04-19
+
+### Added
+
+- Upstream resilience for HN Firebase and Algolia calls: `withRetry` + `fetchWithTimeout` wrap the full fetch-and-parse pipeline in `HnService`, with a 10-second per-request timeout, HTML-error-body detection (for rate-limited responses served as 200 OK), and `ctx.signal` wired through for cancellation.
+- Sparse-upstream test fixtures for `hn_get_stories` covering omitted `score`/`by`/`time`/`title` fields and verifying `format()` does not fabricate meta.
+- `add-app-tool` skill (v1.2) for scaffolding MCP App tool + UI resource pairs.
+
+### Changed
+
+- Bumped `@cyanheads/mcp-ts-core` from `^0.2.10` to `^0.4.1`.
+- Bumped `@biomejs/biome` (2.4.10 → 2.4.12), `@types/node` (25.5.0 → 25.6.0), `typescript` (6.0.2 → 6.0.3), `vitest` (4.1.2 → 4.1.4).
+- Dropped the `overrides` block (`path-to-regexp`, `picomatch`, `brace-expansion`) — fresh resolution picks up clean transitive versions and `bun audit` now reports zero vulnerabilities.
+- `HnService` methods (`fetchItem`, `fetchUser`, `fetchFeed`, `fetchItems`, `search`) now accept `ctx: Context` for correlated logs and cancellation; added a local `toRequestContext()` adapter to reconcile `exactOptionalPropertyTypes` differences between `Context` and `RequestContext`.
+- `hn_get_stories` output schema: `title`, `score`, `by`, and `time` are now optional. The handler uses conditional spreads so upstream absence is preserved instead of being fabricated into `''`, `0`, or epoch zero. `format()` falls back to `[type]` when the title is unknown and omits meta segments that would otherwise render as blank.
+- `hn_get_thread` and `hn_get_user` now throw `notFound()` for missing items/users instead of plain `Error`, giving the LLM a classified error code.
+- Algolia HTTP error paths now surface as `ServiceUnavailable` via `fetchWithTimeout` + retry instead of raw `Error`.
+- Synced project skills from `mcp-ts-core@0.4.1`: updated `add-prompt`, `add-resource`, `add-service`, `add-test`, `add-tool`, `api-testing`, `api-workers`, `design-mcp-server`, `devcheck`, `field-test`, `maintenance`, `migrate-mcp-ts-template`, `polish-docs-meta`, `setup`.
+
+### Fixed
+
+- Per-item failures inside batch `fetchItems` calls are now tolerated (logged and nulled) rather than bubbling up and failing the whole feed after retries exhaust.
+
 ## [0.1.9] — 2026-03-30
 
 ### Changed
