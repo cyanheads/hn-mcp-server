@@ -1,6 +1,6 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-03-23 17:38:11
+Generated on: 2026-04-20 00:12:27
 
 ```text
 hn-mcp-server/
@@ -19,6 +19,8 @@ hn-mcp-server/
 │   ├── lint-mcp.ts
 │   └── tree.ts
 ├── skills/
+│   ├── add-app-tool/
+│   │   └── SKILL.md
 │   ├── add-prompt/
 │   │   └── SKILL.md
 │   ├── add-resource/
@@ -69,6 +71,10 @@ hn-mcp-server/
 │   │   │   ├── package-meta.md
 │   │   │   ├── readme.md
 │   │   │   └── server-json.md
+│   │   └── SKILL.md
+│   ├── report-issue-framework/
+│   │   └── SKILL.md
+│   ├── report-issue-local/
 │   │   └── SKILL.md
 │   └── setup/
 │       └── SKILL.md
