@@ -3,11 +3,34 @@
  * @module services/hn/hn-service
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
+import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
+
 import { getServerConfig } from '@/config/server-config.js';
 import type { AlgoliaResponse, HnFeedType, HnItem, HnUser } from './types.js';
 
 const HN_API = 'https://hacker-news.firebaseio.com/v0';
 const ALGOLIA_API = 'https://hn.algolia.com/api/v1';
+const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * Project a handler Context down to a RequestContext shape for framework
+ * utilities. Runtime-safe — the framework only reads log-binding fields —
+ * but needed to reconcile exactOptionalPropertyTypes differences between
+ * Context.auth (`AuthContext | undefined`) and RequestContext.auth (`AuthContext`).
+ */
+function toRequestContext(ctx: Context): RequestContext {
+  const base: RequestContext = {
+    requestId: ctx.requestId,
+    timestamp: ctx.timestamp,
+  };
+  if (ctx.tenantId !== undefined) base.tenantId = ctx.tenantId;
+  if (ctx.traceId !== undefined) base.traceId = ctx.traceId;
+  if (ctx.spanId !== undefined) base.spanId = ctx.spanId;
+  if (ctx.auth !== undefined) base.auth = ctx.auth;
+  return base;
+}
 
 // ---------------------------------------------------------------------------
 // HTML utilities
@@ -69,6 +92,22 @@ export function filterLiveItems(items: (HnItem | null)[]): HnItem[] {
   return items.filter((item): item is HnItem => item != null && !item.deleted && !item.dead);
 }
 
+/** Detect HTML error bodies returned by upstream APIs under rate limiting or maintenance. */
+function isHtmlErrorBody(text: string): boolean {
+  return /^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text);
+}
+
+/**
+ * Parse an HN/Algolia JSON body, throwing a classified error for HTML responses
+ * served as 200 OK (common during upstream rate limiting).
+ */
+function parseJsonBody<T>(text: string, upstream: string): T {
+  if (isHtmlErrorBody(text)) {
+    throw serviceUnavailable(`${upstream} returned HTML instead of JSON — likely rate-limited.`);
+  }
+  return JSON.parse(text) as T;
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -80,38 +119,58 @@ export class HnService {
     this.concurrencyLimit = concurrencyLimit;
   }
 
-  /** Fetch a single item by ID. Returns null if missing or on error. */
-  async fetchItem(id: number): Promise<HnItem | null> {
-    try {
-      const res = await fetch(`${HN_API}/item/${id}.json`);
-      if (!res.ok) return null;
-      return (await res.json()) as HnItem | null;
-    } catch {
-      return null;
-    }
+  /** Fetch a single item by ID. Returns null when HN reports the item is missing. */
+  async fetchItem(id: number, ctx: Context): Promise<HnItem | null> {
+    const rc = toRequestContext(ctx);
+    return withRetry(
+      async () => {
+        const res = await fetchWithTimeout(`${HN_API}/item/${id}.json`, REQUEST_TIMEOUT_MS, rc, {
+          signal: ctx.signal,
+        });
+        return parseJsonBody<HnItem | null>(await res.text(), 'HN API');
+      },
+      { operation: 'hn.fetchItem', context: rc, signal: ctx.signal },
+    );
   }
 
-  /** Fetch a user profile by username. Returns null if missing or on error. */
-  async fetchUser(username: string): Promise<HnUser | null> {
-    try {
-      const res = await fetch(`${HN_API}/user/${username}.json`);
-      if (!res.ok) return null;
-      return (await res.json()) as HnUser | null;
-    } catch {
-      return null;
-    }
+  /** Fetch a user profile by username. Returns null when the user does not exist. */
+  async fetchUser(username: string, ctx: Context): Promise<HnUser | null> {
+    const rc = toRequestContext(ctx);
+    return withRetry(
+      async () => {
+        const res = await fetchWithTimeout(
+          `${HN_API}/user/${username}.json`,
+          REQUEST_TIMEOUT_MS,
+          rc,
+          { signal: ctx.signal },
+        );
+        return parseJsonBody<HnUser | null>(await res.text(), 'HN API');
+      },
+      { operation: 'hn.fetchUser', context: rc, signal: ctx.signal },
+    );
   }
 
-  /** Fetch a feed's ID array. Throws on failure. */
-  async fetchFeed(type: HnFeedType): Promise<number[]> {
+  /** Fetch a feed's ID array. Throws on upstream failure after retries. */
+  async fetchFeed(type: HnFeedType, ctx: Context): Promise<number[]> {
     const endpoint = type === 'jobs' ? 'jobstories' : `${type}stories`;
-    const res = await fetch(`${HN_API}/${endpoint}.json`);
-    if (!res.ok) throw new Error(`Failed to fetch ${type} feed: HTTP ${res.status}`);
-    return (await res.json()) as number[];
+    const rc = toRequestContext(ctx);
+    return withRetry(
+      async () => {
+        const res = await fetchWithTimeout(`${HN_API}/${endpoint}.json`, REQUEST_TIMEOUT_MS, rc, {
+          signal: ctx.signal,
+        });
+        return parseJsonBody<number[]>(await res.text(), 'HN API');
+      },
+      { operation: 'hn.fetchFeed', context: rc, signal: ctx.signal },
+    );
   }
 
-  /** Batch-fetch items with concurrency limiting. Preserves input order. */
-  async fetchItems(ids: number[]): Promise<(HnItem | null)[]> {
+  /**
+   * Batch-fetch items with concurrency limiting. Preserves input order.
+   * Per-item failures after exhausted retries are logged and yield `null`
+   * so a single bad item does not fail the whole batch.
+   */
+  async fetchItems(ids: number[], ctx: Context): Promise<(HnItem | null)[]> {
     if (ids.length === 0) return [];
 
     const results = new Array<HnItem | null>(ids.length).fill(null);
@@ -121,7 +180,15 @@ export class HnService {
       while (next < ids.length) {
         const i = next++;
         const id = ids[i];
-        if (id != null) results[i] = await this.fetchItem(id);
+        if (id == null) continue;
+        try {
+          results[i] = await this.fetchItem(id, ctx);
+        } catch (err) {
+          ctx.log.warning('Batch item fetch failed after retries', {
+            id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     };
 
@@ -130,17 +197,20 @@ export class HnService {
     return results;
   }
 
-  /** Search HN via Algolia. Throws on failure. */
-  async search(params: {
-    query: string;
-    tags?: string | undefined;
-    author?: string | undefined;
-    sort: 'relevance' | 'date';
-    dateRange?: { start?: string | undefined; end?: string | undefined } | undefined;
-    minPoints?: number | undefined;
-    count: number;
-    page: number;
-  }): Promise<AlgoliaResponse> {
+  /** Search HN via Algolia. Throws on upstream failure after retries. */
+  search(
+    params: {
+      query: string;
+      tags?: string | undefined;
+      author?: string | undefined;
+      sort: 'relevance' | 'date';
+      dateRange?: { start?: string | undefined; end?: string | undefined } | undefined;
+      minPoints?: number | undefined;
+      count: number;
+      page: number;
+    },
+    ctx: Context,
+  ): Promise<AlgoliaResponse> {
     const endpoint = params.sort === 'date' ? 'search_by_date' : 'search';
     const url = new URL(`${ALGOLIA_API}/${endpoint}`);
 
@@ -167,9 +237,16 @@ export class HnService {
     }
     if (numericFilters.length) url.searchParams.set('numericFilters', numericFilters.join(','));
 
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Algolia search failed: HTTP ${res.status}`);
-    return (await res.json()) as AlgoliaResponse;
+    const rc = toRequestContext(ctx);
+    return withRetry(
+      async () => {
+        const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS, rc, {
+          signal: ctx.signal,
+        });
+        return parseJsonBody<AlgoliaResponse>(await res.text(), 'Algolia');
+      },
+      { operation: 'hn.search', context: rc, signal: ctx.signal },
+    );
   }
 }
 

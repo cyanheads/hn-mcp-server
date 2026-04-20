@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { notFound } from '@cyanheads/mcp-ts-core/errors';
 import {
   filterLiveItems,
   getHnService,
@@ -63,8 +64,8 @@ export const getUser = tool('hn_get_user', {
 
   async handler(input, ctx) {
     const hn = getHnService();
-    const user = await hn.fetchUser(input.username);
-    if (!user) throw new Error(`User ${input.username} not found`);
+    const user = await hn.fetchUser(input.username, ctx);
+    if (!user) throw notFound(`User ${input.username} not found`, { username: input.username });
 
     const profile = {
       id: user.id,
@@ -76,18 +77,18 @@ export const getUser = tool('hn_get_user', {
 
     const submissions =
       input.includeSubmissions && user.submitted?.length
-        ? filterLiveItems(await hn.fetchItems(user.submitted.slice(0, input.submissionCount))).map(
-            (item) => ({
-              id: item.id,
-              type: item.type,
-              title: item.title ? stripHtml(item.title) : undefined,
-              url: normalizeUrl(item.url),
-              text: item.text ? stripHtml(item.text) : undefined,
-              score: item.score,
-              time: item.time,
-              descendants: item.descendants,
-            }),
-          )
+        ? filterLiveItems(
+            await hn.fetchItems(user.submitted.slice(0, input.submissionCount), ctx),
+          ).map((item) => ({
+            id: item.id,
+            type: item.type,
+            title: item.title ? stripHtml(item.title) : undefined,
+            url: normalizeUrl(item.url),
+            text: item.text ? stripHtml(item.text) : undefined,
+            score: item.score,
+            time: item.time,
+            descendants: item.descendants,
+          }))
         : undefined;
 
     ctx.log.info('Fetched user', { username: input.username, submissions: submissions?.length });

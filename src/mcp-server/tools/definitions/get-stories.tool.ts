@@ -42,17 +42,29 @@ export const getStories = tool('hn_get_stories', {
       .array(
         z.object({
           id: z.number().describe('Item ID — use with hn_get_thread to read comments.'),
-          title: z.string().describe('Story title.'),
+          type: z.string().describe('Item type (story, job).'),
+          title: z
+            .string()
+            .optional()
+            .describe('Story title when provided by HN. Omitted when unknown.'),
           url: z.string().optional().describe('External link URL. Absent for Ask HN / text posts.'),
-          score: z.number().describe('Upvote count.'),
-          by: z.string().describe('Author username.'),
-          time: z.number().describe('Unix timestamp.'),
+          score: z
+            .number()
+            .optional()
+            .describe('Upvote count when provided by HN. Omitted when unknown.'),
+          by: z
+            .string()
+            .optional()
+            .describe('Author username when provided by HN. Omitted when unknown.'),
+          time: z
+            .number()
+            .optional()
+            .describe('Unix timestamp when provided by HN. Omitted when unknown.'),
           descendants: z.number().optional().describe('Total comment count. Absent for jobs.'),
           text: z
             .string()
             .optional()
             .describe('Body text for Ask HN / text posts. Use hn_get_thread for full discussion.'),
-          type: z.string().describe('Item type (story, job).'),
         }),
       )
       .describe('Stories from the feed, ordered by HN ranking.'),
@@ -66,21 +78,21 @@ export const getStories = tool('hn_get_stories', {
 
   async handler(input, ctx) {
     const hn = getHnService();
-    const feedIds = await hn.fetchFeed(input.feed);
+    const feedIds = await hn.fetchFeed(input.feed, ctx);
     const sliced = feedIds.slice(input.offset, input.offset + input.count);
-    const rawItems = await hn.fetchItems(sliced);
+    const rawItems = await hn.fetchItems(sliced, ctx);
     const items = filterLiveItems(rawItems);
 
     const stories = items.map((item) => ({
       id: item.id,
-      title: item.title ? stripHtml(item.title) : '',
-      url: normalizeUrl(item.url),
-      score: item.score ?? 0,
-      by: item.by ?? '',
-      time: item.time ?? 0,
-      descendants: item.descendants,
-      text: item.text ? stripHtml(item.text) : undefined,
       type: item.type,
+      ...(item.title && { title: stripHtml(item.title) }),
+      ...(normalizeUrl(item.url) && { url: normalizeUrl(item.url) as string }),
+      ...(item.score != null && { score: item.score }),
+      ...(item.by && { by: item.by }),
+      ...(item.time != null && { time: item.time }),
+      ...(item.descendants != null && { descendants: item.descendants }),
+      ...(item.text && { text: stripHtml(item.text) }),
     }));
 
     ctx.log.info('Fetched stories', { feed: input.feed, count: stories.length });
@@ -101,10 +113,10 @@ export const getStories = tool('hn_get_stories', {
 
     const lines = result.stories.map((s, i) => {
       const rank = result.offset + i + 1;
-      const date = new Date(s.time * 1000).toISOString().slice(0, 10);
+      const date = s.time != null ? new Date(s.time * 1000).toISOString().slice(0, 10) : null;
       const meta = [
-        `${s.score} pts`,
-        `by ${s.by}`,
+        s.score != null ? `${s.score} pts` : null,
+        s.by ? `by ${s.by}` : null,
         s.descendants != null ? `${s.descendants} comments` : null,
         date,
         `id:${s.id}`,
@@ -113,7 +125,8 @@ export const getStories = tool('hn_get_stories', {
         .join(' | ');
       const url = s.url ? `\n${s.url}` : '';
       const text = s.text ? `\n${s.text}` : '';
-      return `[${rank}] ${s.title}\n${meta}${url}${text}`;
+      const title = s.title ?? `[${s.type}]`;
+      return `[${rank}] ${title}\n${meta}${url}${text}`;
     });
 
     const end = result.offset + result.stories.length;

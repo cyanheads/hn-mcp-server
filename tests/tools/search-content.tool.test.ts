@@ -215,7 +215,7 @@ describe('hn_search_content handler', () => {
 
     await searchHn.handler(input, ctx);
 
-    expect(mockSearch).toHaveBeenCalledWith(input);
+    expect(mockSearch).toHaveBeenCalledWith(input, expect.anything());
   });
 });
 

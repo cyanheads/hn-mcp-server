@@ -136,7 +136,7 @@ describe('hn_get_user handler', () => {
 
     const result = await getUser.handler(parse({ includeSubmissions: true }), ctx);
 
-    expect(mockFetchItems).toHaveBeenCalledWith([100, 101, 102]);
+    expect(mockFetchItems).toHaveBeenCalledWith([100, 101, 102], expect.anything());
     const subs = result.submissions;
     expect(subs).toHaveLength(2);
     expect(subs?.[0]).toMatchObject({ id: 100, type: 'story', title: 'My Post' });
@@ -150,7 +150,7 @@ describe('hn_get_user handler', () => {
 
     await getUser.handler(parse({ includeSubmissions: true, submissionCount: 1 }), ctx);
 
-    expect(mockFetchItems).toHaveBeenCalledWith([100]);
+    expect(mockFetchItems).toHaveBeenCalledWith([100], expect.anything());
   });
 
   it('filters out dead and deleted submissions', async () => {

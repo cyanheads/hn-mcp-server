@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { notFound } from '@cyanheads/mcp-ts-core/errors';
 import { getHnService, normalizeUrl, stripHtml } from '@/services/hn/hn-service.js';
 
 export const getThread = tool('hn_get_thread', {
@@ -71,8 +72,8 @@ export const getThread = tool('hn_get_thread', {
 
   async handler(input, ctx) {
     const hn = getHnService();
-    const root = await hn.fetchItem(input.itemId);
-    if (!root) throw new Error(`Item ${input.itemId} not found`);
+    const root = await hn.fetchItem(input.itemId, ctx);
+    if (!root) throw notFound(`Item ${input.itemId} not found`, { itemId: input.itemId });
 
     const item = {
       id: root.id,
@@ -115,7 +116,10 @@ export const getThread = tool('hn_get_thread', {
       const remaining = input.maxComments - comments.length;
       // Fetch a batch with buffer for dead/deleted items
       const batch = currentLevel.slice(0, remaining + 20);
-      const items = await hn.fetchItems(batch.map((b) => b.id));
+      const items = await hn.fetchItems(
+        batch.map((b) => b.id),
+        ctx,
+      );
       const nextLevel: Array<{ id: number; parentId: number }> = [];
 
       for (let i = 0; i < items.length && comments.length < input.maxComments; i++) {

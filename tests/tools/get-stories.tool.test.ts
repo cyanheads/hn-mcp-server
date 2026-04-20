@@ -86,15 +86,15 @@ describe('getStories', () => {
       expect(result.stories).toHaveLength(3);
       expect(result.stories[0]).toEqual({
         id: 1,
+        type: 'story',
         title: 'Story 1',
         url: 'https://example.com/1',
         score: 100,
         by: 'testuser',
         time: 1700000000,
         descendants: 42,
-        text: undefined,
-        type: 'story',
       });
+      expect(result.stories[0]).not.toHaveProperty('text');
     });
 
     it('paginates with offset and sets hasMore correctly', async () => {
@@ -108,7 +108,7 @@ describe('getStories', () => {
       const input = getStories.input.parse({ feed: 'new', count: 2, offset: 10 });
       const result = await getStories.handler(input, ctx);
 
-      expect(mockService.fetchItems).toHaveBeenCalledWith([11, 12]);
+      expect(mockService.fetchItems).toHaveBeenCalledWith([11, 12], expect.anything());
       expect(result.offset).toBe(10);
       expect(result.hasMore).toBe(true);
       expect(result.stories).toHaveLength(2);
@@ -182,7 +182,53 @@ describe('getStories', () => {
       const input = getStories.input.parse({ feed: 'top' });
       const result = await getStories.handler(input, ctx);
 
-      expect(result.stories[0]!.text).toBeUndefined();
+      expect(result.stories[0]!).not.toHaveProperty('text');
+    });
+
+    it('preserves absence for sparse upstream fields instead of fabricating defaults', async () => {
+      // HN Firebase may omit score/by/time/title on degraded/edge items.
+      // Per sparse-upstream guidance, the tool must NOT substitute 0/''/epoch —
+      // the absence should propagate to the output.
+      const sparse: HnItem = { id: 42, type: 'story' };
+      mockService.fetchFeed.mockResolvedValue([42]);
+      mockService.fetchItems.mockResolvedValue([sparse]);
+
+      const ctx = createMockContext();
+      const input = getStories.input.parse({ feed: 'top' });
+      const result = await getStories.handler(input, ctx);
+
+      const story = result.stories[0]!;
+      expect(story.id).toBe(42);
+      expect(story.type).toBe('story');
+      expect(story).not.toHaveProperty('title');
+      expect(story).not.toHaveProperty('url');
+      expect(story).not.toHaveProperty('score');
+      expect(story).not.toHaveProperty('by');
+      expect(story).not.toHaveProperty('time');
+      expect(story).not.toHaveProperty('descendants');
+      expect(story).not.toHaveProperty('text');
+
+      // Output still validates against the schema.
+      expect(() => getStories.output.parse(result)).not.toThrow();
+    });
+
+    it('format() renders sparse stories without inventing facts', () => {
+      const blocks = getStories.format!({
+        stories: [{ id: 42, type: 'story' }],
+        feed: 'top',
+        total: 1,
+        offset: 0,
+        hasMore: false,
+      });
+
+      const text = blocks[0]!.text;
+      // Falls back to type label when title is unknown.
+      expect(text).toContain('[1] [story]');
+      // Only id is rendered in meta — no fabricated "0 pts" or "by ".
+      expect(text).toContain('id:42');
+      expect(text).not.toMatch(/\d+ pts/);
+      expect(text).not.toMatch(/by\s+\|/);
+      expect(text).not.toMatch(/by\s*$/);
     });
   });
 

@@ -77,7 +77,7 @@ export const searchHn = tool('hn_search_content', {
 
   async handler(input, ctx) {
     const hn = getHnService();
-    const result = await hn.search(input);
+    const result = await hn.search(input, ctx);
 
     const hits = result.hits.map((hit) => {
       const rawText = hit.comment_text ?? hit.story_text;
