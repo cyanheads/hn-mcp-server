@@ -98,10 +98,10 @@ export const getUser = tool('hn_get_user', {
 
   format: (result) => {
     const { user } = result;
-    const joined = new Date(user.created * 1000).toLocaleDateString('en-US', {
+    const joined = `${new Date(user.created * 1000).toLocaleDateString('en-US', {
       month: 'short',
       year: 'numeric',
-    });
+    })} (t:${user.created})`;
     const lines: string[] = [
       `## ${user.id}`,
       `**Karma:** ${user.karma} | **Joined:** ${joined} | **Total submissions:** ${user.totalSubmissions}`,
@@ -113,7 +113,9 @@ export const getUser = tool('hn_get_user', {
       lines.push('\n### Recent submissions');
       for (const s of result.submissions) {
         const title = s.title ?? `[${s.type}]`;
-        const date = s.time ? new Date(s.time * 1000).toISOString().slice(0, 10) : '';
+        const date = s.time
+          ? `${new Date(s.time * 1000).toISOString().slice(0, 10)} (t:${s.time})`
+          : '';
         const meta = [
           `id:${s.id}`,
           s.type,

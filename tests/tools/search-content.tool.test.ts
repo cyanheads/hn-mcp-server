@@ -259,7 +259,7 @@ describe('hn_search_content format', () => {
     });
 
     const text = content[0]!.text;
-    expect(text).toContain('## "rust" — 500 results (page 1/17)');
+    expect(text).toContain('## "rust" — 500 results (page 1/17, p:0)');
     expect(text).toContain('### Rust is Great');
     expect(text).toContain('id:123 | alice | 200 pts | 80 comments | 2024-06-15');
     expect(text).toContain('https://rust.dev');
@@ -288,9 +288,9 @@ describe('hn_search_content format', () => {
     });
 
     const text = content[0]!.text;
-    expect(text).toContain('## "best language" — 42 results (page 2/2)');
-    expect(text).toContain('### Comment on "Ask HN: Best Language?"');
-    expect(text).toContain('id:456 | bob | 10 pts | story id:100 | 2024-03-20');
+    expect(text).toContain('## "best language" — 42 results (page 2/2, p:1)');
+    expect(text).toContain('### Comment on "Ask HN: Best Language?" (story id:100)');
+    expect(text).toContain('id:456 | bob | 10 pts | 2024-03-20');
     expect(text).toContain('I think Rust is the best choice for systems programming.');
   });
 
@@ -344,7 +344,7 @@ describe('hn_search_content format', () => {
     });
 
     const text = content[0]!.text;
-    expect(text).toContain('"search" — 300 results (page 3/10)');
+    expect(text).toContain('"search" — 300 results (page 3/10, p:2)');
   });
 
   it('omits url line for stories without url', () => {

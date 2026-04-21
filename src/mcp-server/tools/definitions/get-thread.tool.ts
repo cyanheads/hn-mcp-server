@@ -158,9 +158,12 @@ export const getThread = tool('hn_get_thread', {
 
     // Root item
     const title = item.title ?? `Comment by ${item.by ?? 'unknown'}`;
-    const date = item.time ? new Date(item.time * 1000).toISOString().slice(0, 10) : '';
+    const date = item.time
+      ? `${new Date(item.time * 1000).toISOString().slice(0, 10)} (t:${item.time})`
+      : '';
     const meta = [
       `id:${item.id}`,
+      `type:${item.type}`,
       item.score != null ? `${item.score} pts` : null,
       item.by ? `by ${item.by}` : null,
       item.descendants != null ? `${item.descendants} comments` : null,
@@ -176,13 +179,16 @@ export const getThread = tool('hn_get_thread', {
     if (comments.length > 0) {
       lines.push('\n---\n');
       for (const c of comments) {
-        const indent = '  '.repeat(c.depth);
+        // Cap visual indent at 10 levels — the depth value itself is rendered explicitly below.
+        const indent = '  '.repeat(Math.min(c.depth, 10));
         const author = c.by ?? '[deleted]';
         const cDate = c.time
-          ? new Date(c.time * 1000).toISOString().slice(0, 16).replace('T', ' ')
+          ? `${new Date(c.time * 1000).toISOString().slice(0, 16).replace('T', ' ')} (t:${c.time})`
           : '';
         const replies = c.childCount > 0 ? ` | ${c.childCount} replies` : '';
-        lines.push(`${indent}**${author}** (id:${c.id}${replies} | ${cDate})`);
+        lines.push(
+          `${indent}**${author}** (id:${c.id} | depth:${c.depth} | parent:${c.parentId}${replies} | ${cDate})`,
+        );
         if (c.text) lines.push(`${indent}${c.text.replace(/\n/g, `\n${indent}`)}`);
       }
     }
@@ -190,7 +196,7 @@ export const getThread = tool('hn_get_thread', {
     const summary =
       totalAvailable != null && totalLoaded < totalAvailable
         ? `\n\n(${totalLoaded}/${totalAvailable} comments loaded — increase maxComments or depth for more)`
-        : '';
+        : `\n\n(${totalLoaded} comments loaded${totalAvailable != null ? ` of ${totalAvailable} available` : ''})`;
 
     return [{ type: 'text' as const, text: lines.join('\n') + summary }];
   },

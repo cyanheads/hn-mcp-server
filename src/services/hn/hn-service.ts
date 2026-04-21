@@ -120,7 +120,7 @@ export class HnService {
   }
 
   /** Fetch a single item by ID. Returns null when HN reports the item is missing. */
-  async fetchItem(id: number, ctx: Context): Promise<HnItem | null> {
+  fetchItem(id: number, ctx: Context): Promise<HnItem | null> {
     const rc = toRequestContext(ctx);
     return withRetry(
       async () => {
@@ -134,7 +134,7 @@ export class HnService {
   }
 
   /** Fetch a user profile by username. Returns null when the user does not exist. */
-  async fetchUser(username: string, ctx: Context): Promise<HnUser | null> {
+  fetchUser(username: string, ctx: Context): Promise<HnUser | null> {
     const rc = toRequestContext(ctx);
     return withRetry(
       async () => {
@@ -151,7 +151,7 @@ export class HnService {
   }
 
   /** Fetch a feed's ID array. Throws on upstream failure after retries. */
-  async fetchFeed(type: HnFeedType, ctx: Context): Promise<number[]> {
+  fetchFeed(type: HnFeedType, ctx: Context): Promise<number[]> {
     const endpoint = type === 'jobs' ? 'jobstories' : `${type}stories`;
     const rc = toRequestContext(ctx);
     return withRetry(

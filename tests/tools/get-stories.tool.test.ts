@@ -271,7 +271,7 @@ describe('getStories', () => {
 
       expect(blocks).toHaveLength(1);
       const text = blocks[0]!.text;
-      expect(text).toContain('## top stories (1–1 of 100)');
+      expect(text).toContain('## top stories (1–1 of 100, offset:0)');
       expect(text).toContain('[1] Test Story');
       expect(text).toContain('200 pts | by author | 55 comments');
       expect(text).toContain('id:1');
@@ -309,7 +309,7 @@ describe('getStories', () => {
       });
 
       const text = blocks[0]!.text;
-      expect(text).toContain('new stories (21–22 of 200)');
+      expect(text).toContain('new stories (21–22 of 200, offset:20)');
       expect(text).toContain('[21] Offset Story');
       expect(text).toContain('[22] Next Story');
     });

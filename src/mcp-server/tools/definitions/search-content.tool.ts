@@ -117,34 +117,38 @@ export const searchHn = tool('hn_search_content', {
 
     const lines = result.hits.map((h) => {
       if (h.title) {
+        // Story result — Algolia returns storyId === id for stories, so suppress the parent ref unless it actually differs or a parent title is set.
+        const parentRef =
+          (h.storyId != null && h.storyId !== h.id) || h.storyTitle
+            ? ` | story:"${h.storyTitle ?? '?'}"#${h.storyId ?? '?'}`
+            : '';
         const meta = [
           `id:${h.id}`,
           h.author,
           h.points != null ? `${h.points} pts` : null,
           h.numComments != null ? `${h.numComments} comments` : null,
-          h.createdAt.slice(0, 10),
+          h.createdAt,
         ]
           .filter(Boolean)
           .join(' | ');
         const url = h.url ? `\n${h.url}` : '';
         const text = h.text ? `\n${h.text}` : '';
-        return `### ${h.title}\n${meta}${url}${text}`;
+        return `### ${h.title}\n${meta}${parentRef}${url}${text}`;
       }
-      // Comment result
+      // Comment result — parent context in heading.
       const meta = [
         `id:${h.id}`,
         h.author,
         h.points != null ? `${h.points} pts` : null,
-        h.storyId != null ? `story id:${h.storyId}` : null,
-        h.createdAt.slice(0, 10),
+        h.createdAt,
       ]
         .filter(Boolean)
         .join(' | ');
       const text = h.text ? `\n${h.text}` : '';
-      return `### Comment on "${h.storyTitle ?? 'unknown'}"\n${meta}${text}`;
+      return `### Comment on "${h.storyTitle ?? 'unknown'}" (story id:${h.storyId ?? '?'})\n${meta}${text}`;
     });
 
-    const header = `## "${result.query}" — ${result.totalHits} results (page ${result.page + 1}/${result.totalPages})`;
+    const header = `## "${result.query}" — ${result.totalHits} results (page ${result.page + 1}/${result.totalPages}, p:${result.page})`;
     return [{ type: 'text' as const, text: `${header}\n\n${lines.join('\n\n')}` }];
   },
 });

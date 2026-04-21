@@ -113,13 +113,17 @@ export const getStories = tool('hn_get_stories', {
 
     const lines = result.stories.map((s, i) => {
       const rank = result.offset + i + 1;
-      const date = s.time != null ? new Date(s.time * 1000).toISOString().slice(0, 10) : null;
+      const date =
+        s.time != null
+          ? `${new Date(s.time * 1000).toISOString().slice(0, 10)} (t:${s.time})`
+          : null;
       const meta = [
+        `id:${s.id}`,
+        s.type,
         s.score != null ? `${s.score} pts` : null,
         s.by ? `by ${s.by}` : null,
         s.descendants != null ? `${s.descendants} comments` : null,
         date,
-        `id:${s.id}`,
       ]
         .filter(Boolean)
         .join(' | ');
@@ -130,7 +134,7 @@ export const getStories = tool('hn_get_stories', {
     });
 
     const end = result.offset + result.stories.length;
-    const header = `## ${result.feed} stories (${result.offset + 1}–${end} of ${result.total})${result.hasMore ? ' — more available' : ''}`;
+    const header = `## ${result.feed} stories (${result.offset + 1}–${end} of ${result.total}, offset:${result.offset})${result.hasMore ? ' — more available' : ''}`;
     return [{ type: 'text' as const, text: `${header}\n\n${lines.join('\n\n')}` }];
   },
 });
