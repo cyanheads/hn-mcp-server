@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0] — 2026-04-20
+
+### Changed
+
+- Bumped `@cyanheads/mcp-ts-core` from `^0.4.1` to `^0.5.3`. The 0.5.x release adds a `format-parity` lint rule that verifies every field in a tool's `output` schema is rendered by its `format()` function — catching silent divergence between `structuredContent` (forwarded by clients like Claude Code) and `content[]` (forwarded by clients like Claude Desktop).
+- `hn_get_stories` `format()`: meta line now leads with `id:N | type | …` and renders `time` as both ISO date and raw Unix timestamp (`2026-04-20 (t:1776717572)`); header includes raw `offset:N`.
+- `hn_get_thread` `format()`: comment lines now include `depth:N | parent:N` annotations; visual indent is capped at 10 levels so a synthetic deep depth doesn't OOM `String.repeat`; root meta includes `type:N`; comment timestamps render with both formatted date and raw value; summary is always rendered (previously suppressed when fully loaded).
+- `hn_get_user` `format()`: `created` and submission `time` now render with both formatted date and raw Unix timestamp.
+- `hn_search_content` `format()`: header includes raw `p:N`; `createdAt` now renders the full ISO string (was truncated to date); comment results carry the parent story id in the heading; story results suppress the redundant self-referential parent ref.
+- Dropped redundant `async` modifier on `HnService.fetchItem`/`fetchUser`/`fetchFeed` — they delegate directly to `withRetry()` and gain nothing from the wrapper.
+- Synced project skills from `mcp-ts-core@0.5.3`: updated `add-tool` (1.4 → 1.6), `api-config` (1.1 → 1.2), `design-mcp-server` (2.3 → 2.4), `field-test` (1.1 → 1.2), `maintenance` (1.2 → 1.3), `polish-docs-meta` (1.3 → 1.4), `setup` (1.2 → 1.3).
+- Bumped MCP SDK badge in `README.md` to `^1.29.0` and TypeScript badge to `^6.0.3`.
+
 ## [0.2.0] — 2026-04-19
 
 ### Added
