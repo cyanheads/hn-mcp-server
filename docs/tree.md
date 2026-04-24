@@ -1,10 +1,15 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-04-20 00:12:27
+Generated on: 2026-04-24 20:32:43
 
 ```text
 hn-mcp-server/
 ├── .claude/
+├── .github/
+│   └── ISSUE_TEMPLATE/
+│       ├── bug_report.yml
+│       ├── config.yml
+│       └── feature_request.yml
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
@@ -13,7 +18,10 @@ hn-mcp-server/
 │   ├── design.md
 │   └── hackernews-api.md
 ├── scripts/
+│   ├── build-changelog.ts
 │   ├── build.ts
+│   ├── check-docs-sync.ts
+│   ├── check-skills-sync.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
@@ -38,6 +46,8 @@ hn-mcp-server/
 │   ├── api-context/
 │   │   └── SKILL.md
 │   ├── api-errors/
+│   │   └── SKILL.md
+│   ├── api-linter/
 │   │   └── SKILL.md
 │   ├── api-services/
 │   │   ├── references/
@@ -72,9 +82,13 @@ hn-mcp-server/
 │   │   │   ├── readme.md
 │   │   │   └── server-json.md
 │   │   └── SKILL.md
+│   ├── release-and-publish/
+│   │   └── SKILL.md
 │   ├── report-issue-framework/
 │   │   └── SKILL.md
 │   ├── report-issue-local/
+│   │   └── SKILL.md
+│   ├── security-pass/
 │   │   └── SKILL.md
 │   └── setup/
 │       └── SKILL.md

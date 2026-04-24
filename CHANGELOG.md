@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.0] — 2026-04-24
+
+### Changed
+
+- Bumped `@cyanheads/mcp-ts-core` from `^0.5.3` to `^0.7.0`. Spans 20 releases with substantial additions: landing page at `/` plus SEP-1649 Server Card at `/.well-known/mcp.json`, `MCP_PUBLIC_URL` override for TLS-terminating proxies, directory-based changelog convention, recursive `describe-on-fields` linter, new `security-pass` / `release-and-publish` / `api-linter` skills, a `Skills Sync` devcheck step, and flattened `ZodError` message shape. No runtime breaking changes for this server.
+- `hn_get_stories`, `hn_get_thread`, `hn_get_user`, `hn_search_content`: added `.describe()` on each array-element object schema (`stories[]`, `comments[]`, `submissions[]`, `hits[]`) to satisfy the new recursive `describe-on-fields` rule introduced in `mcp-ts-core@0.6.16`.
+- `hn_get_stories` handler: hoisted `normalizeUrl(item.url)` to a local `const` so it's called once per story instead of twice, and dropped the redundant `as string` cast. The conditional-spread "omit absent properties" contract is preserved.
+- Bumped `@biomejs/biome` (2.4.12 → 2.4.13) and `vitest` (4.1.4 → 4.1.5).
+
+### Added
+
+- `.github/ISSUE_TEMPLATE/` — bug report, feature request, and config templates scaffolded from the framework, aligned with `mcp-ts-core@0.7.0`'s secondary-label scheme.
+- Framework scripts synced from `mcp-ts-core@0.7.0`: `scripts/build-changelog.ts`, `scripts/check-docs-sync.ts`, `scripts/check-skills-sync.ts`. `devcheck`, `lint-mcp`, and `tree` scripts also refreshed.
+- Skills synced from `mcp-ts-core@0.7.0`: added `api-linter` (v1.1), `release-and-publish` (v2.1), `security-pass` (v1.1); updated `add-app-tool`, `add-prompt`, `add-resource`, `add-service`, `add-tool`, `api-context`, `api-services`, `api-utils`, `design-mcp-server`, `field-test`, `maintenance`, `polish-docs-meta`, `report-issue-framework`, `report-issue-local`, `setup`. Propagated to `.claude/skills/`.
+- `CLAUDE.md`: added `security-pass` step to the "What's Next?" sequence (slot 8); added `security-pass`, `release-and-publish`, and `api-linter` rows to the skills table; pointed the Publishing section at the `release-and-publish` skill.
+
 ## [0.3.0] — 2026-04-20
 
 ### Changed
