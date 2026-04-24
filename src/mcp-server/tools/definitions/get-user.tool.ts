@@ -45,16 +45,18 @@ export const getUser = tool('hn_get_user', {
       .describe('User profile.'),
     submissions: z
       .array(
-        z.object({
-          id: z.number().describe('Item ID — use with hn_get_thread to read comments.'),
-          type: z.string().describe('Item type (story, comment, job, poll).'),
-          title: z.string().optional().describe('Title (stories/jobs/polls).'),
-          url: z.string().optional().describe('External link URL.'),
-          text: z.string().optional().describe('Body text (HTML stripped).'),
-          score: z.number().optional().describe('Score/upvotes.'),
-          time: z.number().optional().describe('Unix timestamp.'),
-          descendants: z.number().optional().describe('Comment count (stories/polls).'),
-        }),
+        z
+          .object({
+            id: z.number().describe('Item ID — use with hn_get_thread to read comments.'),
+            type: z.string().describe('Item type (story, comment, job, poll).'),
+            title: z.string().optional().describe('Title (stories/jobs/polls).'),
+            url: z.string().optional().describe('External link URL.'),
+            text: z.string().optional().describe('Body text (HTML stripped).'),
+            score: z.number().optional().describe('Score/upvotes.'),
+            time: z.number().optional().describe('Unix timestamp.'),
+            descendants: z.number().optional().describe('Comment count (stories/polls).'),
+          })
+          .describe('A single submission by the user (story, comment, job, or poll).'),
       )
       .optional()
       .describe(

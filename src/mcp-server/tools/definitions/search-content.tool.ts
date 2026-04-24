@@ -52,21 +52,26 @@ export const searchHn = tool('hn_search_content', {
   output: z.object({
     hits: z
       .array(
-        z.object({
-          id: z.number().describe('HN item ID — use with hn_get_thread to read the discussion.'),
-          title: z.string().optional().describe('Story title (present for stories).'),
-          url: z.string().optional().describe('External link URL.'),
-          author: z.string().describe('Author username.'),
-          points: z.number().optional().describe('Score/upvotes.'),
-          numComments: z.number().optional().describe('Comment count.'),
-          createdAt: z.string().describe('Creation time (ISO 8601).'),
-          storyTitle: z
-            .string()
-            .optional()
-            .describe('Parent story title (present for comment results).'),
-          storyId: z.number().optional().describe('Parent story ID (present for comment results).'),
-          text: z.string().optional().describe('Comment or story body text (HTML stripped).'),
-        }),
+        z
+          .object({
+            id: z.number().describe('HN item ID — use with hn_get_thread to read the discussion.'),
+            title: z.string().optional().describe('Story title (present for stories).'),
+            url: z.string().optional().describe('External link URL.'),
+            author: z.string().describe('Author username.'),
+            points: z.number().optional().describe('Score/upvotes.'),
+            numComments: z.number().optional().describe('Comment count.'),
+            createdAt: z.string().describe('Creation time (ISO 8601).'),
+            storyTitle: z
+              .string()
+              .optional()
+              .describe('Parent story title (present for comment results).'),
+            storyId: z
+              .number()
+              .optional()
+              .describe('Parent story ID (present for comment results).'),
+            text: z.string().optional().describe('Comment or story body text (HTML stripped).'),
+          })
+          .describe('A single Algolia search hit (story or comment).'),
       )
       .describe('Search results ranked by sort order.'),
     totalHits: z.number().describe('Total matching results across all pages.'),

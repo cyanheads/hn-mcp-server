@@ -40,32 +40,39 @@ export const getStories = tool('hn_get_stories', {
   output: z.object({
     stories: z
       .array(
-        z.object({
-          id: z.number().describe('Item ID — use with hn_get_thread to read comments.'),
-          type: z.string().describe('Item type (story, job).'),
-          title: z
-            .string()
-            .optional()
-            .describe('Story title when provided by HN. Omitted when unknown.'),
-          url: z.string().optional().describe('External link URL. Absent for Ask HN / text posts.'),
-          score: z
-            .number()
-            .optional()
-            .describe('Upvote count when provided by HN. Omitted when unknown.'),
-          by: z
-            .string()
-            .optional()
-            .describe('Author username when provided by HN. Omitted when unknown.'),
-          time: z
-            .number()
-            .optional()
-            .describe('Unix timestamp when provided by HN. Omitted when unknown.'),
-          descendants: z.number().optional().describe('Total comment count. Absent for jobs.'),
-          text: z
-            .string()
-            .optional()
-            .describe('Body text for Ask HN / text posts. Use hn_get_thread for full discussion.'),
-        }),
+        z
+          .object({
+            id: z.number().describe('Item ID — use with hn_get_thread to read comments.'),
+            type: z.string().describe('Item type (story, job).'),
+            title: z
+              .string()
+              .optional()
+              .describe('Story title when provided by HN. Omitted when unknown.'),
+            url: z
+              .string()
+              .optional()
+              .describe('External link URL. Absent for Ask HN / text posts.'),
+            score: z
+              .number()
+              .optional()
+              .describe('Upvote count when provided by HN. Omitted when unknown.'),
+            by: z
+              .string()
+              .optional()
+              .describe('Author username when provided by HN. Omitted when unknown.'),
+            time: z
+              .number()
+              .optional()
+              .describe('Unix timestamp when provided by HN. Omitted when unknown.'),
+            descendants: z.number().optional().describe('Total comment count. Absent for jobs.'),
+            text: z
+              .string()
+              .optional()
+              .describe(
+                'Body text for Ask HN / text posts. Use hn_get_thread for full discussion.',
+              ),
+          })
+          .describe('A single story or job posting.'),
       )
       .describe('Stories from the feed, ordered by HN ranking.'),
     feed: z.string().describe('Which feed was fetched.'),
@@ -83,17 +90,20 @@ export const getStories = tool('hn_get_stories', {
     const rawItems = await hn.fetchItems(sliced, ctx);
     const items = filterLiveItems(rawItems);
 
-    const stories = items.map((item) => ({
-      id: item.id,
-      type: item.type,
-      ...(item.title && { title: stripHtml(item.title) }),
-      ...(normalizeUrl(item.url) && { url: normalizeUrl(item.url) as string }),
-      ...(item.score != null && { score: item.score }),
-      ...(item.by && { by: item.by }),
-      ...(item.time != null && { time: item.time }),
-      ...(item.descendants != null && { descendants: item.descendants }),
-      ...(item.text && { text: stripHtml(item.text) }),
-    }));
+    const stories = items.map((item) => {
+      const url = normalizeUrl(item.url);
+      return {
+        id: item.id,
+        type: item.type,
+        ...(item.title && { title: stripHtml(item.title) }),
+        ...(url && { url }),
+        ...(item.score != null && { score: item.score }),
+        ...(item.by && { by: item.by }),
+        ...(item.time != null && { time: item.time }),
+        ...(item.descendants != null && { descendants: item.descendants }),
+        ...(item.text && { text: stripHtml(item.text) }),
+      };
+    });
 
     ctx.log.info('Fetched stories', { feed: input.feed, count: stories.length });
 

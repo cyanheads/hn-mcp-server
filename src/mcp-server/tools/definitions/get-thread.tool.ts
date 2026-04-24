@@ -46,17 +46,19 @@ export const getThread = tool('hn_get_thread', {
       .describe('The root item (story, comment, or poll).'),
     comments: z
       .array(
-        z.object({
-          id: z.number().describe('Comment ID.'),
-          by: z.string().optional().describe('Author username.'),
-          time: z.number().optional().describe('Unix timestamp.'),
-          text: z.string().optional().describe('Comment text (HTML stripped).'),
-          depth: z.number().describe('Nesting level (0 = direct reply to root).'),
-          parentId: z.number().describe('Parent item ID.'),
-          childCount: z
-            .number()
-            .describe('Number of direct child comments (may exceed what was resolved).'),
-        }),
+        z
+          .object({
+            id: z.number().describe('Comment ID.'),
+            by: z.string().optional().describe('Author username.'),
+            time: z.number().optional().describe('Unix timestamp.'),
+            text: z.string().optional().describe('Comment text (HTML stripped).'),
+            depth: z.number().describe('Nesting level (0 = direct reply to root).'),
+            parentId: z.number().describe('Parent item ID.'),
+            childCount: z
+              .number()
+              .describe('Number of direct child comments (may exceed what was resolved).'),
+          })
+          .describe('A single comment in the thread with its tree position.'),
       )
       .describe(
         'Flat comment list ordered by ranked BFS traversal. Use depth/parentId to reconstruct nesting.',
