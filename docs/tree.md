@@ -1,6 +1,6 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-04-24 20:32:43
+Generated on: 2026-05-06 03:28:40
 
 ```text
 hn-mcp-server/
@@ -21,10 +21,12 @@ hn-mcp-server/
 │   ├── build-changelog.ts
 │   ├── build.ts
 │   ├── check-docs-sync.ts
+│   ├── check-framework-antipatterns.ts
 │   ├── check-skills-sync.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
+│   ├── split-changelog.ts
 │   └── tree.ts
 ├── skills/
 │   ├── add-app-tool/
@@ -40,6 +42,8 @@ hn-mcp-server/
 │   ├── add-tool/
 │   │   └── SKILL.md
 │   ├── api-auth/
+│   │   └── SKILL.md
+│   ├── api-canvas/
 │   │   └── SKILL.md
 │   ├── api-config/
 │   │   └── SKILL.md
@@ -90,7 +94,9 @@ hn-mcp-server/
 │   │   └── SKILL.md
 │   ├── security-pass/
 │   │   └── SKILL.md
-│   └── setup/
+│   ├── setup/
+│   │   └── SKILL.md
+│   └── tool-defs-analysis/
 │       └── SKILL.md
 ├── src/
 │   ├── config/

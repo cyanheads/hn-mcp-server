@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.4.1] — 2026-05-05
+
+### Changed
+
+- Bumped `@cyanheads/mcp-ts-core` from `^0.7.0` to `^0.8.17`. Brings the typed-error-contract API (`tool({ errors: […] })` + `ctx.fail(reason, …)` + `ctx.recoveryFor(reason)`), recovery-hint mirroring into `content[]`, the `Framework Antipatterns` devcheck step, two new project skills (`api-canvas`, `tool-defs-analysis`), and refinements to several existing skills. No runtime breaks.
+- `hn_get_thread`: declared `errors: [{ reason: 'item_not_found', code: NotFound, when, recovery }]`. Replaced `notFound()` throw with `ctx.fail('item_not_found', …, { itemId, ...ctx.recoveryFor('item_not_found') })` so the recovery hint flows onto the wire and is mirrored into rendered text for `format()`-only clients.
+- `hn_get_user`: same treatment for `user_not_found` — typed contract, `ctx.fail`, recovery spread.
+- `hn_search_content`: empty-result responses now include an optional `message` field that names which filters were applied (`tags`, `author`, `minPoints`, `dateRange`) so the agent knows what to relax. Rendered as a recovery sentence when no hits, and as a `>` blockquote footer on non-empty pages whenever a message was generated. Output schema gains the `message?` field.
+- `HnService.parseJsonBody`: HTML-error-body throw (rate-limited upstream returning 200 OK with HTML) now carries `data: { upstream, reason: 'upstream_html', recovery: { hint } }`, so service-layer failures expose the same shape `format()`-only clients get from the typed contract.
+- Tool descriptions and field `.describe()` strings tightened across all four tools — sharper guidance on `count`/`offset`/`depth`/`maxComments`, and the `type` field now lists the actual HN item types.
+- Bumped `@biomejs/biome` (2.4.13 → 2.4.14) and `tsc-alias` (1.8.16 → 1.8.17).
+
+### Added
+
+- `scripts/check-framework-antipatterns.ts` and a matching `Framework Antipatterns` step in `devcheck` — flags SDK-coupling shortcuts that bypass framework primitives.
+- `scripts/split-changelog.ts` — framework helper for splitting `CHANGELOG.md` into per-version files.
+- Project skills synced from `mcp-ts-core@0.8.17`: added `api-canvas` (DataCanvas + spillover), `tool-defs-analysis` (read-only audit of MCP definition language); refreshed `add-service`, `add-tool`, `api-config`, `api-context`, `api-errors`, `api-linter`, `api-workers`, `design-mcp-server`, `field-test`, `maintenance`, `release-and-publish`, `report-issue-framework`, `report-issue-local`, `security-pass`, `setup`. Propagated to `.claude/skills/`.
+
+### Removed
+
+- `dev:stdio` and `dev:http` package scripts — `bun --watch src/index.ts` is invoked directly.
+
 ## [0.4.0] — 2026-04-24
 
 ### Changed
