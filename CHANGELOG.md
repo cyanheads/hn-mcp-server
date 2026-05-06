@@ -1,6 +1,15 @@
 # Changelog
 
-## [0.4.1] — 2026-05-05
+## [0.4.2] — 2026-05-05
+
+### Changed
+
+- `hn_search_content`: `dateRange.start` and `dateRange.end` now reject unparseable date strings at the input boundary via a Zod `.refine()` check, instead of silently producing `NaN` Algolia numeric filters when downstream `new Date(…).getTime()` fails. New test covers the rejection path.
+- `hn_search_content`: clarified `storyId` description to call out that it equals `id` for story hits and points to the parent story for comment hits. Tightened the empty-results `message` description to read more naturally.
+- `hn_get_thread`: typo fix and clarity in two field descriptions — `commentId` → `comment's itemId` in the `depth` guidance, and `comments[]` description now spells out the BFS-by-rank order instead of leaning on the abbreviation.
+- `CLAUDE.md`: synced agent protocol header from `0.4.0` to current.
+
+
 
 ### Changed
 
