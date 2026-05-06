@@ -89,7 +89,7 @@ describe('hn_get_thread handler', () => {
   beforeEach(() => {
     hn = createMockHnService();
     (getHnService as Mock).mockReturnValue(hn);
-    ctx = createMockContext();
+    ctx = createMockContext({ errors: getThread.errors });
   });
 
   it('throws when item is not found', async () => {

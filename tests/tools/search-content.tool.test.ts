@@ -199,6 +199,41 @@ describe('hn_search_content handler', () => {
     expect(result.query).toBe('nonexistent');
   });
 
+  it('populates message with generic hint when no filters are set and hits are empty', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'nothing' }), ctx);
+
+    expect(result.message).toBe('Try broader keywords or different terms.');
+  });
+
+  it('populates message naming each set filter when hits are empty', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await searchHn.handler(
+      searchHn.input.parse({
+        query: 'rust',
+        tags: 'story',
+        author: 'dang',
+        minPoints: 100,
+        dateRange: { start: '2024-01-01' },
+      }),
+      ctx,
+    );
+
+    expect(result.message).toBe(
+      'Try broader keywords, or relax these filters: tags, author, minPoints, dateRange.',
+    );
+  });
+
+  it('omits message when hits are non-empty', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [storyHit], nbHits: 1 }));
+
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'rust' }), ctx);
+
+    expect(result.message).toBeUndefined();
+  });
+
   it('passes input params through to hn.search', async () => {
     mockSearch.mockResolvedValue(algoliaResponse());
 
@@ -233,7 +268,25 @@ describe('hn_search_content format', () => {
       query: 'obscure',
     });
 
-    expect(content).toEqual([{ type: 'text', text: '"obscure" — no results' }]);
+    expect(content).toEqual([{ type: 'text', text: '"obscure" — no results.' }]);
+  });
+
+  it('appends recovery message to empty-hits text when present', () => {
+    const content = searchHn.format!({
+      hits: [],
+      totalHits: 0,
+      page: 0,
+      totalPages: 0,
+      query: 'obscure',
+      message: 'Try broader keywords, or relax these filters: tags, minPoints.',
+    });
+
+    expect(content).toEqual([
+      {
+        type: 'text',
+        text: '"obscure" — no results. Try broader keywords, or relax these filters: tags, minPoints.',
+      },
+    ]);
   });
 
   it('formats story results with rank, meta, and url', () => {

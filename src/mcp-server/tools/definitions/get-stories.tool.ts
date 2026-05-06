@@ -13,7 +13,7 @@ import {
 
 export const getStories = tool('hn_get_stories', {
   description:
-    'Fetch stories from an HN feed (top, new, best, ask, show, jobs). Returns enriched story objects with title, URL, score, author, and comment count.',
+    'Fetch stories from an HN feed (top, new, best, ask, show, jobs), with title, URL, score, author, and comment count for each story.',
   annotations: { readOnlyHint: true },
   input: z.object({
     feed: z
@@ -26,9 +26,7 @@ export const getStories = tool('hn_get_stories', {
       .min(1)
       .max(100)
       .default(30)
-      .describe(
-        'Number of stories to return. Each story is fetched individually — larger counts take longer.',
-      ),
+      .describe('Number of stories to return. Larger counts take longer.'),
     offset: z
       .number()
       .min(0)
@@ -79,7 +77,7 @@ export const getStories = tool('hn_get_stories', {
     total: z
       .number()
       .describe('Total items in the feed (up to 500 for top/new/best, 200 for ask/show/jobs).'),
-    offset: z.number().describe('Offset used.'),
+    offset: z.number().describe('Offset that was applied to this page (echoes input.offset).'),
     hasMore: z.boolean().describe('Whether more stories are available beyond this page.'),
   }),
 

@@ -8,7 +8,7 @@ import { getHnService, normalizeUrl, stripHtml } from '@/services/hn/hn-service.
 
 export const searchHn = tool('hn_search_content', {
   description:
-    'Search Hacker News stories and comments via Algolia. Supports filtering by content type, author, date range, and minimum points.',
+    'Search Hacker News stories and comments via Algolia. Filterable by content type, author, date range, and minimum points.',
   annotations: { readOnlyHint: true },
   input: z.object({
     query: z
@@ -78,6 +78,12 @@ export const searchHn = tool('hn_search_content', {
     page: z.number().describe('Current page number.'),
     totalPages: z.number().describe('Total pages available.'),
     query: z.string().describe('The query that was searched.'),
+    message: z
+      .string()
+      .optional()
+      .describe(
+        'Recovery hint when results are empty — names the filters that were applied so the agent knows what to relax. Absent on non-empty result pages.',
+      ),
   }),
 
   async handler(input, ctx) {
@@ -106,18 +112,32 @@ export const searchHn = tool('hn_search_content', {
       totalHits: result.nbHits,
     });
 
+    let message: string | undefined;
+    if (hits.length === 0) {
+      const filters: string[] = [];
+      if (input.tags) filters.push('tags');
+      if (input.author) filters.push('author');
+      if (input.minPoints != null) filters.push('minPoints');
+      if (input.dateRange) filters.push('dateRange');
+      message = filters.length
+        ? `Try broader keywords, or relax these filters: ${filters.join(', ')}.`
+        : `Try broader keywords or different terms.`;
+    }
+
     return {
       hits,
       totalHits: result.nbHits,
       page: result.page,
       totalPages: Math.ceil(result.nbHits / input.count),
       query: input.query,
+      ...(message && { message }),
     };
   },
 
   format: (result) => {
     if (result.hits.length === 0) {
-      return [{ type: 'text' as const, text: `"${result.query}" — no results` }];
+      const suggestion = result.message ? ` ${result.message}` : '';
+      return [{ type: 'text' as const, text: `"${result.query}" — no results.${suggestion}` }];
     }
 
     const lines = result.hits.map((h) => {
@@ -154,6 +174,8 @@ export const searchHn = tool('hn_search_content', {
     });
 
     const header = `## "${result.query}" — ${result.totalHits} results (page ${result.page + 1}/${result.totalPages}, p:${result.page})`;
-    return [{ type: 'text' as const, text: `${header}\n\n${lines.join('\n\n')}` }];
+    const body = `${header}\n\n${lines.join('\n\n')}`;
+    const text = result.message ? `${body}\n\n> ${result.message}` : body;
+    return [{ type: 'text' as const, text }];
   },
 });

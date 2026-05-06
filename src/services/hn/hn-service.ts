@@ -15,10 +15,11 @@ const ALGOLIA_API = 'https://hn.algolia.com/api/v1';
 const REQUEST_TIMEOUT_MS = 10_000;
 
 /**
- * Project a handler Context down to a RequestContext shape for framework
+ * Project a handler Context onto a RequestContext shape for framework
  * utilities. Runtime-safe — the framework only reads log-binding fields —
- * but needed to reconcile exactOptionalPropertyTypes differences between
- * Context.auth (`AuthContext | undefined`) and RequestContext.auth (`AuthContext`).
+ * but RequestContext's `[key: string]: unknown` index signature is not
+ * present on Context, so we materialize a plain object whose literal shape
+ * satisfies the index signature.
  */
 function toRequestContext(ctx: Context): RequestContext {
   const base: RequestContext = {
@@ -103,7 +104,13 @@ function isHtmlErrorBody(text: string): boolean {
  */
 function parseJsonBody<T>(text: string, upstream: string): T {
   if (isHtmlErrorBody(text)) {
-    throw serviceUnavailable(`${upstream} returned HTML instead of JSON — likely rate-limited.`);
+    throw serviceUnavailable(`${upstream} returned HTML instead of JSON — likely rate-limited.`, {
+      upstream,
+      reason: 'upstream_html',
+      recovery: {
+        hint: `${upstream} appears to be rate-limited or in maintenance. Retry after a brief delay.`,
+      },
+    });
   }
   return JSON.parse(text) as T;
 }

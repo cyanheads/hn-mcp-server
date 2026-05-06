@@ -85,14 +85,14 @@ function parse(overrides: Record<string, unknown> = {}) {
 
 describe('hn_get_user handler', () => {
   it('throws when user is not found', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getUser.errors });
     mockFetchUser.mockResolvedValue(null);
 
     await expect(getUser.handler(parse(), ctx)).rejects.toThrow('User testuser not found');
   });
 
   it('returns basic profile without submissions', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getUser.errors });
     mockFetchUser.mockResolvedValue(baseUser);
 
     const result = await getUser.handler(parse(), ctx);
@@ -109,7 +109,7 @@ describe('hn_get_user handler', () => {
   });
 
   it('strips HTML from about text', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getUser.errors });
     vi.mocked(stripHtml).mockReturnValue('Hello world');
     mockFetchUser.mockResolvedValue(baseUser);
 
@@ -120,7 +120,7 @@ describe('hn_get_user handler', () => {
   });
 
   it('sets totalSubmissions to 0 when submitted is absent', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getUser.errors });
     const { submitted: _, ...userNoSubmitted } = baseUser;
     mockFetchUser.mockResolvedValue(userNoSubmitted);
 
@@ -130,7 +130,7 @@ describe('hn_get_user handler', () => {
   });
 
   it('fetches and returns submissions when includeSubmissions is true', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getUser.errors });
     mockFetchUser.mockResolvedValue(baseUser);
     mockFetchItems.mockResolvedValue([storyItem, commentItem]);
 
@@ -144,7 +144,7 @@ describe('hn_get_user handler', () => {
   });
 
   it('limits fetched submissions to submissionCount', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getUser.errors });
     mockFetchUser.mockResolvedValue(baseUser);
     mockFetchItems.mockResolvedValue([storyItem]);
 
@@ -154,7 +154,7 @@ describe('hn_get_user handler', () => {
   });
 
   it('filters out dead and deleted submissions', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getUser.errors });
     mockFetchUser.mockResolvedValue({ ...baseUser, submitted: [100, 102, 103] });
     mockFetchItems.mockResolvedValue([storyItem, deadItem, deletedItem]);
 

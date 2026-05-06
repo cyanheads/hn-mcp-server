@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   filterLiveItems,
   getHnService,
@@ -16,6 +16,14 @@ export const getUser = tool('hn_get_user', {
   description:
     'Get an HN user profile with karma, about, and optionally their most recent submissions resolved into full items.',
   annotations: { readOnlyHint: true },
+  errors: [
+    {
+      reason: 'user_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'HN reports no user account exists for the given username.',
+      recovery: 'Verify the username spelling — HN usernames are case-sensitive.',
+    },
+  ],
   input: z.object({
     username: z.string().min(1).describe('HN username. Case-sensitive.'),
     includeSubmissions: z
@@ -67,7 +75,12 @@ export const getUser = tool('hn_get_user', {
   async handler(input, ctx) {
     const hn = getHnService();
     const user = await hn.fetchUser(input.username, ctx);
-    if (!user) throw notFound(`User ${input.username} not found`, { username: input.username });
+    if (!user) {
+      throw ctx.fail('user_not_found', `User ${input.username} not found`, {
+        username: input.username,
+        ...ctx.recoveryFor('user_not_found'),
+      });
+    }
 
     const profile = {
       id: user.id,

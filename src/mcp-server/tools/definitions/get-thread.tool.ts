@@ -4,13 +4,21 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getHnService, normalizeUrl, stripHtml } from '@/services/hn/hn-service.js';
 
 export const getThread = tool('hn_get_thread', {
   description:
-    'Get an item and its comment tree as a threaded discussion. Recursively resolves child comments. With depth 0, returns just the item — doubles as an item lookup.',
+    'Get an item and its comment tree as a threaded discussion, with child comments resolved recursively. Use depth 0 for an item-only lookup.',
   annotations: { readOnlyHint: true },
+  errors: [
+    {
+      reason: 'item_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'HN reports no item exists for the given itemId.',
+      recovery: 'Verify the itemId via hn_search_content or a feed listing from hn_get_stories.',
+    },
+  ],
   input: z.object({
     itemId: z.number().describe('ID of the story, comment, or poll to fetch the thread for.'),
     depth: z
@@ -19,7 +27,7 @@ export const getThread = tool('hn_get_thread', {
       .max(10)
       .default(3)
       .describe(
-        `How many levels of replies to resolve. 0 = just the item, no comments. 1 = direct replies only. Deeper threads on popular stories can be very large — start with 2-3 and go deeper if needed.`,
+        `How many levels of replies to resolve. 0 = just the item, no comments. 1 = direct replies only. Popular stories often have more top-level comments than maxComments — to see nesting, raise maxComments together with depth, or call again on a specific commentId to drill into a subtree.`,
       ),
     maxComments: z
       .number()
@@ -27,14 +35,14 @@ export const getThread = tool('hn_get_thread', {
       .max(200)
       .default(50)
       .describe(
-        `Maximum total comments to include across all depth levels. Traversal stops when this limit is reached. Comments are resolved breadth-first by HN ranking.`,
+        `Maximum total comments to include across all depth levels. Highest-ranked top-level comments resolve first; replies fill in only after the level above is exhausted.`,
       ),
   }),
   output: z.object({
     item: z
       .object({
         id: z.number().describe('Item ID.'),
-        type: z.string().describe('Item type.'),
+        type: z.string().describe('Item type: story | comment | job | poll | pollopt.'),
         by: z.string().optional().describe('Author username.'),
         time: z.number().optional().describe('Unix timestamp.'),
         title: z.string().optional().describe('Story/job title.'),
@@ -68,14 +76,19 @@ export const getThread = tool('hn_get_thread', {
       .number()
       .optional()
       .describe(
-        `Total comment count from the root item (descendants field). If totalLoaded < totalAvailable, increase maxComments or depth to see more.`,
+        `Total comment count from the root item. If totalLoaded < totalAvailable, raise maxComments (and depth, if you want nested replies) and call again.`,
       ),
   }),
 
   async handler(input, ctx) {
     const hn = getHnService();
     const root = await hn.fetchItem(input.itemId, ctx);
-    if (!root) throw notFound(`Item ${input.itemId} not found`, { itemId: input.itemId });
+    if (!root) {
+      throw ctx.fail('item_not_found', `Item ${input.itemId} not found`, {
+        itemId: input.itemId,
+        ...ctx.recoveryFor('item_not_found'),
+      });
+    }
 
     const item = {
       id: root.id,
