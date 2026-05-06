@@ -27,7 +27,7 @@ export const getThread = tool('hn_get_thread', {
       .max(10)
       .default(3)
       .describe(
-        `How many levels of replies to resolve. 0 = just the item, no comments. 1 = direct replies only. Popular stories often have more top-level comments than maxComments — to see nesting, raise maxComments together with depth, or call again on a specific commentId to drill into a subtree.`,
+        `How many levels of replies to resolve. 0 = just the item, no comments. 1 = direct replies only. Popular stories often have more top-level comments than maxComments — to see nesting, raise maxComments together with depth, or call again with a specific comment's itemId to drill into a subtree.`,
       ),
     maxComments: z
       .number()
@@ -69,7 +69,7 @@ export const getThread = tool('hn_get_thread', {
           .describe('A single comment in the thread with its tree position.'),
       )
       .describe(
-        'Flat comment list ordered by ranked BFS traversal. Use depth/parentId to reconstruct nesting.',
+        'Flat comment list ordered breadth-first by rank: highest-ranked top-level comments first, then their replies. Use depth/parentId to reconstruct nesting.',
       ),
     totalLoaded: z.number().describe('Number of comments actually fetched and included.'),
     totalAvailable: z

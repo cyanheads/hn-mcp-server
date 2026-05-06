@@ -32,10 +32,12 @@ export const searchHn = tool('hn_search_content', {
       .object({
         start: z
           .string()
+          .refine((s) => !Number.isNaN(Date.parse(s)), 'Must be a parseable ISO 8601 date')
           .optional()
           .describe('Start date (ISO 8601). Results created after this date.'),
         end: z
           .string()
+          .refine((s) => !Number.isNaN(Date.parse(s)), 'Must be a parseable ISO 8601 date')
           .optional()
           .describe('End date (ISO 8601). Results created before this date.'),
       })
@@ -68,7 +70,7 @@ export const searchHn = tool('hn_search_content', {
             storyId: z
               .number()
               .optional()
-              .describe('Parent story ID (present for comment results).'),
+              .describe('Parent story ID for comment hits; equals `id` for story hits.'),
             text: z.string().optional().describe('Comment or story body text (HTML stripped).'),
           })
           .describe('A single Algolia search hit (story or comment).'),
@@ -82,7 +84,7 @@ export const searchHn = tool('hn_search_content', {
       .string()
       .optional()
       .describe(
-        'Recovery hint when results are empty — names the filters that were applied so the agent knows what to relax. Absent on non-empty result pages.',
+        'Recovery hint when results are empty — names the filters that were applied, for relaxing the search. Absent on non-empty result pages.',
       ),
   }),
 

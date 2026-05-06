@@ -475,4 +475,13 @@ describe('hn_search_content input validation', () => {
     const noRange = searchHn.input.parse({ query: 'test' });
     expect(noRange.dateRange).toBeUndefined();
   });
+
+  it('rejects unparseable dateRange.start / dateRange.end', () => {
+    expect(() =>
+      searchHn.input.parse({ query: 'test', dateRange: { start: 'not-a-date' } }),
+    ).toThrow();
+    expect(() =>
+      searchHn.input.parse({ query: 'test', dateRange: { end: 'also-not-a-date' } }),
+    ).toThrow();
+  });
 });
