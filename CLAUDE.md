@@ -115,24 +115,44 @@ Handlers receive a unified `ctx` object. Key properties:
 
 ## Errors
 
-Handlers throw — the framework catches, classifies, and formats. Three escalation levels:
+Handlers throw — the framework catches, classifies, and formats.
+
+**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated, and the linter enforces conformance against the handler. The `recovery` field is required descriptive metadata (≥5 words, lint-validated). Spread `ctx.recoveryFor('reason')` into `data` to flow the contract recovery onto the wire — the framework mirrors `data.recovery.hint` into `content[]` text. Override with explicit `{ recovery: { hint: '…' } }` when runtime context matters.
 
 ```ts
-// 1. Plain Error — framework auto-classifies from message patterns
-throw new Error('Item not found');           // → NotFound
-throw new Error('Invalid query format');     // → ValidationError
+errors: [
+  { reason: 'item_not_found', code: JsonRpcErrorCode.NotFound,
+    when: 'HN reports no item exists for the given itemId.',
+    recovery: 'Verify the itemId via hn_search_content or hn_get_stories.' },
+],
+async handler(input, ctx) {
+  const root = await hn.fetchItem(input.itemId, ctx);
+  if (!root) {
+    throw ctx.fail('item_not_found', `Item ${input.itemId} not found`, {
+      itemId: input.itemId,
+      ...ctx.recoveryFor('item_not_found'),
+    });
+  }
+}
+```
 
-// 2. Error factories — explicit code, concise
-import { notFound, validationError, forbidden, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+**Fallback (no contract entry fits):** factories or plain `Error`.
+
+```ts
+import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 throw notFound('Item not found', { itemId });
 throw serviceUnavailable('API unavailable', { url }, { cause: err });
 
-// 3. McpError — full control over code and data
+// Plain Error — framework auto-classifies from message patterns
+throw new Error('Item not found');           // → NotFound
+throw new Error('Invalid query format');     // → ValidationError
+
+// McpError — when no factory exists for the code
 import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 throw new McpError(JsonRpcErrorCode.DatabaseError, 'Connection failed', { pool: 'primary' });
 ```
 
-Plain `Error` is fine for most cases. Use factories when the error code matters. See framework CLAUDE.md for the full auto-classification table and all available factories.
+**Service-layer:** services don't have `ctx.fail`, but can carry the contract reason via `data: { reason: 'X' }` on a factory throw. The auto-classifier preserves `data` on the wire so clients see the same `error.data.reason` they'd see from `ctx.fail`. See framework CLAUDE.md and `api-errors` skill for the full auto-classification table and all factories.
 
 ---
 
@@ -200,7 +220,9 @@ Available skills:
 | `api-testing` | createMockContext, test patterns |
 | `api-utils` | Formatting, parsing, security, pagination, scheduling |
 | `api-workers` | Cloudflare Workers runtime |
+| `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3 opt-in |
 | `api-linter` | MCP definition lint rules reference — look here when devcheck reports a lint diagnostic |
+| `tool-defs-analysis` | Audit tool/resource/prompt descriptions across the surface for voice, leaks, sparsity, and clarity |
 | `report-issue-framework` | Report a framework issue to mcp-ts-core |
 | `report-issue-local` | Report a local project issue |
 
@@ -220,8 +242,6 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting |
 | `bun run lint:mcp` | Validate MCP tool/resource definitions |
 | `bun run test` | Run tests |
-| `bun run dev:stdio` | Dev mode (stdio) |
-| `bun run dev:http` | Dev mode (HTTP) |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
 
@@ -259,10 +279,14 @@ mcp-publisher publish
 
 ## Checklist
 
-- [ ] Zod schemas: all fields have `.describe()`
+- [ ] Zod schemas: all fields have `.describe()`, only JSON-Schema-serializable types
 - [ ] JSDoc `@fileoverview` + `@module` on every file
 - [ ] `ctx.log` for logging — no `console` calls
-- [ ] Handlers throw on failure — plain `Error` or error factories, no try/catch
+- [ ] Handlers throw on failure — `ctx.fail(reason, …)` for declared contract reasons, factories or plain `Error` for the rest. No try/catch.
+- [ ] Domain failure modes declared in `errors[]` with `recovery` strings (≥5 words, lint-validated); `ctx.recoveryFor('reason')` spread into throw `data` to mirror onto the wire
+- [ ] Service-layer throws carry `data: { reason, recovery: { hint } }` so format()-only clients see the recovery hint
+- [ ] Wrapping HN/Algolia: schemas reflect real upstream sparsity (HN omits fields freely); `format()` preserves uncertainty rather than fabricating from missing data
+- [ ] Tests cover at least one sparse payload case per tool that wraps upstream items
+- [ ] Tests use `createMockContext({ errors: tool.errors })` when the test exercises `ctx.fail`
 - [ ] Registered in `createApp()` tools array
-- [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
 - [ ] `bun run devcheck` passes
