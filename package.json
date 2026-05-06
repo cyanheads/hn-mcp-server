@@ -19,7 +19,8 @@
     "lint:mcp": "bun scripts/lint-mcp.ts",
     "test": "bun --bun vitest run",
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio node dist/index.js",
-    "start:http": "MCP_TRANSPORT_TYPE=http node dist/index.js"
+    "start:http": "MCP_TRANSPORT_TYPE=http node dist/index.js",
+    "publish-mcp": "mcp-publisher login github -token \"$(security find-generic-password -a \"$USER\" -s mcp-publisher-github-pat -w)\" && mcp-publisher publish"
   },
   "mcpName": "io.github.cyanheads/hn-mcp-server",
   "keywords": [
