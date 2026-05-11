@@ -105,7 +105,7 @@ describe('hn_get_thread handler', () => {
     expect(result.comments).toEqual([]);
     expect(result.totalLoaded).toBe(0);
     expect(result.totalAvailable).toBe(3);
-    expect(result.omitted).toEqual({ deleted: 0, dead: 0 });
+    expect(result).not.toHaveProperty('omitted');
     expect(hn.fetchItems).not.toHaveBeenCalled();
   });
 
@@ -191,13 +191,13 @@ describe('hn_get_thread handler', () => {
     expect(result.omitted).toEqual({ deleted: 2, dead: 1 });
   });
 
-  it('reports zero omitted when no comments are dropped', async () => {
+  it('omits the omitted field when no comments are dropped', async () => {
     hn.fetchItem.mockResolvedValue(mockStory);
     hn.fetchItems.mockResolvedValueOnce([mockComment1, mockComment2]);
 
     const result = await getThread.handler(parse({ depth: 1 }), ctx);
 
-    expect(result.omitted).toEqual({ deleted: 0, dead: 0 });
+    expect(result).not.toHaveProperty('omitted');
   });
 
   it('marks isOp:true when comment author equals root author', async () => {
@@ -209,20 +209,22 @@ describe('hn_get_thread handler', () => {
     const result = await getThread.handler(parse({ depth: 1 }), ctx);
 
     expect(result.comments[0]).toMatchObject({ id: 10, by: 'alice', isOp: true });
-    expect(result.comments[1]).toMatchObject({ id: 11, by: 'carol', isOp: false });
+    expect(result.comments[1]).toMatchObject({ id: 11, by: 'carol' });
+    expect(result.comments[1]).not.toHaveProperty('isOp');
   });
 
-  it('isOp is false when comment author is missing', async () => {
+  it('omits isOp when comment author is missing', async () => {
     const anonComment: HnItem = { id: 10, type: 'comment', text: '...', parent: 1 };
     hn.fetchItem.mockResolvedValue(mockStory);
     hn.fetchItems.mockResolvedValueOnce([anonComment]);
 
     const result = await getThread.handler(parse({ depth: 1 }), ctx);
 
-    expect(result.comments[0]).toMatchObject({ id: 10, isOp: false });
+    expect(result.comments[0]).toMatchObject({ id: 10 });
+    expect(result.comments[0]).not.toHaveProperty('isOp');
   });
 
-  it('isOp is false when root author is missing (cannot match anonymous OP)', async () => {
+  it('omits isOp when root author is missing (cannot match anonymous OP)', async () => {
     const { by: _by, ...storyWithoutAuthor } = mockStory;
     const anonStory: HnItem = storyWithoutAuthor;
     const anonComment: HnItem = { id: 10, type: 'comment', text: '...', parent: 1 };
@@ -231,7 +233,8 @@ describe('hn_get_thread handler', () => {
 
     const result = await getThread.handler(parse({ depth: 1 }), ctx);
 
-    expect(result.comments[0]).toMatchObject({ id: 10, isOp: false });
+    expect(result.comments[0]).toMatchObject({ id: 10 });
+    expect(result.comments[0]).not.toHaveProperty('isOp');
   });
 
   it('calls stripHtml on item text and comment text', async () => {
@@ -278,7 +281,6 @@ describe('hn_get_thread format', () => {
       comments: [],
       totalLoaded: 0,
       totalAvailable: 0,
-      omitted: { deleted: 0, dead: 0 },
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
@@ -302,7 +304,6 @@ describe('hn_get_thread format', () => {
           depth: 0,
           parentId: 1,
           childCount: 1,
-          isOp: false,
         },
         {
           id: 20,
@@ -312,12 +313,10 @@ describe('hn_get_thread format', () => {
           depth: 1,
           parentId: 10,
           childCount: 0,
-          isOp: false,
         },
       ],
       totalLoaded: 2,
       totalAvailable: 2,
-      omitted: { deleted: 0, dead: 0 },
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
@@ -351,12 +350,10 @@ describe('hn_get_thread format', () => {
           depth: 0,
           parentId: 1,
           childCount: 0,
-          isOp: false,
         },
       ],
       totalLoaded: 2,
       totalAvailable: 2,
-      omitted: { deleted: 0, dead: 0 },
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
@@ -364,6 +361,8 @@ describe('hn_get_thread format', () => {
     expect(text).toContain('**alice (OP)**');
     expect(text).toContain('**bob**');
     expect(text).not.toContain('**bob (OP)**');
+    expect(text).toContain('| isOp:true');
+    expect(text).not.toContain('isOp:false');
   });
 
   it('shows partial load indicator when not all comments loaded', () => {
@@ -385,12 +384,10 @@ describe('hn_get_thread format', () => {
           depth: 0,
           parentId: 1,
           childCount: 0,
-          isOp: false,
         },
       ],
       totalLoaded: 1,
       totalAvailable: 500,
-      omitted: { deleted: 0, dead: 0 },
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
@@ -411,7 +408,6 @@ describe('hn_get_thread format', () => {
           depth: 0,
           parentId: 1,
           childCount: 0,
-          isOp: false,
         },
       ],
       totalLoaded: 1,
@@ -429,7 +425,6 @@ describe('hn_get_thread format', () => {
       comments: [],
       totalLoaded: 0,
       totalAvailable: 0,
-      omitted: { deleted: 0, dead: 0 },
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
@@ -441,7 +436,6 @@ describe('hn_get_thread format', () => {
       item: { id: 10, type: 'comment', by: 'bob', text: 'Some comment' },
       comments: [],
       totalLoaded: 0,
-      omitted: { deleted: 0, dead: 0 },
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);

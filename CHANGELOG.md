@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.1] — 2026-05-11
+
+Patch to `hn_get_thread` — two response fields that were always present but rarely informative (`comments[].isOp` and `omitted`) are now absence-by-default and only emitted when they carry signal. The 0.5.0 shape required `isOp: boolean` on every comment and `omitted: { deleted, dead }` on every response, which on the common case (no OP reply, no moderation truncation) emitted `false` and `{ 0, 0 }` for zero information. Aligns these two fields with the rest of the schema — `title`, `url`, `score`, `text`, etc. are all absent-when-missing rather than `null`-filled. Wire payload shrinks across both fields; `format()` output is unchanged on the common case and identical on the signal case.
+
+### Changed
+
+- `hn_get_thread`: `comments[].isOp` schema changed from `z.boolean()` to `z.literal(true).optional()`. Field is omitted from `structuredContent` when the comment is not an OP reply (including when either author is missing).
+- `hn_get_thread`: `omitted` schema changed from required to `.optional()`. Field is omitted from `structuredContent` when no comments were dropped during BFS traversal. Present only when `deleted > 0 || dead > 0`.
+- `hn_get_thread`: `format()` meta line emits the `| isOp:true` token only when the field is present and true. The `**author (OP)**` author suffix continues to render unchanged when `isOp: true`. `format()` already gated the omitted-summary footer on `> 0` in 0.5.0, so rendered output is unchanged.
+
+### Consumer contract
+
+- Treat missing `comments[i].isOp` as "not OP" rather than "unknown". Truthy checks (`if (c.isOp)`, `c.isOp === true`) work identically to 0.5.0; only `c.isOp === false` flips behavior (and was always the wrong way to check).
+- Treat missing `omitted` as `{ deleted: 0, dead: 0 }`. Same pattern.
+
+### Tests
+
+- 147 passing. Updated assertions in three handler tests (`isOp: false` → `not.toHaveProperty('isOp')`), removed `isOp: false` from four format-test fixtures, strengthened the OP format test to verify `| isOp:true` appears for the OP comment and `isOp:false` never appears in rendered output. Updated two handler tests for `omitted` absence (`expect(result).not.toHaveProperty('omitted')`) and removed the now-redundant `omitted: { deleted: 0, dead: 0 }` lines from six format-test fixtures.
+
 ## [0.5.0] — 2026-05-11
 
 Enrichment release — surfaces signal that was being dropped on the floor. Four feature additions across three tools, no breaking changes. Closes [#1](https://github.com/cyanheads/hn-mcp-server/issues/1), [#2](https://github.com/cyanheads/hn-mcp-server/issues/2), [#3](https://github.com/cyanheads/hn-mcp-server/issues/3), [#4](https://github.com/cyanheads/hn-mcp-server/issues/4).

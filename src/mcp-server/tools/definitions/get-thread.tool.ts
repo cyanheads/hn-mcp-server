@@ -66,9 +66,10 @@ export const getThread = tool('hn_get_thread', {
               .number()
               .describe('Number of direct child comments (may exceed what was resolved).'),
             isOp: z
-              .boolean()
+              .literal(true)
+              .optional()
               .describe(
-                'True when the comment author matches the root item author (OP replying within their own thread). Always false when either author is missing.',
+                'Present and `true` when the comment author matches the root item author (OP replying within their own thread). Omitted otherwise — including when either author is missing. Most threads carry no OP replies, so absence is the common case; treat missing as "not OP" rather than unknown.',
               ),
           })
           .describe('A single comment in the thread with its tree position.'),
@@ -94,8 +95,9 @@ export const getThread = tool('hn_get_thread', {
           .number()
           .describe('Count of comments dropped because HN flagged them dead (autoflagged).'),
       })
+      .optional()
       .describe(
-        'Counts of comments dropped during BFS traversal so the caller can tell when a thread view is partial due to moderation rather than depth/maxComments limits.',
+        'Counts of comments dropped during BFS traversal. Present only when at least one comment was dropped, so the caller can tell when a thread view is partial due to moderation rather than depth/maxComments limits. Absence means no moderation truncation.',
       ),
   }),
 
@@ -127,7 +129,6 @@ export const getThread = tool('hn_get_thread', {
         comments: [],
         totalLoaded: 0,
         totalAvailable: root.descendants,
-        omitted: { deleted: 0, dead: 0 },
       };
     }
 
@@ -141,7 +142,7 @@ export const getThread = tool('hn_get_thread', {
       depth: number;
       parentId: number;
       childCount: number;
-      isOp: boolean;
+      isOp?: true;
     }> = [];
     let omittedDeleted = 0;
     let omittedDead = 0;
@@ -186,7 +187,7 @@ export const getThread = tool('hn_get_thread', {
           depth: d,
           parentId: parent.parentId,
           childCount: c.kids?.length ?? 0,
-          isOp: c.by != null && c.by === root.by,
+          ...(c.by != null && c.by === root.by && { isOp: true as const }),
         });
 
         if (c.kids) {
@@ -206,7 +207,9 @@ export const getThread = tool('hn_get_thread', {
       comments,
       totalLoaded: comments.length,
       totalAvailable: root.descendants,
-      omitted: { deleted: omittedDeleted, dead: omittedDead },
+      ...((omittedDeleted > 0 || omittedDead > 0) && {
+        omitted: { deleted: omittedDeleted, dead: omittedDead },
+      }),
     };
   },
 
@@ -244,8 +247,9 @@ export const getThread = tool('hn_get_thread', {
           ? `${new Date(c.time * 1000).toISOString().slice(0, 16).replace('T', ' ')} (t:${c.time})`
           : '';
         const replies = c.childCount > 0 ? ` | ${c.childCount} replies` : '';
+        const opTag = c.isOp ? ' | isOp:true' : '';
         lines.push(
-          `${indent}**${author}** (id:${c.id} | depth:${c.depth} | parent:${c.parentId} | isOp:${c.isOp}${replies} | ${cDate})`,
+          `${indent}**${author}** (id:${c.id} | depth:${c.depth} | parent:${c.parentId}${opTag}${replies} | ${cDate})`,
         );
         if (c.text) lines.push(`${indent}${c.text.replace(/\n/g, `\n${indent}`)}`);
       }
@@ -255,10 +259,9 @@ export const getThread = tool('hn_get_thread', {
       totalAvailable != null && totalLoaded < totalAvailable
         ? `\n\n(${totalLoaded}/${totalAvailable} comments loaded — increase maxComments or depth for more)`
         : `\n\n(${totalLoaded} comments loaded${totalAvailable != null ? ` of ${totalAvailable} available` : ''})`;
-    const omittedNote =
-      omitted.deleted > 0 || omitted.dead > 0
-        ? `\n(${omitted.deleted} deleted, ${omitted.dead} dead — omitted from this view)`
-        : '';
+    const omittedNote = omitted
+      ? `\n(${omitted.deleted} deleted, ${omitted.dead} dead — omitted from this view)`
+      : '';
 
     return [{ type: 'text' as const, text: lines.join('\n') + summary + omittedNote }];
   },
