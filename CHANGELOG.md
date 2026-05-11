@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.3] — 2026-05-11
+
+Maintenance release — framework bump, runtime engine bump, dependency reorg. No application code changes.
+
+### Changed
+
+- Bumped `@cyanheads/mcp-ts-core` from `^0.8.17` to `^0.8.20`. Brings: `ctx.auth.token` reaches handlers (0.8.18, [cyanheads/mcp-ts-core#121](https://github.com/cyanheads/mcp-ts-core/issues/121)); telemetry visualization docs + `api-telemetry` skill (0.8.19, [cyanheads/mcp-ts-core#125](https://github.com/cyanheads/mcp-ts-core/issues/125)); `mcp_tool_scopes` claim union and `MCP_AUTH_DISABLE_SCOPE_CHECKS` bypass for OIDC providers that can't inject scopes into `scope` (0.8.20, [cyanheads/mcp-ts-core#128](https://github.com/cyanheads/mcp-ts-core/issues/128)). Bundles `hono` security patches (GHSA-p77w-8qqv-26rm, GHSA-qp7p-654g-cw7p, GHSA-hm8q-7f3q-5f36). No surface this server exposes is affected, but the floor is now pinned to a patched `hono` peer. No runtime breaks for this server.
+- **Engines:** `bun >=1.2.0 → >=1.3.0`, `node >=22.0.0 → >=24.0.0`. Mirrors the framework's new minimums.
+- **Dockerfile:** base image `oven/bun:1 → oven/bun:1.3` (build + runtime stages).
+- **Dependency reorg:** `@hono/otel` and `pino-pretty` moved from `dependencies` to `devDependencies`. Both are optional framework peers — this server doesn't emit OTel HTTP middleware traces and doesn't ship pretty-printed logs in production. Removing them from the runtime dependency set drops install size without affecting behavior.
+- **Dependency refresh:** `@cyanheads/mcp-ts-core ^0.8.17 → ^0.8.20`, `@biomejs/biome ^2.4.14 → ^2.4.15`, `@types/node ^25.6.0 → ^25.6.2`, `@hono/otel ^1.1.1 → ^1.1.2` (now dev-only).
+
+### Added
+
+- Project skill synced from `mcp-ts-core@0.8.19`: `api-telemetry` — catalog of every span, metric, attribute, completion-log field, env var, and runtime caveat the framework emits. Cross-linked from `api-utils` (now scoped to the helper API only) and from the `CLAUDE.md` skill index.
+- `scripts/build-changelog.ts` resynced from upstream: adds `security: boolean` frontmatter flag that renders a `🛡️ Security` badge in the rollup, alongside the existing `breaking` flag.
+- Refreshed skills synced from upstream (no version regressions): `api-auth` 1.0 → 1.1 (OIDC operator setup, claim-union table, bypass flag), `api-config` 1.3 → 1.4 (new `MCP_AUTH_DISABLE_SCOPE_CHECKS` env row), `api-utils` 2.1 → 2.2 (telemetry section points at the new `api-telemetry` skill), `maintenance` 2.0 → 2.1 (Phase C now resyncs pristine reference files like `changelog/template.md`), `report-issue-framework` 1.5 → 1.6 and `report-issue-local` 1.4 → 1.5 (terser issue-writing guidance, `bun 1.3.x` examples), `security-pass` 1.3 → 1.4 (bypass-in-production check), `setup` 1.6 → 1.7 (`bunx` over `npx`, substituted-name verification, `release-and-publish` in progression), `tool-defs-analysis` 1.0 → 1.1 (env vars no longer flagged as recovery-hint smell). All propagated to `.claude/skills/`.
+
 ## [0.4.2] — 2026-05-05
 
 ### Changed
