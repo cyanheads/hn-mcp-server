@@ -7,9 +7,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   decodeHtmlEntities,
+  extractDomain,
   filterLiveItems,
   normalizeUrl,
   stripHtml,
+  stripHtmlPreservingEm,
 } from '@/services/hn/hn-service.js';
 import type { HnItem } from '@/services/hn/types.js';
 
@@ -107,6 +109,80 @@ describe('stripHtml', () => {
 
   it('trims leading/trailing whitespace', () => {
     expect(stripHtml('<p>hello<p>')).toBe('hello');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stripHtmlPreservingEm
+// ---------------------------------------------------------------------------
+
+describe('stripHtmlPreservingEm', () => {
+  it('returns empty string for empty input', () => {
+    expect(stripHtmlPreservingEm('')).toBe('');
+  });
+
+  it('preserves <em> markers while stripping other tags', () => {
+    expect(stripHtmlPreservingEm('<p>I <em>think</em> <em>Rust</em> is great</p>')).toBe(
+      'I <em>think</em> <em>Rust</em> is great',
+    );
+  });
+
+  it('preserves <em> inside link replacements', () => {
+    const html = '<a href="https://r.dev"><em>Rust</em></a>';
+    expect(stripHtmlPreservingEm(html)).toBe('<em>Rust</em> (https://r.dev)');
+  });
+
+  it('strips bold/italic/etc but leaves <em> intact', () => {
+    expect(stripHtmlPreservingEm('<b>not bold</b> and <em>match</em> and <i>not italic</i>')).toBe(
+      'not bold and <em>match</em> and not italic',
+    );
+  });
+
+  it('decodes entities after stripping', () => {
+    expect(stripHtmlPreservingEm('<p>&amp; <em>match</em></p>')).toBe('& <em>match</em>');
+  });
+
+  it('handles plain text with no markers', () => {
+    expect(stripHtmlPreservingEm('plain text')).toBe('plain text');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractDomain
+// ---------------------------------------------------------------------------
+
+describe('extractDomain', () => {
+  it('returns bare hostname for a valid URL', () => {
+    expect(extractDomain('https://example.com/path')).toBe('example.com');
+  });
+
+  it('strips leading www.', () => {
+    expect(extractDomain('https://www.github.com/cyanheads')).toBe('github.com');
+  });
+
+  it('does not strip non-leading www', () => {
+    expect(extractDomain('https://docs.www.example.com/x')).toBe('docs.www.example.com');
+  });
+
+  it('lowercases via URL parser', () => {
+    expect(extractDomain('https://GitHub.com/x')).toBe('github.com');
+  });
+
+  it('returns undefined for undefined', () => {
+    expect(extractDomain(undefined)).toBeUndefined();
+  });
+
+  it('returns undefined for empty string', () => {
+    expect(extractDomain('')).toBeUndefined();
+  });
+
+  it('returns undefined for unparseable URLs', () => {
+    expect(extractDomain('not a url')).toBeUndefined();
+    expect(extractDomain('foo.com')).toBeUndefined();
+  });
+
+  it('handles URLs with ports', () => {
+    expect(extractDomain('http://localhost:3000/x')).toBe('localhost');
   });
 });
 

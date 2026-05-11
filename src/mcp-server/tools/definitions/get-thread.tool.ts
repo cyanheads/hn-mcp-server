@@ -65,6 +65,11 @@ export const getThread = tool('hn_get_thread', {
             childCount: z
               .number()
               .describe('Number of direct child comments (may exceed what was resolved).'),
+            isOp: z
+              .boolean()
+              .describe(
+                'True when the comment author matches the root item author (OP replying within their own thread). Always false when either author is missing.',
+              ),
           })
           .describe('A single comment in the thread with its tree position.'),
       )
@@ -77,6 +82,20 @@ export const getThread = tool('hn_get_thread', {
       .optional()
       .describe(
         `Total comment count from the root item. If totalLoaded < totalAvailable, raise maxComments (and depth, if you want nested replies) and call again.`,
+      ),
+    omitted: z
+      .object({
+        deleted: z
+          .number()
+          .describe(
+            'Count of comments dropped because HN flagged them deleted (author/mod removal).',
+          ),
+        dead: z
+          .number()
+          .describe('Count of comments dropped because HN flagged them dead (autoflagged).'),
+      })
+      .describe(
+        'Counts of comments dropped during BFS traversal so the caller can tell when a thread view is partial due to moderation rather than depth/maxComments limits.',
       ),
   }),
 
@@ -103,7 +122,13 @@ export const getThread = tool('hn_get_thread', {
     };
 
     if (input.depth === 0 || !root.kids?.length) {
-      return { item, comments: [], totalLoaded: 0, totalAvailable: root.descendants };
+      return {
+        item,
+        comments: [],
+        totalLoaded: 0,
+        totalAvailable: root.descendants,
+        omitted: { deleted: 0, dead: 0 },
+      };
     }
 
     // Ranked BFS: process all comments at depth d before depth d+1.
@@ -116,7 +141,10 @@ export const getThread = tool('hn_get_thread', {
       depth: number;
       parentId: number;
       childCount: number;
+      isOp: boolean;
     }> = [];
+    let omittedDeleted = 0;
+    let omittedDead = 0;
 
     let currentLevel: Array<{ id: number; parentId: number }> = root.kids.map((id) => ({
       id,
@@ -140,7 +168,15 @@ export const getThread = tool('hn_get_thread', {
       for (let i = 0; i < items.length && comments.length < input.maxComments; i++) {
         const c = items[i];
         const parent = batch[i];
-        if (!c || c.deleted || c.dead || !parent) continue;
+        if (!c || !parent) continue;
+        if (c.deleted) {
+          omittedDeleted++;
+          continue;
+        }
+        if (c.dead) {
+          omittedDead++;
+          continue;
+        }
 
         comments.push({
           id: c.id,
@@ -150,6 +186,7 @@ export const getThread = tool('hn_get_thread', {
           depth: d,
           parentId: parent.parentId,
           childCount: c.kids?.length ?? 0,
+          isOp: c.by != null && c.by === root.by,
         });
 
         if (c.kids) {
@@ -164,11 +201,17 @@ export const getThread = tool('hn_get_thread', {
 
     ctx.log.info('Resolved thread', { itemId: input.itemId, comments: comments.length });
 
-    return { item, comments, totalLoaded: comments.length, totalAvailable: root.descendants };
+    return {
+      item,
+      comments,
+      totalLoaded: comments.length,
+      totalAvailable: root.descendants,
+      omitted: { deleted: omittedDeleted, dead: omittedDead },
+    };
   },
 
   format: (result) => {
-    const { item, comments, totalLoaded, totalAvailable } = result;
+    const { item, comments, totalLoaded, totalAvailable, omitted } = result;
     const lines: string[] = [];
 
     // Root item
@@ -196,13 +239,13 @@ export const getThread = tool('hn_get_thread', {
       for (const c of comments) {
         // Cap visual indent at 10 levels — the depth value itself is rendered explicitly below.
         const indent = '  '.repeat(Math.min(c.depth, 10));
-        const author = c.by ?? '[deleted]';
+        const author = c.by ? (c.isOp ? `${c.by} (OP)` : c.by) : '[deleted]';
         const cDate = c.time
           ? `${new Date(c.time * 1000).toISOString().slice(0, 16).replace('T', ' ')} (t:${c.time})`
           : '';
         const replies = c.childCount > 0 ? ` | ${c.childCount} replies` : '';
         lines.push(
-          `${indent}**${author}** (id:${c.id} | depth:${c.depth} | parent:${c.parentId}${replies} | ${cDate})`,
+          `${indent}**${author}** (id:${c.id} | depth:${c.depth} | parent:${c.parentId} | isOp:${c.isOp}${replies} | ${cDate})`,
         );
         if (c.text) lines.push(`${indent}${c.text.replace(/\n/g, `\n${indent}`)}`);
       }
@@ -212,7 +255,11 @@ export const getThread = tool('hn_get_thread', {
       totalAvailable != null && totalLoaded < totalAvailable
         ? `\n\n(${totalLoaded}/${totalAvailable} comments loaded — increase maxComments or depth for more)`
         : `\n\n(${totalLoaded} comments loaded${totalAvailable != null ? ` of ${totalAvailable} available` : ''})`;
+    const omittedNote =
+      omitted.deleted > 0 || omitted.dead > 0
+        ? `\n(${omitted.deleted} deleted, ${omitted.dead} dead — omitted from this view)`
+        : '';
 
-    return [{ type: 'text' as const, text: lines.join('\n') + summary }];
+    return [{ type: 'text' as const, text: lines.join('\n') + summary + omittedNote }];
   },
 });

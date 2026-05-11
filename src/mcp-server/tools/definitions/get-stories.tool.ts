@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import {
+  extractDomain,
   filterLiveItems,
   getHnService,
   normalizeUrl,
@@ -50,6 +51,12 @@ export const getStories = tool('hn_get_stories', {
               .string()
               .optional()
               .describe('External link URL. Absent for Ask HN / text posts.'),
+            domain: z
+              .string()
+              .optional()
+              .describe(
+                'Bare hostname derived from url (e.g. "github.com", with leading "www." stripped). Absent when url is missing or unparseable.',
+              ),
             score: z
               .number()
               .optional()
@@ -90,11 +97,13 @@ export const getStories = tool('hn_get_stories', {
 
     const stories = items.map((item) => {
       const url = normalizeUrl(item.url);
+      const domain = extractDomain(url);
       return {
         id: item.id,
         type: item.type,
         ...(item.title && { title: stripHtml(item.title) }),
         ...(url && { url }),
+        ...(domain && { domain }),
         ...(item.score != null && { score: item.score }),
         ...(item.by && { by: item.by }),
         ...(item.time != null && { time: item.time }),
@@ -138,7 +147,8 @@ export const getStories = tool('hn_get_stories', {
       const url = s.url ? `\n${s.url}` : '';
       const text = s.text ? `\n${s.text}` : '';
       const title = s.title ?? `[${s.type}]`;
-      return `[${rank}] ${title}\n${meta}${url}${text}`;
+      const domain = s.domain ? ` (${s.domain})` : '';
+      return `[${rank}] ${title}${domain}\n${meta}${url}${text}`;
     });
 
     const end = result.offset + result.stories.length;

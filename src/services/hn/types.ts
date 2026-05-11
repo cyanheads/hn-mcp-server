@@ -44,8 +44,27 @@ export interface AlgoliaResponse {
   page: number;
 }
 
+/**
+ * Algolia per-field highlight metadata. The `value` is the original field text
+ * with matched terms wrapped in `<em>…</em>` (default highlight markup).
+ */
+export interface AlgoliaHighlightValue {
+  fullyHighlighted?: boolean;
+  matchedWords: string[];
+  matchLevel: 'none' | 'partial' | 'full';
+  value: string;
+}
+
 /** Individual Algolia search hit. */
 export interface AlgoliaHit {
+  _highlightResult?: {
+    title?: AlgoliaHighlightValue;
+    url?: AlgoliaHighlightValue;
+    author?: AlgoliaHighlightValue;
+    comment_text?: AlgoliaHighlightValue;
+    story_text?: AlgoliaHighlightValue;
+    story_title?: AlgoliaHighlightValue;
+  };
   _tags?: string[];
   author: string;
   comment_text?: string | null;

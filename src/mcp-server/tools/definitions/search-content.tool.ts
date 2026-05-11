@@ -4,7 +4,46 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { getHnService, normalizeUrl, stripHtml } from '@/services/hn/hn-service.js';
+import {
+  extractDomain,
+  getHnService,
+  normalizeUrl,
+  stripHtml,
+  stripHtmlPreservingEm,
+} from '@/services/hn/hn-service.js';
+import type { AlgoliaHighlightValue, AlgoliaHit } from '@/services/hn/types.js';
+
+/**
+ * Project Algolia's `_highlightResult` into a flat snippet object: the title
+ * snippet, the body snippet (preferring comment_text over story_text to match
+ * the `text` mapping), and the deduplicated union of matched words across all
+ * surfaced fields. Returns undefined when nothing matched.
+ */
+function extractHighlights(hit: AlgoliaHit) {
+  const h = hit._highlightResult;
+  if (!h) return;
+
+  const matched = (v: AlgoliaHighlightValue | undefined): v is AlgoliaHighlightValue =>
+    v != null && v.matchLevel !== 'none';
+
+  const title = matched(h.title) ? h.title.value : undefined;
+  const textHl = matched(h.comment_text)
+    ? h.comment_text
+    : matched(h.story_text)
+      ? h.story_text
+      : undefined;
+
+  const fields = [h.title, h.url, h.author, h.comment_text, h.story_text, h.story_title];
+  const matchedWords = Array.from(new Set(fields.flatMap((f) => f?.matchedWords ?? [])));
+
+  if (title == null && textHl == null && matchedWords.length === 0) return;
+
+  return {
+    ...(title != null && { title: stripHtmlPreservingEm(title) }),
+    ...(textHl && { text: stripHtmlPreservingEm(textHl.value) }),
+    matchedWords,
+  };
+}
 
 export const searchHn = tool('hn_search_content', {
   description:
@@ -59,6 +98,12 @@ export const searchHn = tool('hn_search_content', {
             id: z.number().describe('HN item ID — use with hn_get_thread to read the discussion.'),
             title: z.string().optional().describe('Story title (present for stories).'),
             url: z.string().optional().describe('External link URL.'),
+            domain: z
+              .string()
+              .optional()
+              .describe(
+                'Bare hostname derived from url (e.g. "github.com", with leading "www." stripped). Absent when url is missing or unparseable.',
+              ),
             author: z.string().describe('Author username.'),
             points: z.number().optional().describe('Score/upvotes.'),
             numComments: z.number().optional().describe('Comment count.'),
@@ -72,6 +117,30 @@ export const searchHn = tool('hn_search_content', {
               .optional()
               .describe('Parent story ID for comment hits; equals `id` for story hits.'),
             text: z.string().optional().describe('Comment or story body text (HTML stripped).'),
+            highlights: z
+              .object({
+                title: z
+                  .string()
+                  .optional()
+                  .describe(
+                    'Title snippet with matched terms wrapped in `<em>…</em>`. Absent when the title did not match.',
+                  ),
+                text: z
+                  .string()
+                  .optional()
+                  .describe(
+                    'Body snippet (comment_text or story_text) with matched terms wrapped in `<em>…</em>`. Absent when the body did not match.',
+                  ),
+                matchedWords: z
+                  .array(z.string())
+                  .describe(
+                    'Deduplicated union of matched terms across all searchable fields (title, url, author, comment_text, story_text, story_title).',
+                  ),
+              })
+              .optional()
+              .describe(
+                'Algolia per-field highlight metadata showing which terms matched and where. Absent when no fields produced a match.',
+              ),
           })
           .describe('A single Algolia search hit (story or comment).'),
       )
@@ -94,10 +163,14 @@ export const searchHn = tool('hn_search_content', {
 
     const hits = result.hits.map((hit) => {
       const rawText = hit.comment_text ?? hit.story_text;
+      const url = normalizeUrl(hit.url);
+      const domain = extractDomain(url);
+      const highlights = extractHighlights(hit);
       return {
         id: Number(hit.objectID),
         title: hit.title ?? undefined,
-        url: normalizeUrl(hit.url),
+        url,
+        domain,
         author: hit.author,
         points: hit.points ?? undefined,
         numComments: hit.num_comments ?? undefined,
@@ -105,6 +178,7 @@ export const searchHn = tool('hn_search_content', {
         storyTitle: hit.story_title ?? undefined,
         storyId: hit.story_id ?? undefined,
         text: rawText ? stripHtml(rawText) || undefined : undefined,
+        ...(highlights && { highlights }),
       };
     });
 
@@ -142,6 +216,19 @@ export const searchHn = tool('hn_search_content', {
       return [{ type: 'text' as const, text: `"${result.query}" — no results.${suggestion}` }];
     }
 
+    /** Render highlight metadata as a `> match: ...` footer. Surfaces each highlights field separately so structured consumers and the LLM both see what matched. */
+    const renderHighlights = (hl: {
+      title?: string | undefined;
+      text?: string | undefined;
+      matchedWords: string[];
+    }) => {
+      const parts: string[] = [];
+      if (hl.title) parts.push(`title: ${hl.title}`);
+      if (hl.text) parts.push(`body: ${hl.text}`);
+      if (hl.matchedWords.length) parts.push(`terms: ${hl.matchedWords.join(', ')}`);
+      return parts.length ? `\n> match — ${parts.join(' | ')}` : '';
+    };
+
     const lines = result.hits.map((h) => {
       if (h.title) {
         // Story result — Algolia returns storyId === id for stories, so suppress the parent ref unless it actually differs or a parent title is set.
@@ -158,9 +245,11 @@ export const searchHn = tool('hn_search_content', {
         ]
           .filter(Boolean)
           .join(' | ');
+        const domain = h.domain ? ` (${h.domain})` : '';
         const url = h.url ? `\n${h.url}` : '';
         const text = h.text ? `\n${h.text}` : '';
-        return `### ${h.title}\n${meta}${parentRef}${url}${text}`;
+        const hlLine = h.highlights ? renderHighlights(h.highlights) : '';
+        return `### ${h.title}${domain}\n${meta}${parentRef}${url}${text}${hlLine}`;
       }
       // Comment result — parent context in heading.
       const meta = [
@@ -172,7 +261,8 @@ export const searchHn = tool('hn_search_content', {
         .filter(Boolean)
         .join(' | ');
       const text = h.text ? `\n${h.text}` : '';
-      return `### Comment on "${h.storyTitle ?? 'unknown'}" (story id:${h.storyId ?? '?'})\n${meta}${text}`;
+      const hlLine = h.highlights ? renderHighlights(h.highlights) : '';
+      return `### Comment on "${h.storyTitle ?? 'unknown'}" (story id:${h.storyId ?? '?'})\n${meta}${text}${hlLine}`;
     });
 
     const header = `## "${result.query}" — ${result.totalHits} results (page ${result.page + 1}/${result.totalPages}, p:${result.page})`;

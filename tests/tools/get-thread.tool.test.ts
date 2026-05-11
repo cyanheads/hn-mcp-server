@@ -105,6 +105,7 @@ describe('hn_get_thread handler', () => {
     expect(result.comments).toEqual([]);
     expect(result.totalLoaded).toBe(0);
     expect(result.totalAvailable).toBe(3);
+    expect(result.omitted).toEqual({ deleted: 0, dead: 0 });
     expect(hn.fetchItems).not.toHaveBeenCalled();
   });
 
@@ -175,6 +176,64 @@ describe('hn_get_thread handler', () => {
     expect(result.totalLoaded).toBe(0);
   });
 
+  it('counts omitted dead and deleted comments', async () => {
+    const storyWith4Kids: HnItem = { ...mockStory, kids: [10, 11, 12, 13], descendants: 4 };
+    const live: HnItem = { id: 10, type: 'comment', by: 'bob', text: 'real', parent: 1 };
+    const dead: HnItem = { id: 11, type: 'comment', dead: true, parent: 1 };
+    const deleted1: HnItem = { id: 12, type: 'comment', deleted: true, parent: 1 };
+    const deleted2: HnItem = { id: 13, type: 'comment', deleted: true, parent: 1 };
+    hn.fetchItem.mockResolvedValue(storyWith4Kids);
+    hn.fetchItems.mockResolvedValueOnce([live, dead, deleted1, deleted2]);
+
+    const result = await getThread.handler(parse({ depth: 1 }), ctx);
+
+    expect(result.comments).toHaveLength(1);
+    expect(result.omitted).toEqual({ deleted: 2, dead: 1 });
+  });
+
+  it('reports zero omitted when no comments are dropped', async () => {
+    hn.fetchItem.mockResolvedValue(mockStory);
+    hn.fetchItems.mockResolvedValueOnce([mockComment1, mockComment2]);
+
+    const result = await getThread.handler(parse({ depth: 1 }), ctx);
+
+    expect(result.omitted).toEqual({ deleted: 0, dead: 0 });
+  });
+
+  it('marks isOp:true when comment author equals root author', async () => {
+    /** Alice is the OP of mockStory; her reply on her own thread should be tagged. */
+    const opReply: HnItem = { id: 10, type: 'comment', by: 'alice', text: 'thanks!', parent: 1 };
+    hn.fetchItem.mockResolvedValue(mockStory);
+    hn.fetchItems.mockResolvedValueOnce([opReply, mockComment2]);
+
+    const result = await getThread.handler(parse({ depth: 1 }), ctx);
+
+    expect(result.comments[0]).toMatchObject({ id: 10, by: 'alice', isOp: true });
+    expect(result.comments[1]).toMatchObject({ id: 11, by: 'carol', isOp: false });
+  });
+
+  it('isOp is false when comment author is missing', async () => {
+    const anonComment: HnItem = { id: 10, type: 'comment', text: '...', parent: 1 };
+    hn.fetchItem.mockResolvedValue(mockStory);
+    hn.fetchItems.mockResolvedValueOnce([anonComment]);
+
+    const result = await getThread.handler(parse({ depth: 1 }), ctx);
+
+    expect(result.comments[0]).toMatchObject({ id: 10, isOp: false });
+  });
+
+  it('isOp is false when root author is missing (cannot match anonymous OP)', async () => {
+    const { by: _by, ...storyWithoutAuthor } = mockStory;
+    const anonStory: HnItem = storyWithoutAuthor;
+    const anonComment: HnItem = { id: 10, type: 'comment', text: '...', parent: 1 };
+    hn.fetchItem.mockResolvedValue(anonStory);
+    hn.fetchItems.mockResolvedValueOnce([anonComment]);
+
+    const result = await getThread.handler(parse({ depth: 1 }), ctx);
+
+    expect(result.comments[0]).toMatchObject({ id: 10, isOp: false });
+  });
+
   it('calls stripHtml on item text and comment text', async () => {
     const storyWithText: HnItem = { ...mockStory, text: '<p>Hello</p>', title: '<b>Title</b>' };
     const { kids: _k, ...comment1Base } = mockComment1;
@@ -219,6 +278,7 @@ describe('hn_get_thread format', () => {
       comments: [],
       totalLoaded: 0,
       totalAvailable: 0,
+      omitted: { deleted: 0, dead: 0 },
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
@@ -234,7 +294,16 @@ describe('hn_get_thread format', () => {
     const result = {
       item: { id: 1, type: 'story', by: 'alice', title: 'Test Story', score: 10, descendants: 2 },
       comments: [
-        { id: 10, by: 'bob', time: 1001, text: 'Top-level', depth: 0, parentId: 1, childCount: 1 },
+        {
+          id: 10,
+          by: 'bob',
+          time: 1001,
+          text: 'Top-level',
+          depth: 0,
+          parentId: 1,
+          childCount: 1,
+          isOp: false,
+        },
         {
           id: 20,
           by: 'carol',
@@ -243,10 +312,12 @@ describe('hn_get_thread format', () => {
           depth: 1,
           parentId: 10,
           childCount: 0,
+          isOp: false,
         },
       ],
       totalLoaded: 2,
       totalAvailable: 2,
+      omitted: { deleted: 0, dead: 0 },
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
@@ -256,6 +327,43 @@ describe('hn_get_thread format', () => {
     expect(text).toContain('Top-level');
     expect(text).toContain('**carol** (id:20');
     expect(text).toContain('  Nested reply');
+  });
+
+  it('marks OP comments with "(OP)" suffix in author line', () => {
+    const result = {
+      item: { id: 1, type: 'story', by: 'alice', title: 'Test Story' },
+      comments: [
+        {
+          id: 10,
+          by: 'alice',
+          time: 1001,
+          text: 'Thanks for replies',
+          depth: 0,
+          parentId: 1,
+          childCount: 0,
+          isOp: true,
+        },
+        {
+          id: 11,
+          by: 'bob',
+          time: 1002,
+          text: 'Comment',
+          depth: 0,
+          parentId: 1,
+          childCount: 0,
+          isOp: false,
+        },
+      ],
+      totalLoaded: 2,
+      totalAvailable: 2,
+      omitted: { deleted: 0, dead: 0 },
+    };
+
+    const blocks = format(result as Parameters<typeof format>[0]);
+    const text = blocks[0].text;
+    expect(text).toContain('**alice (OP)**');
+    expect(text).toContain('**bob**');
+    expect(text).not.toContain('**bob (OP)**');
   });
 
   it('shows partial load indicator when not all comments loaded', () => {
@@ -277,10 +385,12 @@ describe('hn_get_thread format', () => {
           depth: 0,
           parentId: 1,
           childCount: 0,
+          isOp: false,
         },
       ],
       totalLoaded: 1,
       totalAvailable: 500,
+      omitted: { deleted: 0, dead: 0 },
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
@@ -289,11 +399,49 @@ describe('hn_get_thread format', () => {
     );
   });
 
+  it('shows omitted summary line when any comments were dropped', () => {
+    const result = {
+      item: { id: 1, type: 'story', by: 'alice', title: 'Thread' },
+      comments: [
+        {
+          id: 10,
+          by: 'bob',
+          time: 1001,
+          text: 'real',
+          depth: 0,
+          parentId: 1,
+          childCount: 0,
+          isOp: false,
+        },
+      ],
+      totalLoaded: 1,
+      totalAvailable: 4,
+      omitted: { deleted: 2, dead: 1 },
+    };
+
+    const blocks = format(result as Parameters<typeof format>[0]);
+    expect(blocks[0].text).toContain('(2 deleted, 1 dead — omitted from this view)');
+  });
+
+  it('omits the omitted-summary line when nothing was dropped', () => {
+    const result = {
+      item: { id: 1, type: 'story', by: 'alice', title: 'Thread' },
+      comments: [],
+      totalLoaded: 0,
+      totalAvailable: 0,
+      omitted: { deleted: 0, dead: 0 },
+    };
+
+    const blocks = format(result as Parameters<typeof format>[0]);
+    expect(blocks[0].text).not.toContain('omitted from this view');
+  });
+
   it('formats comment as root with "Comment by author"', () => {
     const result = {
       item: { id: 10, type: 'comment', by: 'bob', text: 'Some comment' },
       comments: [],
       totalLoaded: 0,
+      omitted: { deleted: 0, dead: 0 },
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);

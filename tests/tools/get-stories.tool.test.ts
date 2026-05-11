@@ -13,6 +13,14 @@ vi.mock('@/services/hn/hn-service.js', () => ({
   ),
   stripHtml: vi.fn((html: string) => html),
   normalizeUrl: vi.fn((url?: string) => url || undefined),
+  extractDomain: vi.fn((url?: string) => {
+    if (!url) return;
+    try {
+      return new URL(url).hostname.replace(/^www\./, '');
+    } catch {
+      return;
+    }
+  }),
 }));
 
 import { getStories } from '@/mcp-server/tools/definitions/get-stories.tool.js';
@@ -89,12 +97,40 @@ describe('getStories', () => {
         type: 'story',
         title: 'Story 1',
         url: 'https://example.com/1',
+        domain: 'example.com',
         score: 100,
         by: 'testuser',
         time: 1700000000,
         descendants: 42,
       });
       expect(result.stories[0]).not.toHaveProperty('text');
+    });
+
+    it('derives domain from url and strips www.', async () => {
+      const items = [
+        makeItem({ id: 1, url: 'https://www.github.com/repo' }),
+        makeItem({ id: 2, url: 'https://news.ycombinator.com/item?id=42' }),
+      ];
+      mockService.fetchFeed.mockResolvedValue([1, 2]);
+      mockService.fetchItems.mockResolvedValue(items);
+
+      const ctx = createMockContext();
+      const result = await getStories.handler(getStories.input.parse({ feed: 'top' }), ctx);
+
+      expect(result.stories[0]!.domain).toBe('github.com');
+      expect(result.stories[1]!.domain).toBe('news.ycombinator.com');
+    });
+
+    it('omits domain when url is absent or unparseable', async () => {
+      const items = [makeItem({ id: 1, url: undefined }), makeItem({ id: 2, url: 'not a url' })];
+      mockService.fetchFeed.mockResolvedValue([1, 2]);
+      mockService.fetchItems.mockResolvedValue(items);
+
+      const ctx = createMockContext();
+      const result = await getStories.handler(getStories.input.parse({ feed: 'top' }), ctx);
+
+      expect(result.stories[0]!).not.toHaveProperty('domain');
+      expect(result.stories[1]!).not.toHaveProperty('domain');
     });
 
     it('paginates with offset and sets hasMore correctly', async () => {
@@ -256,6 +292,7 @@ describe('getStories', () => {
             id: 1,
             title: 'Test Story',
             url: 'https://example.com',
+            domain: 'example.com',
             score: 200,
             by: 'author',
             time: 1700000000,
@@ -272,10 +309,34 @@ describe('getStories', () => {
       expect(blocks).toHaveLength(1);
       const text = blocks[0]!.text;
       expect(text).toContain('## top stories (1–1 of 100, offset:0)');
-      expect(text).toContain('[1] Test Story');
+      expect(text).toContain('[1] Test Story (example.com)');
       expect(text).toContain('200 pts | by author | 55 comments');
       expect(text).toContain('id:1');
       expect(text).toContain('https://example.com');
+    });
+
+    it('omits domain parens when domain is absent', () => {
+      const blocks = getStories.format!({
+        stories: [
+          {
+            id: 1,
+            title: 'Ask HN: Best Editor?',
+            score: 50,
+            by: 'curious',
+            time: 1700000000,
+            descendants: 20,
+            type: 'story',
+          },
+        ],
+        feed: 'ask',
+        total: 1,
+        offset: 0,
+        hasMore: false,
+      });
+
+      const text = blocks[0]!.text;
+      expect(text).toContain('[1] Ask HN: Best Editor?\n');
+      expect(text).not.toMatch(/\(\)/);
     });
 
     it('uses offset for rank numbering', () => {

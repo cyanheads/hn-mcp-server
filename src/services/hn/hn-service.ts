@@ -83,9 +83,35 @@ export function stripHtml(html: string): string {
   return decodeHtmlEntities(text).trim();
 }
 
+/**
+ * Strip HN HTML but preserve `<em>…</em>` markers — used to clean Algolia
+ * highlight snippets, which contain the original field HTML with `<em>` tags
+ * inserted around matched terms. Other tags are removed by `stripHtml`.
+ */
+export function stripHtmlPreservingEm(html: string): string {
+  if (!html) return '';
+  const masked = html.replace(/<em>/g, '@@EM_OPEN@@').replace(/<\/em>/g, '@@EM_CLOSE@@');
+  return stripHtml(masked)
+    .replace(/@@EM_OPEN@@/g, '<em>')
+    .replace(/@@EM_CLOSE@@/g, '</em>');
+}
+
 /** Normalize empty URL strings to undefined. */
 export function normalizeUrl(url?: string | null): string | undefined {
   return url?.trim() || undefined;
+}
+
+/**
+ * Extract the bare hostname (lowercased, leading `www.` stripped) from a URL.
+ * Returns undefined for missing or unparseable URLs.
+ */
+export function extractDomain(url: string | undefined): string | undefined {
+  if (!url) return;
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return;
+  }
 }
 
 /** Filter out dead, deleted, and null items. */

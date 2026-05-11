@@ -10,7 +10,23 @@ import type { AlgoliaResponse } from '@/services/hn/types.js';
 vi.mock('@/services/hn/hn-service.js', () => ({
   getHnService: vi.fn(),
   stripHtml: vi.fn((html: string) => html),
+  stripHtmlPreservingEm: vi.fn((html: string) =>
+    html
+      .replace(/<em>/g, '@@EM_OPEN@@')
+      .replace(/<\/em>/g, '@@EM_CLOSE@@')
+      .replace(/<[^>]+>/g, '')
+      .replace(/@@EM_OPEN@@/g, '<em>')
+      .replace(/@@EM_CLOSE@@/g, '</em>'),
+  ),
   normalizeUrl: vi.fn((url?: string | null) => url?.trim() || undefined),
+  extractDomain: vi.fn((url?: string) => {
+    if (!url) return;
+    try {
+      return new URL(url).hostname.replace(/^www\./, '');
+    } catch {
+      return;
+    }
+  }),
 }));
 
 import { searchHn } from '@/mcp-server/tools/definitions/search-content.tool.js';
@@ -92,6 +108,7 @@ describe('hn_search_content handler', () => {
           id: 123,
           title: 'Test Story',
           url: 'https://example.com',
+          domain: 'example.com',
           author: 'alice',
           points: 100,
           numComments: 50,
@@ -104,6 +121,7 @@ describe('hn_search_content handler', () => {
           id: 456,
           title: undefined,
           url: undefined,
+          domain: undefined,
           author: 'bob',
           points: 5,
           numComments: undefined,
@@ -234,6 +252,139 @@ describe('hn_search_content handler', () => {
     expect(result.message).toBeUndefined();
   });
 
+  it('derives domain from url and strips www.', async () => {
+    const hits = [
+      { ...storyHit, url: 'https://www.github.com/x' },
+      { ...storyHit, objectID: '124', url: 'https://news.ycombinator.com/item' },
+    ];
+    mockSearch.mockResolvedValue(algoliaResponse({ hits, nbHits: 2 }));
+
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'x' }), ctx);
+
+    expect(result.hits[0]!.domain).toBe('github.com');
+    expect(result.hits[1]!.domain).toBe('news.ycombinator.com');
+  });
+
+  it('omits domain when url is missing', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [commentHit], nbHits: 1 }));
+
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'x' }), ctx);
+
+    expect(result.hits[0]!.domain).toBeUndefined();
+  });
+
+  it('maps _highlightResult into highlights field with <em> markers preserved', async () => {
+    const hitWithHighlights = {
+      ...storyHit,
+      _highlightResult: {
+        title: {
+          value: '<em>Rust</em> is Great',
+          matchLevel: 'full' as const,
+          matchedWords: ['rust'],
+        },
+        url: { value: 'https://rust.dev', matchLevel: 'none' as const, matchedWords: [] },
+        author: { value: 'alice', matchLevel: 'none' as const, matchedWords: [] },
+      },
+    };
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [hitWithHighlights], nbHits: 1 }));
+
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'rust' }), ctx);
+
+    expect(result.hits[0]!.highlights).toEqual({
+      title: '<em>Rust</em> is Great',
+      matchedWords: ['rust'],
+    });
+  });
+
+  it('strips other HTML from highlight body snippets while preserving <em>', async () => {
+    const hitWithCommentHighlight = {
+      ...commentHit,
+      _highlightResult: {
+        comment_text: {
+          value: '<p>I <em>think</em> <em>Rust</em> is great</p>',
+          matchLevel: 'full' as const,
+          matchedWords: ['think', 'rust'],
+        },
+      },
+    };
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [hitWithCommentHighlight], nbHits: 1 }));
+
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'rust think' }), ctx);
+
+    expect(result.hits[0]!.highlights?.text).toBe('I <em>think</em> <em>Rust</em> is great');
+    expect(result.hits[0]!.highlights?.matchedWords).toEqual(['think', 'rust']);
+  });
+
+  it('falls back to story_text when comment_text has no match', async () => {
+    const hitWithStoryHighlight = {
+      ...storyHit,
+      _highlightResult: {
+        comment_text: { value: '', matchLevel: 'none' as const, matchedWords: [] },
+        story_text: {
+          value: 'Some <em>rust</em> talk',
+          matchLevel: 'full' as const,
+          matchedWords: ['rust'],
+        },
+      },
+    };
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [hitWithStoryHighlight], nbHits: 1 }));
+
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'rust' }), ctx);
+
+    expect(result.hits[0]!.highlights?.text).toBe('Some <em>rust</em> talk');
+  });
+
+  it('deduplicates matchedWords across fields', async () => {
+    const hit = {
+      ...storyHit,
+      _highlightResult: {
+        title: {
+          value: '<em>Rust</em>',
+          matchLevel: 'full' as const,
+          matchedWords: ['rust'],
+        },
+        comment_text: {
+          value: '<em>Rust</em> talk',
+          matchLevel: 'full' as const,
+          matchedWords: ['rust'],
+        },
+        story_title: {
+          value: '<em>Rust</em>',
+          matchLevel: 'full' as const,
+          matchedWords: ['rust'],
+        },
+      },
+    };
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [hit], nbHits: 1 }));
+
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'rust' }), ctx);
+
+    expect(result.hits[0]!.highlights?.matchedWords).toEqual(['rust']);
+  });
+
+  it('omits highlights when _highlightResult is absent', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [storyHit], nbHits: 1 }));
+
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'x' }), ctx);
+
+    expect(result.hits[0]!).not.toHaveProperty('highlights');
+  });
+
+  it('omits highlights when every field has matchLevel: none and no matched words', async () => {
+    const hit = {
+      ...storyHit,
+      _highlightResult: {
+        title: { value: 'Test', matchLevel: 'none' as const, matchedWords: [] },
+        url: { value: 'https://x', matchLevel: 'none' as const, matchedWords: [] },
+      },
+    };
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [hit], nbHits: 1 }));
+
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'x' }), ctx);
+
+    expect(result.hits[0]!).not.toHaveProperty('highlights');
+  });
+
   it('passes input params through to hn.search', async () => {
     mockSearch.mockResolvedValue(algoliaResponse());
 
@@ -296,6 +447,7 @@ describe('hn_search_content format', () => {
           id: 123,
           title: 'Rust is Great',
           url: 'https://rust.dev',
+          domain: 'rust.dev',
           author: 'alice',
           points: 200,
           numComments: 80,
@@ -313,9 +465,85 @@ describe('hn_search_content format', () => {
 
     const text = content[0]!.text;
     expect(text).toContain('## "rust" — 500 results (page 1/17, p:0)');
-    expect(text).toContain('### Rust is Great');
+    expect(text).toContain('### Rust is Great (rust.dev)');
     expect(text).toContain('id:123 | alice | 200 pts | 80 comments | 2024-06-15');
     expect(text).toContain('https://rust.dev');
+  });
+
+  it('renders highlight metadata as a "match" footer alongside the raw title', () => {
+    const content = searchHn.format!({
+      hits: [
+        {
+          id: 1,
+          title: 'Rust is great',
+          author: 'alice',
+          points: 50,
+          numComments: 5,
+          createdAt: '2024-01-01T00:00:00Z',
+          highlights: { title: '<em>Rust</em> is great', matchedWords: ['rust'] },
+        },
+      ],
+      totalHits: 1,
+      page: 0,
+      totalPages: 1,
+      query: 'rust',
+    });
+
+    const text = content[0]!.text;
+    expect(text).toContain('### Rust is great');
+    expect(text).toContain('> match — title: <em>Rust</em> is great | terms: rust');
+  });
+
+  it('renders highlight body snippet in the match footer for comment results', () => {
+    const content = searchHn.format!({
+      hits: [
+        {
+          id: 2,
+          author: 'bob',
+          points: 1,
+          createdAt: '2024-01-01T00:00:00Z',
+          storyTitle: 'Discussion',
+          storyId: 1,
+          text: 'I think Rust is great',
+          highlights: {
+            text: 'I <em>think</em> <em>Rust</em> is great',
+            matchedWords: ['think', 'rust'],
+          },
+        },
+      ],
+      totalHits: 1,
+      page: 0,
+      totalPages: 1,
+      query: 'rust think',
+    });
+
+    const text = content[0]!.text;
+    expect(text).toContain('I think Rust is great');
+    expect(text).toContain('body: I <em>think</em> <em>Rust</em> is great');
+    expect(text).toContain('terms: think, rust');
+  });
+
+  it('omits the match footer entirely when highlights is absent', () => {
+    const content = searchHn.format!({
+      hits: [
+        {
+          id: 1,
+          title: 'No highlights here',
+          url: 'https://example.com',
+          domain: 'example.com',
+          author: 'alice',
+          points: 10,
+          numComments: 0,
+          createdAt: '2024-01-01T00:00:00Z',
+        },
+      ],
+      totalHits: 1,
+      page: 0,
+      totalPages: 1,
+      query: 'x',
+    });
+
+    expect(content[0]!.text).not.toContain('match —');
   });
 
   it('formats comment results with "Comment on" and text preview', () => {
