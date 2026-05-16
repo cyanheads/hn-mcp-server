@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.5.2] — 2026-05-16
+
+Maintenance + capability release. Adopts the MCP spec's server-level `instructions` field on `createApp()` so spec-compliant clients forward orientation text (HN item types, ID reuse across tools, case-sensitive usernames, field sparsity) to the model as session context — previously this text had to live in every tool description. Pulls in the framework's 0.9.x line, which fixes Cloudflare Workers boot under `nodejs_compat`, hardens SSRF DNS validation in Workers, broadens IPv6 SSRF coverage, gates the experimental `tasks` capability on actual task-tool registration (unblocks MCP spec `2025-06-18` strict-parse clients), and moves definition linting to build-time only (faster cold starts). No application code changes beyond the `instructions` adoption; no breaking changes for this server's tool surface.
+
+### Added
+
+- `src/index.ts`: server-level `instructions` string on `createApp()` ([cyanheads/mcp-ts-core#91](https://github.com/cyanheads/mcp-ts-core/issues/91)). Sent on every `initialize` response and forwarded by spec-compliant clients to the model. Names the four tools, item type union (`story`, `comment`, `job`, `poll`, `pollopt`), ID reuse across tools, case-sensitive usernames, and the "treat absent fields as unknown" sparsity contract — moves session-level orientation out of per-tool description repetition.
+
+### Changed
+
+- Bumped `@cyanheads/mcp-ts-core` from `^0.8.20` to `^0.9.1`. Spans two framework releases:
+  - **0.9.0**: `instructions` field on entry points; Workers now boot and serve MCP JSON-RPC under `nodejs_compat` (previous detection used `!process.versions.node`, which is truthy under compat); five-rule cross-vendor portability lint family (`schema-format-portability` error-level default-on; warning-level `schema-anyof-needs-type`, `schema-no-discriminator-keyword`; opt-in `schema-no-defs`, `schema-dialect-tag`); definition linting moved to build-time only (no longer gates `createApp()` startup); RFC 8414 §3 path-suffixed `/.well-known/oauth-protected-resource/{path}` mount; SSRF DNS validation now enforced in Workers and IPv6 blocklist broadened (IPv4-mapped, ULA, link-local, multicast); `FileSystemProvider` re-validates `tenantId` at the storage boundary; rate-limit metric cardinality bounded ([cyanheads/mcp-ts-core#124](https://github.com/cyanheads/mcp-ts-core/issues/124), [#91](https://github.com/cyanheads/mcp-ts-core/issues/91), [#132](https://github.com/cyanheads/mcp-ts-core/issues/132), [#70](https://github.com/cyanheads/mcp-ts-core/issues/70), [#72](https://github.com/cyanheads/mcp-ts-core/issues/72), [#114](https://github.com/cyanheads/mcp-ts-core/issues/114)).
+  - **0.9.1**: `tasks` capability advertisement gated on actual task-tool registration (fixes strict-parse MCP `2025-06-18` clients); new `Context.notifyToolListChanged` / `notifyPromptListChanged` notifiers; OTel `deployment.environment.name` migrated to typed `ATTR_DEPLOYMENT_ENVIRONMENT_NAME`; `fast-xml-parser` pinned to exact `5.7.3`; OTel exporter/instrumentation refresh `^0.217 → ^0.218`.
+  - Portability lint impact: this server's four tools were already free of `z.url()`/`z.cuid()`/etc. constructs that would trip `schema-format-portability` (default-on, error). `bun run lint:mcp` and `bun run devcheck` pass clean.
+- `scripts/build-changelog.ts` summary cap raised `250 → 350` chars ([cyanheads/mcp-ts-core#129](https://github.com/cyanheads/mcp-ts-core/issues/129)) — synced from upstream; 250 was forcing operator-relevant context out of rollup summaries.
+- `scripts/devcheck.ts` `bun outdated` parser fix — `bun outdated` emits markdown-style rows (`| pkg | … |`) with an empty leading cell, so `split('|')[0]` was always empty and the allowlist never matched. Now reads index `[1]` and strips the `(dev|peer|prod|optional)` workspace marker so bare package names match. Synced from upstream framework devcheck.
+- Refreshed project skills synced from `mcp-ts-core@0.9.0`/`0.9.1` (no version regressions): `add-tool` 2.8 → 2.9 (mutator response design subsection + unit-bearing numeric-name checklist item), `api-errors` 1.5 → 1.6 (`When not to throw` section), `api-linter` 1.2 → 1.3 (full portability rule family documented), `api-workers` 1.3 → 1.4 (`instructions` resolver form on `WorkerHandlerOptions`), `design-mcp-server` 2.10 → 2.11, `field-test` 2.3 → 2.4 (mutator-trigger situational row), `polish-docs-meta` 1.7 → 1.8 (`OTEL_ENABLED` README template now links to framework telemetry docs), `tool-defs-analysis` 1.1 → 1.2 (audit now walks 12 categories — added mutator observability and unit-bearing numeric names). All propagated to `.claude/skills/`.
+- Dependency refresh: `@cyanheads/mcp-ts-core ^0.8.20 → ^0.9.1`, `@types/node ^25.6.2 → ^25.8.0`, `vitest ^4.1.5 → ^4.1.6`.
+
+### Tests
+
+- 147 passing. No test changes — `instructions` is verified by the framework's own suite.
+
 ## [0.5.1] — 2026-05-11
 
 Patch to `hn_get_thread` — two response fields that were always present but rarely informative (`comments[].isOp` and `omitted`) are now absence-by-default and only emitted when they carry signal. The 0.5.0 shape required `isOp: boolean` on every comment and `omitted: { deleted, dead }` on every response, which on the common case (no OP reply, no moderation truncation) emitted `false` and `{ 0, 0 }` for zero information. Aligns these two fields with the rest of the schema — `title`, `url`, `score`, `text`, etc. are all absent-when-missing rather than `null`-filled. Wire payload shrinks across both fields; `format()` output is unchanged on the common case and identical on the signal case.
