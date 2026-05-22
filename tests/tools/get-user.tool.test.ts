@@ -213,7 +213,23 @@ describe('hn_get_user format', () => {
 
     expect(text).toContain('### Recent submissions');
     expect(text).toContain('**First Post** — id:1 | story | 42 pts | 10 comments');
-    expect(text).toContain('**[comment]** — id:2 | comment');
+    expect(text).toMatch(/\*\*\[comment\]\*\* — id:2(?!\s*\|\s*comment)/);
+  });
+
+  it.each([
+    { label: 'undefined title', submission: { id: 3, type: 'comment' as const } },
+    { label: 'empty title', submission: { id: 3, type: 'comment' as const, title: '' } },
+    { label: 'real title', submission: { id: 3, type: 'story' as const, title: 'Real' } },
+  ])('always renders the item type exactly once ($label)', ({ submission }) => {
+    const blocks = getUser.format!({
+      user: { id: 'pg', karma: 1, created: 1600000000, totalSubmissions: 1 },
+      submissions: [submission],
+    });
+    const text = (blocks[0] as { text: string }).text;
+    const subLine = text.split('\n').find((l) => l.includes(`id:${submission.id}`))!;
+
+    const occurrences = (subLine.match(new RegExp(`\\b${submission.type}\\b`, 'g')) ?? []).length;
+    expect(occurrences).toBe(1);
   });
 });
 

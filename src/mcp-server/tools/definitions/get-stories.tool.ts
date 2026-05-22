@@ -125,7 +125,23 @@ export const getStories = tool('hn_get_stories', {
 
   format: (result) => {
     if (result.stories.length === 0) {
-      return [{ type: 'text' as const, text: `${result.feed} feed — no stories` }];
+      if (result.total === 0) {
+        return [{ type: 'text' as const, text: `${result.feed} feed — no stories` }];
+      }
+      if (result.offset >= result.total) {
+        return [
+          {
+            type: 'text' as const,
+            text: `${result.feed} feed — offset ${result.offset} is past the end (feed has ${result.total} item${result.total === 1 ? '' : 's'})`,
+          },
+        ];
+      }
+      return [
+        {
+          type: 'text' as const,
+          text: `${result.feed} feed — no live stories on this page (offset:${result.offset}, feed total:${result.total})`,
+        },
+      ];
     }
 
     const lines = result.stories.map((s, i) => {

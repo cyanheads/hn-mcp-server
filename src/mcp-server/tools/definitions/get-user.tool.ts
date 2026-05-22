@@ -127,13 +127,13 @@ export const getUser = tool('hn_get_user', {
     if (result.submissions?.length) {
       lines.push('\n### Recent submissions');
       for (const s of result.submissions) {
-        const title = s.title ?? `[${s.type}]`;
+        const title = s.title || `[${s.type}]`;
         const date = s.time
           ? `${new Date(s.time * 1000).toISOString().slice(0, 10)} (t:${s.time})`
           : '';
         const meta = [
           `id:${s.id}`,
-          s.type,
+          s.title ? s.type : null,
           s.score != null ? `${s.score} pts` : null,
           s.descendants != null ? `${s.descendants} comments` : null,
           date,

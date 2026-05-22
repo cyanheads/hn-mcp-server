@@ -285,6 +285,52 @@ describe('getStories', () => {
       expect(blocks).toEqual([{ type: 'text', text: 'show feed — no stories' }]);
     });
 
+    it('reports when offset is past the end of a non-empty feed', () => {
+      const blocks = getStories.format!({
+        stories: [],
+        feed: 'jobs',
+        total: 31,
+        offset: 1000,
+        hasMore: false,
+      });
+
+      expect(blocks).toEqual([
+        {
+          type: 'text',
+          text: 'jobs feed — offset 1000 is past the end (feed has 31 items)',
+        },
+      ]);
+    });
+
+    it('singularizes the item count when the feed has exactly one item', () => {
+      const blocks = getStories.format!({
+        stories: [],
+        feed: 'jobs',
+        total: 1,
+        offset: 5,
+        hasMore: false,
+      });
+
+      expect((blocks[0] as { text: string }).text).toContain('feed has 1 item)');
+    });
+
+    it('reports when the page is empty because all items were filtered out', () => {
+      const blocks = getStories.format!({
+        stories: [],
+        feed: 'top',
+        total: 500,
+        offset: 10,
+        hasMore: true,
+      });
+
+      expect(blocks).toEqual([
+        {
+          type: 'text',
+          text: 'top feed — no live stories on this page (offset:10, feed total:500)',
+        },
+      ]);
+    });
+
     it('renders stories with rank, title, points, comments, and url', () => {
       const blocks = getStories.format!({
         stories: [
