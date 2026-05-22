@@ -1,282 +1,79 @@
 # Changelog
 
-## [0.5.2] — 2026-05-16
+All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
-Maintenance + capability release. Adopts the MCP spec's server-level `instructions` field on `createApp()` so spec-compliant clients forward orientation text (HN item types, ID reuse across tools, case-sensitive usernames, field sparsity) to the model as session context — previously this text had to live in every tool description. Pulls in the framework's 0.9.x line, which fixes Cloudflare Workers boot under `nodejs_compat`, hardens SSRF DNS validation in Workers, broadens IPv6 SSRF coverage, gates the experimental `tasks` capability on actual task-tool registration (unblocks MCP spec `2025-06-18` strict-parse clients), and moves definition linting to build-time only (faster cold starts). No application code changes beyond the `instructions` adoption; no breaking changes for this server's tool surface.
+## [0.5.3](changelog/0.5.x/0.5.3.md) — 2026-05-21
 
-### Added
+Field-test refinements to two `format()` output paths. `hn_get_stories` now distinguishes offset-past-end from genuinely-empty feeds. `hn_get_user` no longer duplicates the item type when rendering a typeless submission. Also migrates the project to the framework's directory-based changelog convention.
 
-- `src/index.ts`: server-level `instructions` string on `createApp()` ([cyanheads/mcp-ts-core#91](https://github.com/cyanheads/mcp-ts-core/issues/91)). Sent on every `initialize` response and forwarded by spec-compliant clients to the model. Names the four tools, item type union (`story`, `comment`, `job`, `poll`, `pollopt`), ID reuse across tools, case-sensitive usernames, and the "treat absent fields as unknown" sparsity contract — moves session-level orientation out of per-tool description repetition.
+## [0.5.2](changelog/0.5.x/0.5.2.md) — 2026-05-16
 
-### Changed
+Maintenance + capability release. Adopts the MCP spec server-level `instructions` field on `createApp()` so clients forward orientation text (item types, ID reuse, case-sensitive usernames, sparsity) to the model. Framework `^0.8.20 → ^0.9.1` brings Workers `nodejs_compat` fix, SSRF hardening, gated `tasks` capability, build-time-only lint.
 
-- Bumped `@cyanheads/mcp-ts-core` from `^0.8.20` to `^0.9.1`. Spans two framework releases:
-  - **0.9.0**: `instructions` field on entry points; Workers now boot and serve MCP JSON-RPC under `nodejs_compat` (previous detection used `!process.versions.node`, which is truthy under compat); five-rule cross-vendor portability lint family (`schema-format-portability` error-level default-on; warning-level `schema-anyof-needs-type`, `schema-no-discriminator-keyword`; opt-in `schema-no-defs`, `schema-dialect-tag`); definition linting moved to build-time only (no longer gates `createApp()` startup); RFC 8414 §3 path-suffixed `/.well-known/oauth-protected-resource/{path}` mount; SSRF DNS validation now enforced in Workers and IPv6 blocklist broadened (IPv4-mapped, ULA, link-local, multicast); `FileSystemProvider` re-validates `tenantId` at the storage boundary; rate-limit metric cardinality bounded ([cyanheads/mcp-ts-core#124](https://github.com/cyanheads/mcp-ts-core/issues/124), [#91](https://github.com/cyanheads/mcp-ts-core/issues/91), [#132](https://github.com/cyanheads/mcp-ts-core/issues/132), [#70](https://github.com/cyanheads/mcp-ts-core/issues/70), [#72](https://github.com/cyanheads/mcp-ts-core/issues/72), [#114](https://github.com/cyanheads/mcp-ts-core/issues/114)).
-  - **0.9.1**: `tasks` capability advertisement gated on actual task-tool registration (fixes strict-parse MCP `2025-06-18` clients); new `Context.notifyToolListChanged` / `notifyPromptListChanged` notifiers; OTel `deployment.environment.name` migrated to typed `ATTR_DEPLOYMENT_ENVIRONMENT_NAME`; `fast-xml-parser` pinned to exact `5.7.3`; OTel exporter/instrumentation refresh `^0.217 → ^0.218`.
-  - Portability lint impact: this server's four tools were already free of `z.url()`/`z.cuid()`/etc. constructs that would trip `schema-format-portability` (default-on, error). `bun run lint:mcp` and `bun run devcheck` pass clean.
-- `scripts/build-changelog.ts` summary cap raised `250 → 350` chars ([cyanheads/mcp-ts-core#129](https://github.com/cyanheads/mcp-ts-core/issues/129)) — synced from upstream; 250 was forcing operator-relevant context out of rollup summaries.
-- `scripts/devcheck.ts` `bun outdated` parser fix — `bun outdated` emits markdown-style rows (`| pkg | … |`) with an empty leading cell, so `split('|')[0]` was always empty and the allowlist never matched. Now reads index `[1]` and strips the `(dev|peer|prod|optional)` workspace marker so bare package names match. Synced from upstream framework devcheck.
-- Refreshed project skills synced from `mcp-ts-core@0.9.0`/`0.9.1` (no version regressions): `add-tool` 2.8 → 2.9 (mutator response design subsection + unit-bearing numeric-name checklist item), `api-errors` 1.5 → 1.6 (`When not to throw` section), `api-linter` 1.2 → 1.3 (full portability rule family documented), `api-workers` 1.3 → 1.4 (`instructions` resolver form on `WorkerHandlerOptions`), `design-mcp-server` 2.10 → 2.11, `field-test` 2.3 → 2.4 (mutator-trigger situational row), `polish-docs-meta` 1.7 → 1.8 (`OTEL_ENABLED` README template now links to framework telemetry docs), `tool-defs-analysis` 1.1 → 1.2 (audit now walks 12 categories — added mutator observability and unit-bearing numeric names). All propagated to `.claude/skills/`.
-- Dependency refresh: `@cyanheads/mcp-ts-core ^0.8.20 → ^0.9.1`, `@types/node ^25.6.2 → ^25.8.0`, `vitest ^4.1.5 → ^4.1.6`.
+## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-05-11
 
-### Tests
+`hn_get_thread` schema patch: `comments[].isOp` and `omitted` are now absence-by-default. `isOp` changed `z.boolean()` → `z.literal(true).optional()`; `omitted` made optional. Wire payload shrinks on the common case (no OP reply, no moderation truncation); `format()` output unchanged.
 
-- 147 passing. No test changes — `instructions` is verified by the framework's own suite.
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-05-11
 
-## [0.5.1] — 2026-05-11
+Enrichment release. Four new fields: `domain` on stories/search hits (hostname extracted from `url`), `highlights` on search hits (Algolia `_highlightResult` with `<em>…</em>` preserved), `isOp` on thread comments (author equals root item author), `omitted: { deleted, dead }` counters on threads. Closes #1, #2, #3, #4.
 
-Patch to `hn_get_thread` — two response fields that were always present but rarely informative (`comments[].isOp` and `omitted`) are now absence-by-default and only emitted when they carry signal. The 0.5.0 shape required `isOp: boolean` on every comment and `omitted: { deleted, dead }` on every response, which on the common case (no OP reply, no moderation truncation) emitted `false` and `{ 0, 0 }` for zero information. Aligns these two fields with the rest of the schema — `title`, `url`, `score`, `text`, etc. are all absent-when-missing rather than `null`-filled. Wire payload shrinks across both fields; `format()` output is unchanged on the common case and identical on the signal case.
+## [0.4.3](changelog/0.4.x/0.4.3.md) — 2026-05-11 · 🛡️ Security
 
-### Changed
+Maintenance. Framework `^0.8.17 → ^0.8.20` (bundles `hono` security patches GHSA-p77w-8qqv-26rm / GHSA-qp7p-654g-cw7p / GHSA-hm8q-7f3q-5f36). Engine bumps `bun >=1.3` / `node >=24`, Dockerfile base `oven/bun:1.3`. `@hono/otel` + `pino-pretty` moved to devDependencies. New `api-telemetry` skill.
 
-- `hn_get_thread`: `comments[].isOp` schema changed from `z.boolean()` to `z.literal(true).optional()`. Field is omitted from `structuredContent` when the comment is not an OP reply (including when either author is missing).
-- `hn_get_thread`: `omitted` schema changed from required to `.optional()`. Field is omitted from `structuredContent` when no comments were dropped during BFS traversal. Present only when `deleted > 0 || dead > 0`.
-- `hn_get_thread`: `format()` meta line emits the `| isOp:true` token only when the field is present and true. The `**author (OP)**` author suffix continues to render unchanged when `isOp: true`. `format()` already gated the omitted-summary footer on `> 0` in 0.5.0, so rendered output is unchanged.
+## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-05-05
 
-### Consumer contract
+Bundles two releases. (1) `hn_search_content` `dateRange` rejects unparseable dates via Zod `.refine()`. (2) Framework `^0.7.0 → ^0.8.17` brings the typed-error-contract API; adopted contracts on `hn_get_thread` (`item_not_found`) and `hn_get_user` (`user_not_found`); search empty-result message names applied filters.
 
-- Treat missing `comments[i].isOp` as "not OP" rather than "unknown". Truthy checks (`if (c.isOp)`, `c.isOp === true`) work identically to 0.5.0; only `c.isOp === false` flips behavior (and was always the wrong way to check).
-- Treat missing `omitted` as `{ deleted: 0, dead: 0 }`. Same pattern.
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-04-24
 
-### Tests
+Framework `^0.5.3 → ^0.7.0` (20 releases). `.describe()` now required recursively on array-element schemas — added to `stories[]`, `comments[]`, `submissions[]`, `hits[]`. New skills `api-linter`, `release-and-publish`, `security-pass`. `.github/ISSUE_TEMPLATE/` scaffolded.
 
-- 147 passing. Updated assertions in three handler tests (`isOp: false` → `not.toHaveProperty('isOp')`), removed `isOp: false` from four format-test fixtures, strengthened the OP format test to verify `| isOp:true` appears for the OP comment and `isOp:false` never appears in rendered output. Updated two handler tests for `omitted` absence (`expect(result).not.toHaveProperty('omitted')`) and removed the now-redundant `omitted: { deleted: 0, dead: 0 }` lines from six format-test fixtures.
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-04-20
 
-## [0.5.0] — 2026-05-11
+Framework `^0.4.1 → ^0.5.3` adopts the `format-parity` lint rule. `format()` output expanded across all four tools: meta lines lead with `id:N`, dual ISO + Unix timestamps, comment depth/parent annotations, indent capped at 10 levels.
 
-Enrichment release — surfaces signal that was being dropped on the floor. Four feature additions across three tools, no breaking changes. Closes [#1](https://github.com/cyanheads/hn-mcp-server/issues/1), [#2](https://github.com/cyanheads/hn-mcp-server/issues/2), [#3](https://github.com/cyanheads/hn-mcp-server/issues/3), [#4](https://github.com/cyanheads/hn-mcp-server/issues/4).
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-04-19
 
-### Added
+Upstream resilience. `withRetry` + `fetchWithTimeout` wrap HN Firebase + Algolia fetches with 10s per-request timeout, HTML-error-body detection (for rate-limited 200 OK responses), and `ctx.signal` cancellation. `hn_get_stories` schema fields made optional to preserve upstream sparsity. Framework `^0.2.10 → ^0.4.1`.
 
-- `hn_get_stories`, `hn_search_content`: new `domain` field on each result — bare hostname extracted from `url`, lowercased with leading `www.` stripped (e.g. `https://www.github.com/x` → `github.com`). Absent when `url` is missing or unparseable. Rendered as `(domain)` after the title in `format()` so the LLM and humans can pattern-match source at a glance instead of squinting at full URLs. Closes [#2](https://github.com/cyanheads/hn-mcp-server/issues/2).
-- `hn_search_content`: new optional `highlights` object on each hit — projects Algolia's `_highlightResult` into `{ title?, text?, matchedWords[] }`. `title`/`text` preserve `<em>…</em>` markers around matched terms (other HTML stripped via the new `stripHtmlPreservingEm` helper); `text` falls back from `comment_text` to `story_text` to match the `text` mapping; `matchedWords` is the deduplicated union across all six searchable Algolia fields. Rendered as a `> match — …` footer alongside the raw title/body so structured consumers and `format()`-only clients both see what matched. Absent when `_highlightResult` is missing or no field produced a match. Closes [#1](https://github.com/cyanheads/hn-mcp-server/issues/1).
-- `hn_get_thread`: new `isOp: boolean` field on each comment — true when the comment author equals the root item author (OP replying within their own thread), false when either author is missing. Rendered in `format()` as `**author (OP)**` in the comment header and as the literal `isOp:<bool>` token in the meta line. Closes [#3](https://github.com/cyanheads/hn-mcp-server/issues/3).
-- `hn_get_thread`: new `omitted: { deleted, dead }` counters on the response — surfaces how many comments BFS traversal dropped because HN flagged them as moderated, so callers can tell a partial view apart from a `maxComments`-truncated one. Rendered as `(N deleted, M dead — omitted from this view)` footer when nonzero. Counts apply to the per-request BFS only; `filterLiveItems` (used by `hn_get_stories`, `hn_get_user`) continues to silently drop dead/deleted entries. Closes [#4](https://github.com/cyanheads/hn-mcp-server/issues/4).
-- `extractDomain(url)` and `stripHtmlPreservingEm(html)` exported from `services/hn/hn-service.ts` — domain extraction reused by both `hn_get_stories` and `hn_search_content`; the EM-preserving stripper masks `<em>`/`</em>` with sentinel tokens before delegating to `stripHtml`, mirroring how code blocks are preserved.
-- `AlgoliaHighlightValue` interface + `_highlightResult` field on `AlgoliaHit` in `services/hn/types.ts`.
+## [0.1.9](changelog/0.1.x/0.1.9.md) — 2026-03-30
 
-### Changed
+Framework `^0.2.7 → ^0.2.10`. Biome patch. Skill refreshes — `add-tool` v1.1 (tool response design), `add-resource` v1.1 (tool coverage guidance), `design-mcp-server` v2.1 (live API probing, batch input design, resilience planning).
 
-- `hn_get_thread`: format() author line now reads `**author (OP)**` for OP comments instead of plain `**author**`. Meta line gains `isOp:<bool>` token.
-- `hn_get_thread`: comment meta line gains `isOp:<bool>` token (required by the linter's format-parity rule for boolean schema fields).
+## [0.1.8](changelog/0.1.x/0.1.8.md) — 2026-03-28
 
-### Tests
+Framework patch `^0.2.6 → ^0.2.7`.
 
-- 147 passing (up from 111). New coverage: `extractDomain` and `stripHtmlPreservingEm` edge cases; domain derivation, omission, and rendering across `hn_get_stories` and `hn_search_content`; highlight mapping including comment-to-story fallback, dedup, and absence cases; thread `omitted` counting and `isOp` true/false/missing-author paths.
+## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-03-28
 
-## [0.4.3] — 2026-05-11
+Framework patch `^0.2.4 → ^0.2.6`.
 
-Maintenance release — framework bump, runtime engine bump, dependency reorg. No application code changes.
+## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-03-28 · 🛡️ Security
 
-### Changed
+Framework `^0.1.28 → ^0.2.4`. `format()` output overhauled across all tools (markdown headers, IDs, dates, actionable hints). Security overrides for `path-to-regexp`, `picomatch`, `brace-expansion`. New `report-issue-framework` / `report-issue-local` skills.
 
-- Bumped `@cyanheads/mcp-ts-core` from `^0.8.17` to `^0.8.20`. Brings: `ctx.auth.token` reaches handlers (0.8.18, [cyanheads/mcp-ts-core#121](https://github.com/cyanheads/mcp-ts-core/issues/121)); telemetry visualization docs + `api-telemetry` skill (0.8.19, [cyanheads/mcp-ts-core#125](https://github.com/cyanheads/mcp-ts-core/issues/125)); `mcp_tool_scopes` claim union and `MCP_AUTH_DISABLE_SCOPE_CHECKS` bypass for OIDC providers that can't inject scopes into `scope` (0.8.20, [cyanheads/mcp-ts-core#128](https://github.com/cyanheads/mcp-ts-core/issues/128)). Bundles `hono` security patches (GHSA-p77w-8qqv-26rm, GHSA-qp7p-654g-cw7p, GHSA-hm8q-7f3q-5f36). No surface this server exposes is affected, but the floor is now pinned to a patched `hono` peer. No runtime breaks for this server.
-- **Engines:** `bun >=1.2.0 → >=1.3.0`, `node >=22.0.0 → >=24.0.0`. Mirrors the framework's new minimums.
-- **Dockerfile:** base image `oven/bun:1 → oven/bun:1.3` (build + runtime stages).
-- **Dependency reorg:** `@hono/otel` and `pino-pretty` moved from `dependencies` to `devDependencies`. Both are optional framework peers — this server doesn't emit OTel HTTP middleware traces and doesn't ship pretty-printed logs in production. Removing them from the runtime dependency set drops install size without affecting behavior.
-- **Dependency refresh:** `@cyanheads/mcp-ts-core ^0.8.17 → ^0.8.20`, `@biomejs/biome ^2.4.14 → ^2.4.15`, `@types/node ^25.6.0 → ^25.6.2`, `@hono/otel ^1.1.1 → ^1.1.2` (now dev-only).
+## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-03-23 · ⚠️ Breaking
 
-### Added
+Tool rename pass: all four tools gain `hn_` namespace prefix (`get_stories` → `hn_get_stories`, `get_thread` → `hn_get_thread`, `get_user` → `hn_get_user`, `search_hn` → `hn_search_content`). Breaking for any caller using the unprefixed names.
 
-- Project skill synced from `mcp-ts-core@0.8.19`: `api-telemetry` — catalog of every span, metric, attribute, completion-log field, env var, and runtime caveat the framework emits. Cross-linked from `api-utils` (now scoped to the helper API only) and from the `CLAUDE.md` skill index.
-- `scripts/build-changelog.ts` resynced from upstream: adds `security: boolean` frontmatter flag that renders a `🛡️ Security` badge in the rollup, alongside the existing `breaking` flag.
-- Refreshed skills synced from upstream (no version regressions): `api-auth` 1.0 → 1.1 (OIDC operator setup, claim-union table, bypass flag), `api-config` 1.3 → 1.4 (new `MCP_AUTH_DISABLE_SCOPE_CHECKS` env row), `api-utils` 2.1 → 2.2 (telemetry section points at the new `api-telemetry` skill), `maintenance` 2.0 → 2.1 (Phase C now resyncs pristine reference files like `changelog/template.md`), `report-issue-framework` 1.5 → 1.6 and `report-issue-local` 1.4 → 1.5 (terser issue-writing guidance, `bun 1.3.x` examples), `security-pass` 1.3 → 1.4 (bypass-in-production check), `setup` 1.6 → 1.7 (`bunx` over `npx`, substituted-name verification, `release-and-publish` in progression), `tool-defs-analysis` 1.0 → 1.1 (env vars no longer flagged as recovery-hint smell). All propagated to `.claude/skills/`.
+## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-03-23
 
-## [0.4.2] — 2026-05-05
+TypeScript major `^5.9.3 → ^6.0.2`. Framework `^0.1.25 → ^0.1.28`. Vitest patch. `remotes` entry on `server.json` with public streamable-http URL. `tsconfig.json` simplified (relative path alias).
 
-### Changed
+## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-03-21
 
-- `hn_search_content`: `dateRange.start` and `dateRange.end` now reject unparseable date strings at the input boundary via a Zod `.refine()` check, instead of silently producing `NaN` Algolia numeric filters when downstream `new Date(…).getTime()` fails. New test covers the rejection path.
-- `hn_search_content`: clarified `storyId` description to call out that it equals `id` for story hits and points to the parent story for comment hits. Tightened the empty-results `message` description to read more naturally.
-- `hn_get_thread`: typo fix and clarity in two field descriptions — `commentId` → `comment's itemId` in the `depth` guidance, and `comments[]` description now spells out the BFS-by-rank order instead of leaning on the abbreviation.
-- `CLAUDE.md`: synced agent protocol header from `0.4.0` to current.
+Framework patch `^0.1.23 → ^0.1.25`.
 
+## [0.1.2](changelog/0.1.x/0.1.2.md) — 2026-03-21
 
+Framework patch `^0.1.23 → ^0.1.24`. Publishing instructions added to CLAUDE.md.
 
-### Changed
+## [0.1.1](changelog/0.1.x/0.1.1.md) — 2026-03-21
 
-- Bumped `@cyanheads/mcp-ts-core` from `^0.7.0` to `^0.8.17`. Brings the typed-error-contract API (`tool({ errors: […] })` + `ctx.fail(reason, …)` + `ctx.recoveryFor(reason)`), recovery-hint mirroring into `content[]`, the `Framework Antipatterns` devcheck step, two new project skills (`api-canvas`, `tool-defs-analysis`), and refinements to several existing skills. No runtime breaks.
-- `hn_get_thread`: declared `errors: [{ reason: 'item_not_found', code: NotFound, when, recovery }]`. Replaced `notFound()` throw with `ctx.fail('item_not_found', …, { itemId, ...ctx.recoveryFor('item_not_found') })` so the recovery hint flows onto the wire and is mirrored into rendered text for `format()`-only clients.
-- `hn_get_user`: same treatment for `user_not_found` — typed contract, `ctx.fail`, recovery spread.
-- `hn_search_content`: empty-result responses now include an optional `message` field that names which filters were applied (`tags`, `author`, `minPoints`, `dateRange`) so the agent knows what to relax. Rendered as a recovery sentence when no hits, and as a `>` blockquote footer on non-empty pages whenever a message was generated. Output schema gains the `message?` field.
-- `HnService.parseJsonBody`: HTML-error-body throw (rate-limited upstream returning 200 OK with HTML) now carries `data: { upstream, reason: 'upstream_html', recovery: { hint } }`, so service-layer failures expose the same shape `format()`-only clients get from the typed contract.
-- Tool descriptions and field `.describe()` strings tightened across all four tools — sharper guidance on `count`/`offset`/`depth`/`maxComments`, and the `type` field now lists the actual HN item types.
-- Bumped `@biomejs/biome` (2.4.13 → 2.4.14) and `tsc-alias` (1.8.16 → 1.8.17).
+Renamed package to scoped `@cyanheads/hn-mcp-server`. Conditional OpenTelemetry install via `OTEL_ENABLED` Docker build arg. Framework `^0.1.22 → ^0.1.23`.
 
-### Added
+## [0.1.0](changelog/0.1.x/0.1.0.md) — 2026-03-21
 
-- `scripts/check-framework-antipatterns.ts` and a matching `Framework Antipatterns` step in `devcheck` — flags SDK-coupling shortcuts that bypass framework primitives.
-- `scripts/split-changelog.ts` — framework helper for splitting `CHANGELOG.md` into per-version files.
-- Project skills synced from `mcp-ts-core@0.8.17`: added `api-canvas` (DataCanvas + spillover), `tool-defs-analysis` (read-only audit of MCP definition language); refreshed `add-service`, `add-tool`, `api-config`, `api-context`, `api-errors`, `api-linter`, `api-workers`, `design-mcp-server`, `field-test`, `maintenance`, `release-and-publish`, `report-issue-framework`, `report-issue-local`, `security-pass`, `setup`. Propagated to `.claude/skills/`.
-
-### Removed
-
-- `dev:stdio` and `dev:http` package scripts — `bun --watch src/index.ts` is invoked directly.
-
-## [0.4.0] — 2026-04-24
-
-### Changed
-
-- Bumped `@cyanheads/mcp-ts-core` from `^0.5.3` to `^0.7.0`. Spans 20 releases with substantial additions: landing page at `/` plus SEP-1649 Server Card at `/.well-known/mcp.json`, `MCP_PUBLIC_URL` override for TLS-terminating proxies, directory-based changelog convention, recursive `describe-on-fields` linter, new `security-pass` / `release-and-publish` / `api-linter` skills, a `Skills Sync` devcheck step, and flattened `ZodError` message shape. No runtime breaking changes for this server.
-- `hn_get_stories`, `hn_get_thread`, `hn_get_user`, `hn_search_content`: added `.describe()` on each array-element object schema (`stories[]`, `comments[]`, `submissions[]`, `hits[]`) to satisfy the new recursive `describe-on-fields` rule introduced in `mcp-ts-core@0.6.16`.
-- `hn_get_stories` handler: hoisted `normalizeUrl(item.url)` to a local `const` so it's called once per story instead of twice, and dropped the redundant `as string` cast. The conditional-spread "omit absent properties" contract is preserved.
-- Bumped `@biomejs/biome` (2.4.12 → 2.4.13) and `vitest` (4.1.4 → 4.1.5).
-
-### Added
-
-- `.github/ISSUE_TEMPLATE/` — bug report, feature request, and config templates scaffolded from the framework, aligned with `mcp-ts-core@0.7.0`'s secondary-label scheme.
-- Framework scripts synced from `mcp-ts-core@0.7.0`: `scripts/build-changelog.ts`, `scripts/check-docs-sync.ts`, `scripts/check-skills-sync.ts`. `devcheck`, `lint-mcp`, and `tree` scripts also refreshed.
-- Skills synced from `mcp-ts-core@0.7.0`: added `api-linter` (v1.1), `release-and-publish` (v2.1), `security-pass` (v1.1); updated `add-app-tool`, `add-prompt`, `add-resource`, `add-service`, `add-tool`, `api-context`, `api-services`, `api-utils`, `design-mcp-server`, `field-test`, `maintenance`, `polish-docs-meta`, `report-issue-framework`, `report-issue-local`, `setup`. Propagated to `.claude/skills/`.
-- `CLAUDE.md`: added `security-pass` step to the "What's Next?" sequence (slot 8); added `security-pass`, `release-and-publish`, and `api-linter` rows to the skills table; pointed the Publishing section at the `release-and-publish` skill.
-
-## [0.3.0] — 2026-04-20
-
-### Changed
-
-- Bumped `@cyanheads/mcp-ts-core` from `^0.4.1` to `^0.5.3`. The 0.5.x release adds a `format-parity` lint rule that verifies every field in a tool's `output` schema is rendered by its `format()` function — catching silent divergence between `structuredContent` (forwarded by clients like Claude Code) and `content[]` (forwarded by clients like Claude Desktop).
-- `hn_get_stories` `format()`: meta line now leads with `id:N | type | …` and renders `time` as both ISO date and raw Unix timestamp (`2026-04-20 (t:1776717572)`); header includes raw `offset:N`.
-- `hn_get_thread` `format()`: comment lines now include `depth:N | parent:N` annotations; visual indent is capped at 10 levels so a synthetic deep depth doesn't OOM `String.repeat`; root meta includes `type:N`; comment timestamps render with both formatted date and raw value; summary is always rendered (previously suppressed when fully loaded).
-- `hn_get_user` `format()`: `created` and submission `time` now render with both formatted date and raw Unix timestamp.
-- `hn_search_content` `format()`: header includes raw `p:N`; `createdAt` now renders the full ISO string (was truncated to date); comment results carry the parent story id in the heading; story results suppress the redundant self-referential parent ref.
-- Dropped redundant `async` modifier on `HnService.fetchItem`/`fetchUser`/`fetchFeed` — they delegate directly to `withRetry()` and gain nothing from the wrapper.
-- Synced project skills from `mcp-ts-core@0.5.3`: updated `add-tool` (1.4 → 1.6), `api-config` (1.1 → 1.2), `design-mcp-server` (2.3 → 2.4), `field-test` (1.1 → 1.2), `maintenance` (1.2 → 1.3), `polish-docs-meta` (1.3 → 1.4), `setup` (1.2 → 1.3).
-- Bumped MCP SDK badge in `README.md` to `^1.29.0` and TypeScript badge to `^6.0.3`.
-
-## [0.2.0] — 2026-04-19
-
-### Added
-
-- Upstream resilience for HN Firebase and Algolia calls: `withRetry` + `fetchWithTimeout` wrap the full fetch-and-parse pipeline in `HnService`, with a 10-second per-request timeout, HTML-error-body detection (for rate-limited responses served as 200 OK), and `ctx.signal` wired through for cancellation.
-- Sparse-upstream test fixtures for `hn_get_stories` covering omitted `score`/`by`/`time`/`title` fields and verifying `format()` does not fabricate meta.
-- `add-app-tool` skill (v1.2) for scaffolding MCP App tool + UI resource pairs.
-
-### Changed
-
-- Bumped `@cyanheads/mcp-ts-core` from `^0.2.10` to `^0.4.1`.
-- Bumped `@biomejs/biome` (2.4.10 → 2.4.12), `@types/node` (25.5.0 → 25.6.0), `typescript` (6.0.2 → 6.0.3), `vitest` (4.1.2 → 4.1.4).
-- Dropped the `overrides` block (`path-to-regexp`, `picomatch`, `brace-expansion`) — fresh resolution picks up clean transitive versions and `bun audit` now reports zero vulnerabilities.
-- `HnService` methods (`fetchItem`, `fetchUser`, `fetchFeed`, `fetchItems`, `search`) now accept `ctx: Context` for correlated logs and cancellation; added a local `toRequestContext()` adapter to reconcile `exactOptionalPropertyTypes` differences between `Context` and `RequestContext`.
-- `hn_get_stories` output schema: `title`, `score`, `by`, and `time` are now optional. The handler uses conditional spreads so upstream absence is preserved instead of being fabricated into `''`, `0`, or epoch zero. `format()` falls back to `[type]` when the title is unknown and omits meta segments that would otherwise render as blank.
-- `hn_get_thread` and `hn_get_user` now throw `notFound()` for missing items/users instead of plain `Error`, giving the LLM a classified error code.
-- Algolia HTTP error paths now surface as `ServiceUnavailable` via `fetchWithTimeout` + retry instead of raw `Error`.
-- Synced project skills from `mcp-ts-core@0.4.1`: updated `add-prompt`, `add-resource`, `add-service`, `add-test`, `add-tool`, `api-testing`, `api-workers`, `design-mcp-server`, `devcheck`, `field-test`, `maintenance`, `migrate-mcp-ts-template`, `polish-docs-meta`, `setup`.
-
-### Fixed
-
-- Per-item failures inside batch `fetchItems` calls are now tolerated (logged and nulled) rather than bubbling up and failing the whole feed after retries exhaust.
-
-## [0.1.9] — 2026-03-30
-
-### Changed
-
-- Bumped `@cyanheads/mcp-ts-core` from `^0.2.7` to `^0.2.10`
-- Bumped `@biomejs/biome` from `^2.4.9` to `^2.4.10`
-- Updated author field and added funding metadata in `package.json`
-- Updated `add-tool` skill (v1.1): expanded tool response design guidance — partial success, batch input, format function content-completeness, error classification
-- Updated `add-resource` skill (v1.1): added tool coverage guidance for resource definitions
-- Updated `design-mcp-server` skill (v2.1): live API probing, tool-first design philosophy, batch input design, error design patterns, resilience planning, naming conventions
-
-### Fixed
-
-- Formatting fix in `get-thread.tool.test.ts` assertion
-
-## [0.1.8] — 2026-03-28
-
-### Changed
-
-- Bumped `@cyanheads/mcp-ts-core` from `^0.2.6` to `^0.2.7`
-
-## [0.1.7] — 2026-03-28
-
-### Changed
-
-- Bumped `@cyanheads/mcp-ts-core` from `^0.2.4` to `^0.2.6`
-
-## [0.1.6] — 2026-03-28
-
-### Changed
-
-- Bumped `@cyanheads/mcp-ts-core` from `^0.1.28` to `^0.2.4`
-- Bumped `@biomejs/biome` from `^2.4.8` to `^2.4.9`
-- Bumped `vitest` from `^4.1.1` to `^4.1.2`
-- Added `overrides` for `path-to-regexp`, `picomatch`, and `brace-expansion` (security patches)
-- Improved `format()` output across all 4 tools: markdown headers, item IDs, dates, full text rendering, and actionable hints
-- Updated test assertions to match new format output
-
-### Added
-
-- `report-issue-framework` skill for filing bugs against `@cyanheads/mcp-ts-core`
-- `report-issue-local` skill for filing bugs against this server
-- `LOGS_DIR` env var documented in README
-- GitHub repo metadata sync step in `polish-docs-meta` skill
-- Description propagation rule (package.json → README → server.json → Dockerfile)
-
-## [0.1.5] — 2026-03-23
-
-### Changed
-
-- Renamed all tools with `hn_` prefix for namespacing: `get_stories` → `hn_get_stories`, `get_thread` → `hn_get_thread`, `get_user` → `hn_get_user`, `search_hn` → `hn_search_content`
-- Renamed `search-hn.tool.ts` → `search-content.tool.ts` (and corresponding test) to match new tool name
-- Updated cross-reference descriptions in tool schemas to use new prefixed names
-- Updated README, CLAUDE.md, and test suites with new tool names
-
-## [0.1.4] — 2026-03-23
-
-### Changed
-
-- Bumped `@cyanheads/mcp-ts-core` from `^0.1.25` to `^0.1.28`
-- Bumped `typescript` from `^5.9.3` to `^6.0.2`
-- Bumped `vitest` from `^4.1.0` to `^4.1.1`
-- Added `remotes` entry to `server.json` with public streamable-http URL
-- Simplified `tsconfig.json`: removed `baseUrl`, updated path alias to relative form
-
-## [0.1.3] — 2026-03-21
-
-### Changed
-
-- Bumped `@cyanheads/mcp-ts-core` from `^0.1.23` to `^0.1.25`
-- Added publishing instructions to `CLAUDE.md` agent protocol
-
-## [0.1.2] — 2026-03-21
-
-### Changed
-
-- Bumped `@cyanheads/mcp-ts-core` from `^0.1.23` to `^0.1.24`
-- Added publishing instructions to `CLAUDE.md` agent protocol
-
-## [0.1.1] — 2026-03-21
-
-### Changed
-
-- Renamed package from `hn-mcp-server` to `@cyanheads/hn-mcp-server` (scoped npm package)
-- Bumped `@cyanheads/mcp-ts-core` from `^0.1.22` to `^0.1.23`
-- Added `@hono/otel` dependency for OpenTelemetry integration
-- Dockerfile now conditionally installs OpenTelemetry peer dependencies via `OTEL_ENABLED` build arg (defaults to true)
-- Updated `server.json` npm identifiers to scoped package name
-- Updated README install commands to use scoped package name
-
-## [0.1.0] — 2026-03-21
-
-Initial release.
-
-### Added
-
-- **Tools:** `get_stories`, `get_thread`, `get_user`, `search_hn` — 4 read-only tools covering HN feeds, threaded discussions, user profiles, and full-text search
-- **Service layer:** HN Firebase API client with concurrency-limited batch fetching, Algolia search client with filtering and pagination
-- **HTML processing:** Entity decoding, tag stripping with code block and link preservation
-- **Transports:** stdio and streamable-http via `@cyanheads/mcp-ts-core`
-- **Configuration:** `HN_CONCURRENCY_LIMIT` env var for tuning batch fetch parallelism
-- **Tests:** Comprehensive test suite covering all tools, service layer, and server config
-- **Docs:** README with full tool documentation, design document, HN API reference, project structure tree
-- **Infra:** Dockerfile, biome config, vitest config, devcheck config, server.json metadata, LICENSE (Apache-2.0), bunfig.toml
-
-### Fixed
-
-- `search_hn` totalPages calculation now uses `Math.ceil(nbHits / count)` instead of Algolia's `nbPages` (which reflects Algolia's own page size, not the requested count)
-
-### Changed
-
-- Updated `server.json` name to reverse-DNS format (`io.github.cyanheads/hn-mcp-server`), added `HN_CONCURRENCY_LIMIT` env var, set `runtimeHint` to `bun`
-- Expanded `package.json` with `mcpName`, `homepage`, `bugs`, `author`, `packageManager`, and HN-specific keywords
-- Added OCI image description and source labels to Dockerfile
-- Customized `CLAUDE.md` agent protocol with HN-specific patterns, examples, and structure
+Initial release. Four read-only tools (`hn_get_stories`, `hn_get_thread`, `hn_get_user`, `hn_search_content`) over HN Firebase + Algolia. Concurrency-limited batch fetching, HTML stripping with code-block/link preservation, stdio + streamable-http transports.

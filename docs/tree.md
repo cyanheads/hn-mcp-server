@@ -1,6 +1,6 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-05-16 16:59:56
+Generated on: 2026-05-22 00:18:04
 
 ```text
 hn-mcp-server/
@@ -13,6 +13,13 @@ hn-mcp-server/
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
+├── changelog/
+│   ├── 0.1.x/
+│   ├── 0.2.x/
+│   ├── 0.3.x/
+│   ├── 0.4.x/
+│   ├── 0.5.x/
+│   └── template.md
 ├── claude-plans/
 ├── docs/
 │   ├── design.md

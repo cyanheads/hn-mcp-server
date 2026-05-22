@@ -593,15 +593,22 @@ const ALL_CHECKS: Check[] = [
 
       // Parse the tabular output. `bun outdated` emits markdown-style rows
       // (`| col1 | col2 | ... |`), so split('|') yields an empty leading cell —
-      // package data starts at index [1]. Strip the trailing
-      // `(dev|peer|prod|optional)` workspace-type marker so the allowlist
-      // takes the bare package name.
-      const unexpected = output.split('\n').filter((line) => {
+      // package data starts at index [1]. Strip the trailing `(dev|peer|prod|optional)`
+      // workspace-type marker so the allowlist takes the bare package name.
+      const lines = output.split('\n');
+      const stripWorkspaceMarker = (cell: string): string =>
+        cell.replace(/\s*\((?:dev|peer|prod|optional)\)$/, '');
+      const packageLines = lines.filter((line) => {
         if (!line.includes('|')) return false;
-        const cell = line.split('|')[1]?.trim() ?? '';
         // Skip table chrome: header row and separator (e.g., "---")
-        if (!cell || cell === 'Package' || /^-+$/.test(cell)) return false;
-        const pkgName = cell.replace(/\s*\((?:dev|peer|prod|optional)\)$/, '');
+        const firstCell = line.split('|')[1]?.trim() ?? '';
+        if (!firstCell || firstCell === 'Package' || /^-+$/.test(firstCell)) return false;
+        return true;
+      });
+
+      // Check if every outdated package is in the allowlist
+      const unexpected = packageLines.filter((line) => {
+        const pkgName = stripWorkspaceMarker(line.split('|')[1]?.trim() ?? '');
         return !OUTDATED_ALLOWLIST.has(pkgName);
       });
 
