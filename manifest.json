@@ -1,0 +1,43 @@
+{
+  "manifest_version": "0.3",
+  "name": "hn-mcp-server",
+  "version": "0.5.4",
+  "description": "MCP server for Hacker News — feeds, threads, users, and search via Firebase and Algolia APIs",
+  "author": { "name": "cyanheads" },
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "MCP_AUTH_MODE": "none",
+        "NODE_ENV": "production",
+        "HN_CONCURRENCY_LIMIT": "${HN_CONCURRENCY_LIMIT}",
+        "MCP_LOG_LEVEL": "${MCP_LOG_LEVEL}"
+      }
+    }
+  },
+  "compatibility": {
+    "runtimes": { "node": ">=24.0.0" }
+  },
+  "tools_generated": true,
+  "prompts_generated": true,
+  "user_config": {
+    "HN_CONCURRENCY_LIMIT": {
+      "title": "Concurrency Limit",
+      "description": "Max concurrent HTTP requests for batch item fetches (1–50).",
+      "type": "string",
+      "required": false,
+      "default": "10"
+    },
+    "MCP_LOG_LEVEL": {
+      "title": "Log Level",
+      "description": "Minimum log level for output (debug, info, warn, error).",
+      "type": "string",
+      "required": false,
+      "default": "info"
+    }
+  }
+}

@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** hn-mcp-server
-**Version:** 0.5.1
+**Version:** 0.5.4
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -110,6 +110,7 @@ Handlers receive a unified `ctx` object. Key properties:
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
 | `ctx.signal` | `AbortSignal` for cancellation. |
 | `ctx.requestId` | Unique request ID. |
+| `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio. |
 
 ---
 
@@ -241,7 +242,11 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run devcheck` | Lint + format + typecheck + security |
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting |
+| `bun run list-skills` | Print skills index from project `skills/` |
 | `bun run lint:mcp` | Validate MCP tool/resource definitions |
+| `bun run lint:packaging` | Validate env-var alignment between `manifest.json` and `server.json` |
+| `bun run bundle` | Build and pack as `.mcpb` for Claude Desktop install |
+| `bun run audit:refresh` | Delete `bun.lock`, reinstall, re-audit (clears stale lockfile false positives) |
 | `bun run test` | Run tests |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |

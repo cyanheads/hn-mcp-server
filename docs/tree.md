@@ -1,6 +1,6 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-05-22 00:18:04
+Generated on: 2026-05-23 12:23:17
 
 ```text
 hn-mcp-server/
@@ -33,6 +33,8 @@ hn-mcp-server/
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
+│   ├── lint-packaging.ts
+│   ├── list-skills.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
 ├── skills/
@@ -135,6 +137,7 @@ hn-mcp-server/
 │       └── search-content.tool.test.ts
 ├── .env.example
 ├── .gitignore
+├── .mcpbignore
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
@@ -143,6 +146,7 @@ hn-mcp-server/
 ├── devcheck.config.json
 ├── Dockerfile
 ├── LICENSE
+├── manifest.json
 ├── package.json
 ├── README.md
 ├── server.json

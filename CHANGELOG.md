@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.4](changelog/0.5.x/0.5.4.md) — 2026-05-23
+
+Maintenance. `@cyanheads/mcp-ts-core ^0.9.1 → ^0.9.6`, `zod` added as explicit dependency. `manifest.json` + `.mcpbignore` scaffolded for MCPB bundle support. Install badges added to README. New scripts: `list-skills`, `lint:packaging`, `bundle`, `audit:refresh`.
+
 ## [0.5.3](changelog/0.5.x/0.5.3.md) — 2026-05-21
 
 Field-test refinements to two `format()` output paths. `hn_get_stories` now distinguishes offset-past-end from genuinely-empty feeds. `hn_get_user` no longer duplicates the item type when rendering a typeless submission. Also migrates the project to the framework's directory-based changelog convention.
