@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/hn-mcp-server",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "MCP server for Hacker News — feeds, threads, users, and search via Firebase and Algolia APIs",
   "type": "module",
   "main": "dist/index.js",
@@ -68,6 +68,7 @@
   },
   "dependencies": {
     "@cyanheads/mcp-ts-core": "^0.9.6",
+    "hono": "^4.12.22",
     "zod": "^4.4.3"
   },
   "devDependencies": {

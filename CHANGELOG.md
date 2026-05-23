@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.5](changelog/0.5.x/0.5.5.md) — 2026-05-23
+
+Fix duplicate `hono` installs causing `@hono/otel` crash on every HTTP request. `hono ^4.12.22` added as direct dependency to force deduplication.
+
 ## [0.5.4](changelog/0.5.x/0.5.4.md) — 2026-05-23
 
 Maintenance. `@cyanheads/mcp-ts-core ^0.9.1 → ^0.9.6`, `zod` added as explicit dependency. `manifest.json` + `.mcpbignore` scaffolded for MCPB bundle support. Install badges added to README. New scripts: `list-skills`, `lint:packaging`, `bundle`, `audit:refresh`.

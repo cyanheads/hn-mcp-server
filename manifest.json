@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "hn-mcp-server",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "MCP server for Hacker News — feeds, threads, users, and search via Firebase and Algolia APIs",
   "author": { "name": "cyanheads" },
   "server": {
