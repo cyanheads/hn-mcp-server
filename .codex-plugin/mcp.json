@@ -1,0 +1,9 @@
+{
+  "@cyanheads/hn-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "@cyanheads/hn-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}

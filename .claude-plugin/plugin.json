@@ -1,0 +1,20 @@
+{
+  "name": "@cyanheads/hn-mcp-server",
+  "version": "0.5.5",
+  "description": "MCP server for Hacker News — feeds, threads, users, and search via Firebase and Algolia APIs",
+  "author": {
+    "name": "cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/hn-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/hn-mcp-server",
+  "license": "Apache-2.0",
+  "mcpServers": {
+    "@cyanheads/hn-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "@cyanheads/hn-mcp-server"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}

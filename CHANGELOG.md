@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.6](changelog/0.5.x/0.5.6.md) — 2026-05-28
+
+@cyanheads/mcp-ts-core ^0.9.6 → ^0.9.13: 413 body cap, HTTP session-init gate, quieter client-error logging, GET /mcp surfaces keywords; dep refresh; package.json keyword additions
+
 ## [0.5.5](changelog/0.5.x/0.5.5.md) — 2026-05-23
 
 Fix duplicate `hono` installs causing `@hono/otel` crash on every HTTP request. `hono ^4.12.22` added as direct dependency to force deduplication.
