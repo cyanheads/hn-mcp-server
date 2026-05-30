@@ -255,4 +255,137 @@ describe('hn_get_user input validation', () => {
     const input = getUser.input.parse({ username: 'test' });
     expect(input.submissionCount).toBe(10);
   });
+
+  it('constrains submissionCount to 1-50', () => {
+    expect(() => getUser.input.parse({ username: 'test', submissionCount: 0 })).toThrow();
+    expect(() => getUser.input.parse({ username: 'test', submissionCount: 51 })).toThrow();
+    expect(getUser.input.parse({ username: 'test', submissionCount: 1 }).submissionCount).toBe(1);
+    expect(getUser.input.parse({ username: 'test', submissionCount: 50 }).submissionCount).toBe(50);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Security and edge cases
+// ---------------------------------------------------------------------------
+
+describe('hn_get_user — security and edge cases', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(stripHtml).mockImplementation((html: string) => html);
+    vi.mocked(getHnService).mockReturnValue({
+      fetchUser: mockFetchUser,
+      fetchItems: mockFetchItems,
+    } as any);
+  });
+
+  it('does not expose env secrets in tool output or error messages', async () => {
+    process.env.HN_CONCURRENCY_LIMIT = 'SECRET_ENV_SENTINEL';
+    const ctx = createMockContext({ errors: getUser.errors });
+    mockFetchUser.mockResolvedValue(null);
+
+    try {
+      await getUser.handler(parse(), ctx);
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        expect(err.message).not.toContain('SECRET_ENV_SENTINEL');
+      }
+    }
+    delete process.env.HN_CONCURRENCY_LIMIT;
+  });
+
+  it('handles user with no about field', async () => {
+    const ctx = createMockContext({ errors: getUser.errors });
+    const { about: _, ...userNoAbout } = baseUser;
+    mockFetchUser.mockResolvedValue(userNoAbout);
+
+    const result = await getUser.handler(parse(), ctx);
+
+    expect(result.user.about).toBeUndefined();
+  });
+
+  it('does not fetch submissions when includeSubmissions is false even if user has submissions', async () => {
+    const ctx = createMockContext({ errors: getUser.errors });
+    mockFetchUser.mockResolvedValue(baseUser);
+
+    await getUser.handler(parse({ includeSubmissions: false }), ctx);
+
+    expect(mockFetchItems).not.toHaveBeenCalled();
+  });
+
+  it('does not fetch submissions when user has no submitted array, even with includeSubmissions=true', async () => {
+    const ctx = createMockContext({ errors: getUser.errors });
+    const { submitted: _, ...userNoSubmissions } = baseUser;
+    mockFetchUser.mockResolvedValue(userNoSubmissions);
+
+    const result = await getUser.handler(parse({ includeSubmissions: true }), ctx);
+
+    expect(mockFetchItems).not.toHaveBeenCalled();
+    expect(result.submissions).toBeUndefined();
+  });
+
+  it('format() renders url and text for story submissions', () => {
+    const blocks = getUser.format!({
+      user: { id: 'alice', karma: 500, created: 1600000000, totalSubmissions: 1 },
+      submissions: [
+        {
+          id: 1,
+          type: 'story',
+          title: 'My Article',
+          url: 'https://example.com/article',
+          score: 42,
+          time: 1600001000,
+        },
+      ],
+    });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('https://example.com/article');
+  });
+
+  it('format() renders body text for Ask HN submissions', () => {
+    const blocks = getUser.format!({
+      user: { id: 'alice', karma: 500, created: 1600000000, totalSubmissions: 1 },
+      submissions: [
+        {
+          id: 2,
+          type: 'story',
+          title: 'Ask HN: Best tool?',
+          text: 'Looking for recommendations.',
+          score: 10,
+          time: 1600001000,
+        },
+      ],
+    });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('Looking for recommendations.');
+  });
+
+  it('format() omits submissions section when submissions array is empty', () => {
+    const blocks = getUser.format!({
+      user: { id: 'alice', karma: 500, created: 1600000000, totalSubmissions: 0 },
+      submissions: [],
+    });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).not.toContain('Recent submissions');
+  });
+
+  it('format() renders a join date for the epoch', () => {
+    /** Created at Unix 0 (1970-01-01) must not crash the date formatter. */
+    const blocks = getUser.format!({
+      user: { id: 'ancient', karma: 1, created: 0, totalSubmissions: 0 },
+    });
+    expect(blocks).toHaveLength(1);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('ancient');
+  });
+
+  it('output schema accepts optional submissions', () => {
+    const withoutSubmissions = { user: { id: 'u', karma: 1, created: 1, totalSubmissions: 0 } };
+    expect(() => getUser.output.parse(withoutSubmissions)).not.toThrow();
+
+    const withSubmissions = {
+      user: { id: 'u', karma: 1, created: 1, totalSubmissions: 1 },
+      submissions: [{ id: 1, type: 'story' }],
+    };
+    expect(() => getUser.output.parse(withSubmissions)).not.toThrow();
+  });
 });

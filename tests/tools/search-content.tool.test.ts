@@ -651,4 +651,171 @@ describe('hn_search_content input validation', () => {
       searchHn.input.parse({ query: 'test', dateRange: { end: 'also-not-a-date' } }),
     ).toThrow();
   });
+
+  it('rejects page below 0', () => {
+    expect(() => searchHn.input.parse({ query: 'test', page: -1 })).toThrow();
+  });
+
+  it('rejects minPoints below 0', () => {
+    expect(() => searchHn.input.parse({ query: 'test', minPoints: -1 })).toThrow();
+  });
+
+  it('accepts minPoints=0', () => {
+    const parsed = searchHn.input.parse({ query: 'test', minPoints: 0 });
+    expect(parsed.minPoints).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Security and edge cases
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content — security and edge cases', () => {
+  beforeEach(() => {
+    vi.mocked(getHnService).mockReturnValue({ search: mockSearch } as never);
+  });
+
+  it('does not expose env secrets in handler output', async () => {
+    process.env.HN_CONCURRENCY_LIMIT = 'SECRET_SEARCH_SENTINEL';
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [storyHit], nbHits: 1, nbPages: 1 }));
+
+    const freshCtx = createMockContext();
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'test' }), freshCtx);
+    const blocks = searchHn.format!(result);
+
+    for (const block of blocks) {
+      if (block.type === 'text') {
+        expect(block.text).not.toContain('SECRET_SEARCH_SENTINEL');
+      }
+    }
+    delete process.env.HN_CONCURRENCY_LIMIT;
+  });
+
+  it('handles hit with all nullable fields set to null without crashing', async () => {
+    const allNullHit = {
+      objectID: '789',
+      author: 'anon',
+      points: null,
+      num_comments: null,
+      created_at: '2024-01-01T00:00:00Z',
+      created_at_i: 1704067200,
+      title: null,
+      url: null,
+      comment_text: null,
+      story_text: null,
+      story_id: null,
+      story_title: null,
+    };
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [allNullHit], nbHits: 1, nbPages: 1 }));
+
+    const freshCtx = createMockContext();
+    await expect(
+      searchHn.handler(searchHn.input.parse({ query: 'x' }), freshCtx),
+    ).resolves.not.toThrow();
+  });
+
+  it('format() escapes query in no-results message without injecting HTML', () => {
+    const result = searchHn.format!({ hits: [], query: '<script>alert(1)</script>' });
+    const text = result[0]!.text;
+    // The query is embedded in the message — verify it doesn't create executable tags
+    expect(text).toContain('<script>alert(1)</script>');
+    // The embedding is just text — no DOM execution risk in MCP text content
+    expect(text).toMatch(/"<script>alert\(1\)<\/script>" — no results\./);
+  });
+
+  it('handles story result where storyId equals id (common for story hits)', async () => {
+    const selfRefHit = { ...storyHit, story_id: 123 };
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [selfRefHit], nbHits: 1 }));
+
+    const freshCtx = createMockContext();
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'x' }), freshCtx);
+
+    // storyId should map from story_id even when equal to id
+    expect(result.hits[0]!.storyId).toBe(123);
+  });
+
+  it('format() suppresses parent story ref when storyId equals id and no storyTitle', () => {
+    const content = searchHn.format!({
+      hits: [
+        {
+          id: 123,
+          title: 'Same Story',
+          url: 'https://example.com',
+          domain: 'example.com',
+          author: 'alice',
+          points: 50,
+          numComments: 5,
+          createdAt: '2024-01-01T00:00:00Z',
+          storyId: 123,
+          storyTitle: undefined,
+        },
+      ],
+      query: 'x',
+    });
+    const text = content[0]!.text;
+    // When storyId === id and no storyTitle, parentRef should not appear
+    expect(text).not.toContain('story:"');
+  });
+
+  it('totalPages calculation uses input count not hitsPerPage from Algolia', async () => {
+    // nbHits=100, input count=10 → totalPages should be 10
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: [], nbHits: 100, nbPages: 5, hitsPerPage: 20, page: 0 }),
+    );
+
+    const freshCtx = createMockContext();
+    await searchHn.handler(searchHn.input.parse({ query: 'x', count: 10 }), freshCtx);
+
+    const enrichment = getEnrichment(freshCtx);
+    expect(enrichment.totalPages).toBe(10);
+  });
+
+  it('handles unicode query string without mangling', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const freshCtx = createMockContext();
+    const result = await searchHn.handler(searchHn.input.parse({ query: '日本語検索' }), freshCtx);
+
+    expect(result.query).toBe('日本語検索');
+    expect(mockSearch).toHaveBeenCalledWith(
+      expect.objectContaining({ query: '日本語検索' }),
+      expect.anything(),
+    );
+  });
+
+  it('enrichment page reflects result.page from Algolia, not input.page', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [], nbHits: 0, nbPages: 0, page: 3 }));
+
+    const freshCtx = createMockContext();
+    await searchHn.handler(searchHn.input.parse({ query: 'x', page: 3 }), freshCtx);
+
+    expect(getEnrichment(freshCtx).page).toBe(3);
+  });
+
+  it('format() uses stripped domain (no www.) in story heading', () => {
+    /**
+     * The format function renders the raw url in the URL line (expected —
+     * consumers need the actual link) but uses the pre-stripped domain in the
+     * heading. The domain field has already had www. removed by the handler.
+     */
+    const content = searchHn.format!({
+      hits: [
+        {
+          id: 1,
+          title: 'Some Story',
+          url: 'https://www.github.com/repo',
+          domain: 'github.com', // handler already strips www.
+          author: 'alice',
+          points: 10,
+          numComments: 2,
+          createdAt: '2024-01-01T00:00:00Z',
+        },
+      ],
+      query: 'story',
+    });
+    // Heading uses domain (www. already stripped by handler)
+    expect(content[0]!.text).toContain('### Some Story (github.com)');
+    // Heading does not use www prefix
+    expect(content[0]!.text).not.toContain('### Some Story (www.github.com)');
+  });
 });

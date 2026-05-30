@@ -441,3 +441,90 @@ describe('getStories', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Security and edge cases
+// ---------------------------------------------------------------------------
+
+describe('getStories — security and edge cases', () => {
+  const mockService = {
+    fetchFeed: vi.fn<() => Promise<number[]>>(),
+    fetchItems: vi.fn<() => Promise<(HnItem | null)[]>>(),
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getHnService).mockReturnValue(mockService as any);
+  });
+
+  it('rejects offset below 0', () => {
+    expect(() => getStories.input.parse({ feed: 'top', offset: -1 })).toThrow();
+  });
+
+  it('rejects non-integer count passed as string (type coercion not applied)', () => {
+    // The schema uses z.number(), so a string should fail
+    expect(() => getStories.input.parse({ feed: 'top', count: 'ten' as any })).toThrow();
+  });
+
+  it('output schema validates correctly on non-empty result', () => {
+    const result = {
+      stories: [{ id: 1, type: 'story', title: 'Test', score: 10, by: 'alice', time: 1 }],
+      feed: 'top',
+    };
+    expect(() => getStories.output.parse(result)).not.toThrow();
+  });
+
+  it('format() does not emit internal env var values in any story field', async () => {
+    process.env.HN_CONCURRENCY_LIMIT = 'SECRET_SENTINEL';
+    const items = [makeItem({ id: 1 })];
+    mockService.fetchFeed.mockResolvedValue([1]);
+    mockService.fetchItems.mockResolvedValue(items);
+
+    const ctx = createMockContext();
+    const result = await getStories.handler(getStories.input.parse({ feed: 'top' }), ctx);
+    const blocks = getStories.format!(result);
+
+    for (const block of blocks) {
+      if (block.type === 'text') {
+        expect(block.text).not.toContain('SECRET_SENTINEL');
+      }
+    }
+    delete process.env.HN_CONCURRENCY_LIMIT;
+  });
+
+  it('handles unicode story title and url without mangling', async () => {
+    const items = [makeItem({ id: 1, title: 'Русский заголовок', url: 'https://примеры.рф/путь' })];
+    mockService.fetchFeed.mockResolvedValue([1]);
+    mockService.fetchItems.mockResolvedValue(items);
+
+    const ctx = createMockContext();
+    const result = await getStories.handler(getStories.input.parse({ feed: 'top' }), ctx);
+
+    expect(result.stories[0]!.title).toBe('Русский заголовок');
+    expect(result.stories[0]!.url).toBe('https://примеры.рф/путь');
+  });
+
+  it('handles a single-item feed with count=1 and offset=0 correctly', async () => {
+    mockService.fetchFeed.mockResolvedValue([999]);
+    mockService.fetchItems.mockResolvedValue([makeItem({ id: 999 })]);
+
+    const ctx = createMockContext();
+    const input = getStories.input.parse({ feed: 'jobs', count: 1, offset: 0 });
+    const result = await getStories.handler(input, ctx);
+
+    expect(result.stories).toHaveLength(1);
+    expect(result.stories[0]!.id).toBe(999);
+  });
+
+  it('handles max count=100 without throwing', async () => {
+    const ids = Array.from({ length: 100 }, (_, i) => i + 1);
+    mockService.fetchFeed.mockResolvedValue(ids);
+    mockService.fetchItems.mockResolvedValue(ids.map((id) => makeItem({ id })));
+
+    const ctx = createMockContext();
+    const input = getStories.input.parse({ feed: 'top', count: 100 });
+    const result = await getStories.handler(input, ctx);
+
+    expect(result.stories).toHaveLength(100);
+  });
+});

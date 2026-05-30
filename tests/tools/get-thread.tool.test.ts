@@ -417,3 +417,114 @@ describe('hn_get_thread input validation', () => {
     expect(() => getThread.input.parse({ itemId: 1, maxComments: 201 })).toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Security and edge cases
+// ---------------------------------------------------------------------------
+
+describe('hn_get_thread — security and edge cases', () => {
+  let hn: ReturnType<typeof createMockHnService>;
+  let ctx: ReturnType<typeof createMockContext>;
+
+  beforeEach(() => {
+    hn = createMockHnService();
+    (getHnService as Mock).mockReturnValue(hn);
+    ctx = createMockContext({ errors: getThread.errors });
+  });
+
+  it('handles item with no title and no by (fully sparse)', async () => {
+    const sparseStory: HnItem = { id: 99, type: 'story' };
+    hn.fetchItem.mockResolvedValue(sparseStory);
+    const result = await getThread.handler(parse({ itemId: 99, depth: 0 }), ctx);
+
+    expect(result.item.id).toBe(99);
+    // The source maps undefined fields into the item object with undefined values
+    expect(result.item.title).toBeUndefined();
+    expect(result.item.by).toBeUndefined();
+    expect(result.comments).toEqual([]);
+  });
+
+  it('format() handles missing item author gracefully (no crash)', () => {
+    const result = {
+      item: { id: 10, type: 'comment' as const },
+      comments: [],
+    };
+    expect(() => getThread.format!(result)).not.toThrow();
+    const blocks = getThread.format!(result);
+    expect(blocks[0]!.text).toContain('Comment by unknown');
+  });
+
+  it('format() caps indent depth at 10 regardless of actual depth value', () => {
+    const result = {
+      item: { id: 1, type: 'story' as const, by: 'alice', title: 'Deep' },
+      comments: [
+        {
+          id: 99,
+          by: 'deeply_nested',
+          time: 1000,
+          text: 'way down here',
+          depth: 15,
+          parentId: 1,
+          childCount: 0,
+        },
+      ],
+    };
+    const blocks = getThread.format!(result);
+    const text = blocks[0]!.text;
+    // Capped at 10 means at most 20 spaces of indent (10 * 2 spaces each)
+    const commentLine = text.split('\n').find((l) => l.includes('deeply_nested'))!;
+    const leadingSpaces = commentLine.match(/^ */)?.[0]?.length ?? 0;
+    expect(leadingSpaces).toBeLessThanOrEqual(20);
+  });
+
+  it('format() output does not contain raw secrets or env variables', async () => {
+    process.env.HN_CONCURRENCY_LIMIT = 'SECRET_SENTINEL_999';
+    const storyWithText: HnItem = { ...mockStory, text: 'Normal story text' };
+    hn.fetchItem.mockResolvedValue(storyWithText);
+    hn.fetchItems.mockResolvedValueOnce([mockComment1]);
+
+    const result = await getThread.handler(parse({ depth: 1 }), ctx);
+    const blocks = getThread.format!(result);
+
+    for (const block of blocks) {
+      if (block.type === 'text') {
+        expect(block.text).not.toContain('SECRET_SENTINEL_999');
+      }
+    }
+    delete process.env.HN_CONCURRENCY_LIMIT;
+  });
+
+  it('enrichment notice mentions loaded/available counts when truncated', async () => {
+    const bigStory: HnItem = {
+      ...mockStory,
+      kids: [10, 11],
+      descendants: 100,
+    };
+    hn.fetchItem.mockResolvedValue(bigStory);
+    hn.fetchItems.mockResolvedValueOnce([mockComment1, mockComment2]);
+
+    await getThread.handler(parse({ depth: 1, maxComments: 50 }), ctx);
+
+    const enrichment = getEnrichment(ctx);
+    // totalLoaded(2) < totalAvailable(100) → notice should reference counts
+    expect(enrichment.notice).toMatch(/2\/100/);
+  });
+
+  it('emits combined notice when both deleted/dead items and truncation occur', async () => {
+    const bigStory: HnItem = { ...mockStory, kids: [10, 11, 12], descendants: 100 };
+    const live: HnItem = { ...mockComment1 };
+    const dead: HnItem = { id: 11, type: 'comment', dead: true, parent: 1 };
+    const deleted: HnItem = { id: 12, type: 'comment', deleted: true, parent: 1 };
+
+    hn.fetchItem.mockResolvedValue(bigStory);
+    hn.fetchItems.mockResolvedValueOnce([live, dead, deleted]);
+
+    await getThread.handler(parse({ depth: 1, maxComments: 50 }), ctx);
+
+    const notice = getEnrichment(ctx).notice!;
+    // Both parts should appear: dropped counts and loaded/available counts
+    expect(notice).toMatch(/deleted/i);
+    expect(notice).toMatch(/dead/i);
+    expect(notice).toMatch(/loaded/i);
+  });
+});
