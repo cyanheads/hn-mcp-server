@@ -1,6 +1,6 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-05-29 05:11:52
+Generated on: 2026-05-30 08:58:51
 
 ```text
 hn-mcp-server/
@@ -88,8 +88,6 @@ hn-mcp-server/
 │   ├── code-simplifier/
 │   │   └── SKILL.md
 │   ├── design-mcp-server/
-│   │   └── SKILL.md
-│   ├── devcheck/
 │   │   └── SKILL.md
 │   ├── field-test/
 │   │   └── SKILL.md

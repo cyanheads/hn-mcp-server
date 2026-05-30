@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.7](changelog/0.5.x/0.5.7.md) — 2026-05-30
+
+enrichment adoption — ranked-feed and search tools surface result context (counts, query echo, empty-result guidance) in a typed enrichment block reaching both structuredContent JSON and content[] markdown trailer
+
 ## [0.5.6](changelog/0.5.x/0.5.6.md) — 2026-05-28
 
 @cyanheads/mcp-ts-core ^0.9.6 → ^0.9.13: 413 body cap, HTTP session-init gate, quieter client-error logging, GET /mcp surfaces keywords; dep refresh; package.json keyword additions
