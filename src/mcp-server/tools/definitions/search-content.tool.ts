@@ -145,17 +145,20 @@ export const searchHn = tool('hn_search_content', {
           .describe('A single Algolia search hit (story or comment).'),
       )
       .describe('Search results ranked by sort order.'),
-    totalHits: z.number().describe('Total matching results across all pages.'),
-    page: z.number().describe('Current page number.'),
-    totalPages: z.number().describe('Total pages available.'),
     query: z.string().describe('The query that was searched.'),
-    message: z
+  }),
+
+  enrichment: {
+    totalHits: z.number().describe('Total matching results across all pages.'),
+    page: z.number().describe('Current page number (0-indexed).'),
+    totalPages: z.number().describe('Total pages available.'),
+    notice: z
       .string()
       .optional()
       .describe(
-        'Recovery hint when results are empty — names the filters that were applied, for relaxing the search. Absent on non-empty result pages.',
+        'Recovery hint when results are empty — names the filters applied, for relaxing the search. Absent on non-empty result pages.',
       ),
-  }),
+  },
 
   async handler(input, ctx) {
     const hn = getHnService();
@@ -188,32 +191,30 @@ export const searchHn = tool('hn_search_content', {
       totalHits: result.nbHits,
     });
 
-    let message: string | undefined;
+    const totalPages = Math.ceil(result.nbHits / input.count);
+    ctx.enrich({ totalHits: result.nbHits, page: result.page, totalPages });
+
     if (hits.length === 0) {
       const filters: string[] = [];
       if (input.tags) filters.push('tags');
       if (input.author) filters.push('author');
       if (input.minPoints != null) filters.push('minPoints');
       if (input.dateRange) filters.push('dateRange');
-      message = filters.length
+      const notice = filters.length
         ? `Try broader keywords, or relax these filters: ${filters.join(', ')}.`
         : `Try broader keywords or different terms.`;
+      ctx.enrich.notice(notice);
     }
 
     return {
       hits,
-      totalHits: result.nbHits,
-      page: result.page,
-      totalPages: Math.ceil(result.nbHits / input.count),
       query: input.query,
-      ...(message && { message }),
     };
   },
 
   format: (result) => {
     if (result.hits.length === 0) {
-      const suggestion = result.message ? ` ${result.message}` : '';
-      return [{ type: 'text' as const, text: `"${result.query}" — no results.${suggestion}` }];
+      return [{ type: 'text' as const, text: `"${result.query}" — no results.` }];
     }
 
     /** Render highlight metadata as a `> match: ...` footer. Surfaces each highlights field separately so structured consumers and the LLM both see what matched. */
@@ -265,9 +266,7 @@ export const searchHn = tool('hn_search_content', {
       return `### Comment on "${h.storyTitle ?? 'unknown'}" (story id:${h.storyId ?? '?'})\n${meta}${text}${hlLine}`;
     });
 
-    const header = `## "${result.query}" — ${result.totalHits} results (page ${result.page + 1}/${result.totalPages}, p:${result.page})`;
-    const body = `${header}\n\n${lines.join('\n\n')}`;
-    const text = result.message ? `${body}\n\n> ${result.message}` : body;
-    return [{ type: 'text' as const, text }];
+    const header = `## "${result.query}" — search results`;
+    return [{ type: 'text' as const, text: `${header}\n\n${lines.join('\n\n')}` }];
   },
 });

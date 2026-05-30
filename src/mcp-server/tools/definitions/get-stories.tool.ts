@@ -81,12 +81,21 @@ export const getStories = tool('hn_get_stories', {
       )
       .describe('Stories from the feed, ordered by HN ranking.'),
     feed: z.string().describe('Which feed was fetched.'),
+  }),
+
+  enrichment: {
     total: z
       .number()
       .describe('Total items in the feed (up to 500 for top/new/best, 200 for ask/show/jobs).'),
-    offset: z.number().describe('Offset that was applied to this page (echoes input.offset).'),
+    offset: z.number().describe('Offset that was applied to this page.'),
     hasMore: z.boolean().describe('Whether more stories are available beyond this page.'),
-  }),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Recovery hint when a page is empty — e.g. offset past end of feed or feed has no items. Absent on non-empty result pages.',
+      ),
+  },
 
   async handler(input, ctx) {
     const hn = getHnService();
@@ -114,38 +123,37 @@ export const getStories = tool('hn_get_stories', {
 
     ctx.log.info('Fetched stories', { feed: input.feed, count: stories.length });
 
+    const total = feedIds.length;
+    const hasMore = input.offset + input.count < total;
+    ctx.enrich({ total, offset: input.offset, hasMore });
+
+    if (stories.length === 0) {
+      if (total === 0) {
+        ctx.enrich.notice(`${input.feed} feed is empty.`);
+      } else if (input.offset >= total) {
+        ctx.enrich.notice(
+          `Offset ${input.offset} is past the end of the ${input.feed} feed (${total} item${total === 1 ? '' : 's'}). Reset offset below ${total}.`,
+        );
+      } else {
+        ctx.enrich.notice(
+          `No live stories on this page of the ${input.feed} feed (offset:${input.offset}, total:${total}). Items may have been deleted or flagged.`,
+        );
+      }
+    }
+
     return {
       stories,
       feed: input.feed,
-      total: feedIds.length,
-      offset: input.offset,
-      hasMore: input.offset + input.count < feedIds.length,
     };
   },
 
   format: (result) => {
     if (result.stories.length === 0) {
-      if (result.total === 0) {
-        return [{ type: 'text' as const, text: `${result.feed} feed — no stories` }];
-      }
-      if (result.offset >= result.total) {
-        return [
-          {
-            type: 'text' as const,
-            text: `${result.feed} feed — offset ${result.offset} is past the end (feed has ${result.total} item${result.total === 1 ? '' : 's'})`,
-          },
-        ];
-      }
-      return [
-        {
-          type: 'text' as const,
-          text: `${result.feed} feed — no live stories on this page (offset:${result.offset}, feed total:${result.total})`,
-        },
-      ];
+      return [{ type: 'text' as const, text: `${result.feed} feed — no stories` }];
     }
 
     const lines = result.stories.map((s, i) => {
-      const rank = result.offset + i + 1;
+      const rank = i + 1;
       const date =
         s.time != null
           ? `${new Date(s.time * 1000).toISOString().slice(0, 10)} (t:${s.time})`
@@ -167,8 +175,7 @@ export const getStories = tool('hn_get_stories', {
       return `[${rank}] ${title}${domain}\n${meta}${url}${text}`;
     });
 
-    const end = result.offset + result.stories.length;
-    const header = `## ${result.feed} stories (${result.offset + 1}–${end} of ${result.total}, offset:${result.offset})${result.hasMore ? ' — more available' : ''}`;
+    const header = `## ${result.feed} stories`;
     return [{ type: 'text' as const, text: `${header}\n\n${lines.join('\n\n')}` }];
   },
 });

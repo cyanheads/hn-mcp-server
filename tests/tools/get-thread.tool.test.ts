@@ -3,7 +3,7 @@
  * @module mcp-server/tools/definitions/get-thread.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import type { HnItem } from '@/services/hn/types.js';
 
@@ -97,16 +97,18 @@ describe('hn_get_thread handler', () => {
     await expect(getThread.handler(parse(), ctx)).rejects.toThrow('Item 1 not found');
   });
 
-  it('returns item only with empty comments when depth is 0', async () => {
+  it('returns item only with empty comments when depth is 0, with enrichment counts', async () => {
     hn.fetchItem.mockResolvedValue(mockStory);
     const result = await getThread.handler(parse({ depth: 0 }), ctx);
 
     expect(result.item.id).toBe(1);
     expect(result.comments).toEqual([]);
-    expect(result.totalLoaded).toBe(0);
-    expect(result.totalAvailable).toBe(3);
-    expect(result).not.toHaveProperty('omitted');
     expect(hn.fetchItems).not.toHaveBeenCalled();
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalLoaded).toBe(0);
+    expect(enrichment.totalAvailable).toBe(3);
+    expect(enrichment.notice).toBeUndefined();
   });
 
   it('returns empty comments when story has no kids', async () => {
@@ -116,7 +118,7 @@ describe('hn_get_thread handler', () => {
     const result = await getThread.handler(parse({ depth: 3 }), ctx);
 
     expect(result.comments).toEqual([]);
-    expect(result.totalLoaded).toBe(0);
+    expect(getEnrichment(ctx).totalLoaded).toBe(0);
   });
 
   it('resolves direct replies only at depth 1', async () => {
@@ -129,7 +131,7 @@ describe('hn_get_thread handler', () => {
     expect(result.comments[0]).toMatchObject({ id: 10, depth: 0, parentId: 1, childCount: 1 });
     expect(result.comments[1]).toMatchObject({ id: 11, depth: 0, parentId: 1, childCount: 0 });
     expect(hn.fetchItems).toHaveBeenCalledTimes(1);
-    expect(result.totalLoaded).toBe(2);
+    expect(getEnrichment(ctx).totalLoaded).toBe(2);
   });
 
   it('resolves 2 levels with correct depth and parentId', async () => {
@@ -150,7 +152,7 @@ describe('hn_get_thread handler', () => {
     expect(result.comments[2]).toMatchObject({ id: 20, depth: 1, parentId: 10 });
 
     expect(hn.fetchItems).toHaveBeenCalledTimes(2);
-    expect(result.totalLoaded).toBe(3);
+    expect(getEnrichment(ctx).totalLoaded).toBe(3);
   });
 
   it('limits total comments via maxComments', async () => {
@@ -161,7 +163,7 @@ describe('hn_get_thread handler', () => {
 
     expect(result.comments).toHaveLength(1);
     expect(result.comments[0].id).toBe(10);
-    expect(result.totalLoaded).toBe(1);
+    expect(getEnrichment(ctx).totalLoaded).toBe(1);
   });
 
   it('filters out dead and deleted comments', async () => {
@@ -173,10 +175,10 @@ describe('hn_get_thread handler', () => {
     const result = await getThread.handler(parse({ depth: 1 }), ctx);
 
     expect(result.comments).toHaveLength(0);
-    expect(result.totalLoaded).toBe(0);
+    expect(getEnrichment(ctx).totalLoaded).toBe(0);
   });
 
-  it('counts omitted dead and deleted comments', async () => {
+  it('emits notice with omitted counts via enrichment', async () => {
     const storyWith4Kids: HnItem = { ...mockStory, kids: [10, 11, 12, 13], descendants: 4 };
     const live: HnItem = { id: 10, type: 'comment', by: 'bob', text: 'real', parent: 1 };
     const dead: HnItem = { id: 11, type: 'comment', dead: true, parent: 1 };
@@ -188,16 +190,24 @@ describe('hn_get_thread handler', () => {
     const result = await getThread.handler(parse({ depth: 1 }), ctx);
 
     expect(result.comments).toHaveLength(1);
-    expect(result.omitted).toEqual({ deleted: 2, dead: 1 });
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toMatch(/2 deleted.*1 dead/i);
   });
 
-  it('omits the omitted field when no comments are dropped', async () => {
+  it('omits notice when no comments are dropped and all comments loaded', async () => {
     hn.fetchItem.mockResolvedValue(mockStory);
+    // Fetch returns exactly the 2 kids, both live, totalAvailable = descendants = 3
+    // but totalLoaded=2 < totalAvailable=3 (one kid not resolved due to depth)
+    // Actually mockStory has descendants:3 and kids:[10,11], so 2 loaded < 3 available → notice fires.
+    // Use a story where all are loaded: descendants=2, kids=[10,11]
+    const fullStory: HnItem = { ...mockStory, descendants: 2 };
+    hn.fetchItem.mockResolvedValue(fullStory);
     hn.fetchItems.mockResolvedValueOnce([mockComment1, mockComment2]);
 
-    const result = await getThread.handler(parse({ depth: 1 }), ctx);
+    await getThread.handler(parse({ depth: 1 }), ctx);
 
-    expect(result).not.toHaveProperty('omitted');
+    expect(getEnrichment(ctx).notice).toBeUndefined();
   });
 
   it('marks isOp:true when comment author equals root author', async () => {
@@ -279,8 +289,6 @@ describe('hn_get_thread format', () => {
         descendants: 0,
       },
       comments: [],
-      totalLoaded: 0,
-      totalAvailable: 0,
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
@@ -315,8 +323,6 @@ describe('hn_get_thread format', () => {
           childCount: 0,
         },
       ],
-      totalLoaded: 2,
-      totalAvailable: 2,
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
@@ -352,8 +358,6 @@ describe('hn_get_thread format', () => {
           childCount: 0,
         },
       ],
-      totalLoaded: 2,
-      totalAvailable: 2,
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
@@ -365,77 +369,10 @@ describe('hn_get_thread format', () => {
     expect(text).not.toContain('isOp:false');
   });
 
-  it('shows partial load indicator when not all comments loaded', () => {
-    const result = {
-      item: {
-        id: 1,
-        type: 'story',
-        by: 'alice',
-        title: 'Big Thread',
-        score: 100,
-        descendants: 500,
-      },
-      comments: [
-        {
-          id: 10,
-          by: 'bob',
-          time: 1001,
-          text: 'Only comment',
-          depth: 0,
-          parentId: 1,
-          childCount: 0,
-        },
-      ],
-      totalLoaded: 1,
-      totalAvailable: 500,
-    };
-
-    const blocks = format(result as Parameters<typeof format>[0]);
-    expect(blocks[0].text).toContain(
-      '(1/500 comments loaded — increase maxComments or depth for more)',
-    );
-  });
-
-  it('shows omitted summary line when any comments were dropped', () => {
-    const result = {
-      item: { id: 1, type: 'story', by: 'alice', title: 'Thread' },
-      comments: [
-        {
-          id: 10,
-          by: 'bob',
-          time: 1001,
-          text: 'real',
-          depth: 0,
-          parentId: 1,
-          childCount: 0,
-        },
-      ],
-      totalLoaded: 1,
-      totalAvailable: 4,
-      omitted: { deleted: 2, dead: 1 },
-    };
-
-    const blocks = format(result as Parameters<typeof format>[0]);
-    expect(blocks[0].text).toContain('(2 deleted, 1 dead — omitted from this view)');
-  });
-
-  it('omits the omitted-summary line when nothing was dropped', () => {
-    const result = {
-      item: { id: 1, type: 'story', by: 'alice', title: 'Thread' },
-      comments: [],
-      totalLoaded: 0,
-      totalAvailable: 0,
-    };
-
-    const blocks = format(result as Parameters<typeof format>[0]);
-    expect(blocks[0].text).not.toContain('omitted from this view');
-  });
-
   it('formats comment as root with "Comment by author"', () => {
     const result = {
       item: { id: 10, type: 'comment', by: 'bob', text: 'Some comment' },
       comments: [],
-      totalLoaded: 0,
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);

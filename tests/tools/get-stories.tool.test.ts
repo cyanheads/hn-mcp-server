@@ -3,7 +3,7 @@
  * @module mcp-server/tools/definitions/get-stories.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/services/hn/hn-service.js', () => ({
@@ -76,7 +76,7 @@ describe('getStories', () => {
   // ---------------------------------------------------------------------------
 
   describe('handler', () => {
-    it('returns stories with correct shape', async () => {
+    it('returns stories with correct shape and enrichment', async () => {
       const ids = [1, 2, 3];
       const items = ids.map((id) => makeItem({ id }));
 
@@ -88,9 +88,6 @@ describe('getStories', () => {
       const result = await getStories.handler(input, ctx);
 
       expect(result.feed).toBe('top');
-      expect(result.total).toBe(3);
-      expect(result.offset).toBe(0);
-      expect(result.hasMore).toBe(false);
       expect(result.stories).toHaveLength(3);
       expect(result.stories[0]).toEqual({
         id: 1,
@@ -104,6 +101,12 @@ describe('getStories', () => {
         descendants: 42,
       });
       expect(result.stories[0]).not.toHaveProperty('text');
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.total).toBe(3);
+      expect(enrichment.offset).toBe(0);
+      expect(enrichment.hasMore).toBe(false);
+      expect(enrichment.notice).toBeUndefined();
     });
 
     it('derives domain from url and strips www.', async () => {
@@ -133,7 +136,7 @@ describe('getStories', () => {
       expect(result.stories[1]!).not.toHaveProperty('domain');
     });
 
-    it('paginates with offset and sets hasMore correctly', async () => {
+    it('paginates with offset and sets hasMore in enrichment', async () => {
       const ids = Array.from({ length: 50 }, (_, i) => i + 1);
       const pageItems = [makeItem({ id: 11 }), makeItem({ id: 12 })];
 
@@ -145,24 +148,26 @@ describe('getStories', () => {
       const result = await getStories.handler(input, ctx);
 
       expect(mockService.fetchItems).toHaveBeenCalledWith([11, 12], expect.anything());
-      expect(result.offset).toBe(10);
-      expect(result.hasMore).toBe(true);
       expect(result.stories).toHaveLength(2);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.offset).toBe(10);
+      expect(enrichment.hasMore).toBe(true);
     });
 
-    it('returns hasMore false when at end of feed', async () => {
+    it('sets hasMore false when at end of feed', async () => {
       const ids = [1, 2, 3];
       mockService.fetchFeed.mockResolvedValue(ids);
       mockService.fetchItems.mockResolvedValue(ids.map((id) => makeItem({ id })));
 
       const ctx = createMockContext();
       const input = getStories.input.parse({ feed: 'best', count: 10, offset: 0 });
-      const result = await getStories.handler(input, ctx);
+      await getStories.handler(input, ctx);
 
-      expect(result.hasMore).toBe(false);
+      expect(getEnrichment(ctx).hasMore).toBe(false);
     });
 
-    it('returns empty stories for an empty feed', async () => {
+    it('emits notice when feed is empty', async () => {
       mockService.fetchFeed.mockResolvedValue([]);
       mockService.fetchItems.mockResolvedValue([]);
 
@@ -171,8 +176,40 @@ describe('getStories', () => {
       const result = await getStories.handler(input, ctx);
 
       expect(result.stories).toEqual([]);
-      expect(result.total).toBe(0);
-      expect(result.hasMore).toBe(false);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.total).toBe(0);
+      expect(enrichment.notice).toMatch(/empty/i);
+    });
+
+    it('emits notice when offset is past end of feed', async () => {
+      const ids = [1, 2, 3];
+      mockService.fetchFeed.mockResolvedValue(ids);
+      mockService.fetchItems.mockResolvedValue([]);
+
+      const ctx = createMockContext();
+      const input = getStories.input.parse({ feed: 'top', count: 10, offset: 100 });
+      await getStories.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.notice).toMatch(/offset/i);
+      expect(enrichment.notice).toMatch(/100/);
+    });
+
+    it('emits notice when page is empty due to filtered items', async () => {
+      const ids = Array.from({ length: 10 }, (_, i) => i + 1);
+      // All items are dead/deleted so filterLiveItems returns empty
+      const deadItems = ids.map((id) => makeItem({ id, dead: true }));
+      mockService.fetchFeed.mockResolvedValue(ids);
+      mockService.fetchItems.mockResolvedValue(deadItems);
+
+      const ctx = createMockContext();
+      const input = getStories.input.parse({ feed: 'top', count: 5, offset: 0 });
+      await getStories.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      // total=10, offset=0, stories=[]: no-live-items notice
+      expect(enrichment.notice).toBeDefined();
     });
 
     it('filters out dead and deleted items', async () => {
@@ -252,9 +289,6 @@ describe('getStories', () => {
       const blocks = getStories.format!({
         stories: [{ id: 42, type: 'story' }],
         feed: 'top',
-        total: 1,
-        offset: 0,
-        hasMore: false,
       });
 
       const text = blocks[0]!.text;
@@ -277,58 +311,9 @@ describe('getStories', () => {
       const blocks = getStories.format!({
         stories: [],
         feed: 'show',
-        total: 0,
-        offset: 0,
-        hasMore: false,
       });
 
       expect(blocks).toEqual([{ type: 'text', text: 'show feed — no stories' }]);
-    });
-
-    it('reports when offset is past the end of a non-empty feed', () => {
-      const blocks = getStories.format!({
-        stories: [],
-        feed: 'jobs',
-        total: 31,
-        offset: 1000,
-        hasMore: false,
-      });
-
-      expect(blocks).toEqual([
-        {
-          type: 'text',
-          text: 'jobs feed — offset 1000 is past the end (feed has 31 items)',
-        },
-      ]);
-    });
-
-    it('singularizes the item count when the feed has exactly one item', () => {
-      const blocks = getStories.format!({
-        stories: [],
-        feed: 'jobs',
-        total: 1,
-        offset: 5,
-        hasMore: false,
-      });
-
-      expect((blocks[0] as { text: string }).text).toContain('feed has 1 item)');
-    });
-
-    it('reports when the page is empty because all items were filtered out', () => {
-      const blocks = getStories.format!({
-        stories: [],
-        feed: 'top',
-        total: 500,
-        offset: 10,
-        hasMore: true,
-      });
-
-      expect(blocks).toEqual([
-        {
-          type: 'text',
-          text: 'top feed — no live stories on this page (offset:10, feed total:500)',
-        },
-      ]);
     });
 
     it('renders stories with rank, title, points, comments, and url', () => {
@@ -347,14 +332,11 @@ describe('getStories', () => {
           },
         ],
         feed: 'top',
-        total: 100,
-        offset: 0,
-        hasMore: true,
       });
 
       expect(blocks).toHaveLength(1);
       const text = blocks[0]!.text;
-      expect(text).toContain('## top stories (1–1 of 100, offset:0)');
+      expect(text).toContain('## top stories');
       expect(text).toContain('[1] Test Story (example.com)');
       expect(text).toContain('200 pts | by author | 55 comments');
       expect(text).toContain('id:1');
@@ -375,9 +357,6 @@ describe('getStories', () => {
           },
         ],
         feed: 'ask',
-        total: 1,
-        offset: 0,
-        hasMore: false,
       });
 
       const text = blocks[0]!.text;
@@ -385,12 +364,12 @@ describe('getStories', () => {
       expect(text).not.toMatch(/\(\)/);
     });
 
-    it('uses offset for rank numbering', () => {
+    it('uses sequential rank starting from 1 (rank is relative to page, not absolute)', () => {
       const blocks = getStories.format!({
         stories: [
           {
             id: 5,
-            title: 'Offset Story',
+            title: 'First on Page',
             url: 'https://example.com/5',
             score: 50,
             by: 'author',
@@ -400,7 +379,7 @@ describe('getStories', () => {
           },
           {
             id: 6,
-            title: 'Next Story',
+            title: 'Second on Page',
             url: 'https://example.com/6',
             score: 40,
             by: 'author2',
@@ -410,15 +389,11 @@ describe('getStories', () => {
           },
         ],
         feed: 'new',
-        total: 200,
-        offset: 20,
-        hasMore: true,
       });
 
       const text = blocks[0]!.text;
-      expect(text).toContain('new stories (21–22 of 200, offset:20)');
-      expect(text).toContain('[21] Offset Story');
-      expect(text).toContain('[22] Next Story');
+      expect(text).toContain('[1] First on Page');
+      expect(text).toContain('[2] Second on Page');
     });
 
     it('omits comments section for items without descendants', () => {
@@ -434,9 +409,6 @@ describe('getStories', () => {
           },
         ],
         feed: 'jobs',
-        total: 50,
-        offset: 0,
-        hasMore: true,
       });
 
       const text = blocks[0]!.text;
@@ -460,9 +432,6 @@ describe('getStories', () => {
           },
         ],
         feed: 'ask',
-        total: 10,
-        offset: 0,
-        hasMore: false,
       });
 
       const text = blocks[0]!.text;

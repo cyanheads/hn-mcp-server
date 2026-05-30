@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/hn-mcp-server",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "description": "MCP server for Hacker News — feeds, threads, users, and search via Firebase and Algolia APIs",
   "type": "module",
   "main": "dist/index.js",
@@ -15,7 +15,8 @@
     "clean": "bun scripts/clean.ts",
     "devcheck": "bun scripts/devcheck.ts",
     "tree": "bun scripts/tree.ts",
-    "format": "biome check --write --unsafe .",
+    "format": "biome check --write .",
+    "format:unsafe": "biome check --write --unsafe .",
     "list-skills": "bun scripts/list-skills.ts",
     "lint:mcp": "bun scripts/lint-mcp.ts",
     "lint:packaging": "bun scripts/lint-packaging.ts",
@@ -71,7 +72,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@cyanheads/mcp-ts-core": "^0.9.13",
+    "@cyanheads/mcp-ts-core": "^0.9.16",
     "hono": "^4.12.23",
     "zod": "^4.4.3"
   },

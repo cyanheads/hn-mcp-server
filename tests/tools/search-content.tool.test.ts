@@ -3,7 +3,7 @@
  * @module mcp-server/tools/definitions/search-content.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AlgoliaResponse } from '@/services/hn/types.js';
 
@@ -100,7 +100,8 @@ describe('hn_search_content handler', () => {
       }),
     );
 
-    const result = await searchHn.handler(searchHn.input.parse({ query: 'test' }), ctx);
+    const freshCtx = createMockContext();
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'test' }), freshCtx);
 
     expect(result).toEqual({
       hits: [
@@ -131,11 +132,13 @@ describe('hn_search_content handler', () => {
           text: 'This is a comment',
         },
       ],
-      totalHits: 100,
-      page: 0,
-      totalPages: 4,
       query: 'test',
     });
+
+    const enrichment = getEnrichment(freshCtx);
+    expect(enrichment.totalHits).toBe(100);
+    expect(enrichment.page).toBe(0);
+    expect(enrichment.totalPages).toBe(4);
   });
 
   it('maps story hit fields', async () => {
@@ -210,25 +213,28 @@ describe('hn_search_content handler', () => {
   it('returns empty hits array for zero results', async () => {
     mockSearch.mockResolvedValue(algoliaResponse());
 
-    const result = await searchHn.handler(searchHn.input.parse({ query: 'nonexistent' }), ctx);
+    const freshCtx = createMockContext();
+    const result = await searchHn.handler(searchHn.input.parse({ query: 'nonexistent' }), freshCtx);
 
     expect(result.hits).toEqual([]);
-    expect(result.totalHits).toBe(0);
     expect(result.query).toBe('nonexistent');
+    expect(getEnrichment(freshCtx).totalHits).toBe(0);
   });
 
-  it('populates message with generic hint when no filters are set and hits are empty', async () => {
+  it('populates notice with generic hint when no filters are set and hits are empty', async () => {
     mockSearch.mockResolvedValue(algoliaResponse());
 
-    const result = await searchHn.handler(searchHn.input.parse({ query: 'nothing' }), ctx);
+    const freshCtx = createMockContext();
+    await searchHn.handler(searchHn.input.parse({ query: 'nothing' }), freshCtx);
 
-    expect(result.message).toBe('Try broader keywords or different terms.');
+    expect(getEnrichment(freshCtx).notice).toBe('Try broader keywords or different terms.');
   });
 
-  it('populates message naming each set filter when hits are empty', async () => {
+  it('populates notice naming each set filter when hits are empty', async () => {
     mockSearch.mockResolvedValue(algoliaResponse());
 
-    const result = await searchHn.handler(
+    const freshCtx = createMockContext();
+    await searchHn.handler(
       searchHn.input.parse({
         query: 'rust',
         tags: 'story',
@@ -236,20 +242,21 @@ describe('hn_search_content handler', () => {
         minPoints: 100,
         dateRange: { start: '2024-01-01' },
       }),
-      ctx,
+      freshCtx,
     );
 
-    expect(result.message).toBe(
+    expect(getEnrichment(freshCtx).notice).toBe(
       'Try broader keywords, or relax these filters: tags, author, minPoints, dateRange.',
     );
   });
 
-  it('omits message when hits are non-empty', async () => {
+  it('omits notice when hits are non-empty', async () => {
     mockSearch.mockResolvedValue(algoliaResponse({ hits: [storyHit], nbHits: 1 }));
 
-    const result = await searchHn.handler(searchHn.input.parse({ query: 'rust' }), ctx);
+    const freshCtx = createMockContext();
+    await searchHn.handler(searchHn.input.parse({ query: 'rust' }), freshCtx);
 
-    expect(result.message).toBeUndefined();
+    expect(getEnrichment(freshCtx).notice).toBeUndefined();
   });
 
   it('derives domain from url and strips www.', async () => {
@@ -413,34 +420,13 @@ describe('hn_search_content format', () => {
   it('shows no-results message for empty hits', () => {
     const content = searchHn.format!({
       hits: [],
-      totalHits: 0,
-      page: 0,
-      totalPages: 0,
       query: 'obscure',
     });
 
     expect(content).toEqual([{ type: 'text', text: '"obscure" — no results.' }]);
   });
 
-  it('appends recovery message to empty-hits text when present', () => {
-    const content = searchHn.format!({
-      hits: [],
-      totalHits: 0,
-      page: 0,
-      totalPages: 0,
-      query: 'obscure',
-      message: 'Try broader keywords, or relax these filters: tags, minPoints.',
-    });
-
-    expect(content).toEqual([
-      {
-        type: 'text',
-        text: '"obscure" — no results. Try broader keywords, or relax these filters: tags, minPoints.',
-      },
-    ]);
-  });
-
-  it('formats story results with rank, meta, and url', () => {
+  it('formats story results with meta, and url', () => {
     const content = searchHn.format!({
       hits: [
         {
@@ -457,14 +443,11 @@ describe('hn_search_content format', () => {
           text: undefined,
         },
       ],
-      totalHits: 500,
-      page: 0,
-      totalPages: 17,
       query: 'rust',
     });
 
     const text = content[0]!.text;
-    expect(text).toContain('## "rust" — 500 results (page 1/17, p:0)');
+    expect(text).toContain('## "rust" — search results');
     expect(text).toContain('### Rust is Great (rust.dev)');
     expect(text).toContain('id:123 | alice | 200 pts | 80 comments | 2024-06-15');
     expect(text).toContain('https://rust.dev');
@@ -483,9 +466,6 @@ describe('hn_search_content format', () => {
           highlights: { title: '<em>Rust</em> is great', matchedWords: ['rust'] },
         },
       ],
-      totalHits: 1,
-      page: 0,
-      totalPages: 1,
       query: 'rust',
     });
 
@@ -511,9 +491,6 @@ describe('hn_search_content format', () => {
           },
         },
       ],
-      totalHits: 1,
-      page: 0,
-      totalPages: 1,
       query: 'rust think',
     });
 
@@ -537,9 +514,6 @@ describe('hn_search_content format', () => {
           createdAt: '2024-01-01T00:00:00Z',
         },
       ],
-      totalHits: 1,
-      page: 0,
-      totalPages: 1,
       query: 'x',
     });
 
@@ -562,14 +536,11 @@ describe('hn_search_content format', () => {
           text: 'I think Rust is the best choice for systems programming.',
         },
       ],
-      totalHits: 42,
-      page: 1,
-      totalPages: 2,
       query: 'best language',
     });
 
     const text = content[0]!.text;
-    expect(text).toContain('## "best language" — 42 results (page 2/2, p:1)');
+    expect(text).toContain('## "best language" — search results');
     expect(text).toContain('### Comment on "Ask HN: Best Language?" (story id:100)');
     expect(text).toContain('id:456 | bob | 10 pts | 2024-03-20');
     expect(text).toContain('I think Rust is the best choice for systems programming.');
@@ -592,40 +563,11 @@ describe('hn_search_content format', () => {
           text: longText,
         },
       ],
-      totalHits: 1,
-      page: 0,
-      totalPages: 1,
       query: 'q',
     });
 
     const text = content[0]!.text;
     expect(text).toContain('a'.repeat(250));
-  });
-
-  it('header shows correct page info (1-indexed display)', () => {
-    const content = searchHn.format!({
-      hits: [
-        {
-          id: 1,
-          title: 'X',
-          url: undefined,
-          author: 'a',
-          points: 1,
-          numComments: 0,
-          createdAt: '2024-01-01T00:00:00Z',
-          storyTitle: undefined,
-          storyId: undefined,
-          text: undefined,
-        },
-      ],
-      totalHits: 300,
-      page: 2,
-      totalPages: 10,
-      query: 'search',
-    });
-
-    const text = content[0]!.text;
-    expect(text).toContain('"search" — 300 results (page 3/10, p:2)');
   });
 
   it('omits url line for stories without url', () => {
@@ -644,9 +586,6 @@ describe('hn_search_content format', () => {
           text: undefined,
         },
       ],
-      totalHits: 1,
-      page: 0,
-      totalPages: 1,
       query: 'q',
     });
 

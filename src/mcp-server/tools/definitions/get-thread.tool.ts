@@ -77,29 +77,23 @@ export const getThread = tool('hn_get_thread', {
       .describe(
         'Flat comment list ordered breadth-first by rank: highest-ranked top-level comments first, then their replies. Use depth/parentId to reconstruct nesting.',
       ),
+  }),
+
+  enrichment: {
     totalLoaded: z.number().describe('Number of comments actually fetched and included.'),
     totalAvailable: z
       .number()
       .optional()
       .describe(
-        `Total comment count from the root item. If totalLoaded < totalAvailable, raise maxComments (and depth, if you want nested replies) and call again.`,
+        'Total comment count from the root item. If totalLoaded < totalAvailable, raise maxComments (and depth, if you want nested replies) and call again.',
       ),
-    omitted: z
-      .object({
-        deleted: z
-          .number()
-          .describe(
-            'Count of comments dropped because HN flagged them deleted (author/mod removal).',
-          ),
-        dead: z
-          .number()
-          .describe('Count of comments dropped because HN flagged them dead (autoflagged).'),
-      })
+    notice: z
+      .string()
       .optional()
       .describe(
-        'Counts of comments dropped during BFS traversal. Present only when at least one comment was dropped, so the caller can tell when a thread view is partial due to moderation rather than depth/maxComments limits. Absence means no moderation truncation.',
+        'Truncation context: counts of deleted/dead comments dropped during traversal, or pagination hint when totalLoaded < totalAvailable. Absent when no comments were dropped and all available comments were loaded.',
       ),
-  }),
+  },
 
   async handler(input, ctx) {
     const hn = getHnService();
@@ -124,11 +118,10 @@ export const getThread = tool('hn_get_thread', {
     };
 
     if (input.depth === 0 || !root.kids?.length) {
+      ctx.enrich({ totalLoaded: 0, totalAvailable: root.descendants });
       return {
         item,
         comments: [],
-        totalLoaded: 0,
-        totalAvailable: root.descendants,
       };
     }
 
@@ -202,19 +195,31 @@ export const getThread = tool('hn_get_thread', {
 
     ctx.log.info('Resolved thread', { itemId: input.itemId, comments: comments.length });
 
+    const totalLoaded = comments.length;
+    const totalAvailable = root.descendants;
+    ctx.enrich({ totalLoaded, totalAvailable });
+
+    const noticeParts: string[] = [];
+    if (omittedDeleted > 0 || omittedDead > 0) {
+      noticeParts.push(`${omittedDeleted} deleted, ${omittedDead} dead — omitted from this view.`);
+    }
+    if (totalAvailable != null && totalLoaded < totalAvailable) {
+      noticeParts.push(
+        `${totalLoaded}/${totalAvailable} comments loaded — raise maxComments or depth for more.`,
+      );
+    }
+    if (noticeParts.length > 0) {
+      ctx.enrich.notice(noticeParts.join(' '));
+    }
+
     return {
       item,
       comments,
-      totalLoaded: comments.length,
-      totalAvailable: root.descendants,
-      ...((omittedDeleted > 0 || omittedDead > 0) && {
-        omitted: { deleted: omittedDeleted, dead: omittedDead },
-      }),
     };
   },
 
   format: (result) => {
-    const { item, comments, totalLoaded, totalAvailable, omitted } = result;
+    const { item, comments } = result;
     const lines: string[] = [];
 
     // Root item
@@ -255,14 +260,6 @@ export const getThread = tool('hn_get_thread', {
       }
     }
 
-    const summary =
-      totalAvailable != null && totalLoaded < totalAvailable
-        ? `\n\n(${totalLoaded}/${totalAvailable} comments loaded — increase maxComments or depth for more)`
-        : `\n\n(${totalLoaded} comments loaded${totalAvailable != null ? ` of ${totalAvailable} available` : ''})`;
-    const omittedNote = omitted
-      ? `\n(${omitted.deleted} deleted, ${omitted.dead} dead — omitted from this view)`
-      : '';
-
-    return [{ type: 'text' as const, text: lines.join('\n') + summary + omittedNote }];
+    return [{ type: 'text' as const, text: lines.join('\n') }];
   },
 });
