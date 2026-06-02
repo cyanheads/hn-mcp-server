@@ -1,7 +1,7 @@
 {
   "name": "@cyanheads/hn-mcp-server",
-  "version": "0.5.5",
-  "description": "MCP server for Hacker News — feeds, threads, users, and search via Firebase and Algolia APIs",
+  "version": "0.5.8",
+  "description": "Browse Hacker News feeds, threads, and user profiles with full-text search via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -14,7 +14,7 @@
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "@cyanheads/hn-mcp-server",
-    "shortDescription": "MCP server for Hacker News — feeds, threads, users, and search via Firebase and Algolia APIs",
+    "shortDescription": "Browse Hacker News feeds, threads, and user profiles with full-text search.",
     "longDescription": "",
     "developerName": "cyanheads",
     "category": "",

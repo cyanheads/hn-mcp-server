@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.8](changelog/0.5.x/0.5.8.md) — 2026-06-02
+
+@cyanheads/mcp-ts-core ^0.9.16 → ^0.9.21 — per-request log context fix, secret-stripped error messages, withRetry fail-fast on non-retryable errors
+
 ## [0.5.7](changelog/0.5.x/0.5.7.md) — 2026-05-30
 
 enrichment adoption — ranked-feed and search tools surface result context (counts, query echo, empty-result guidance) in a typed enrichment block reaching both structuredContent JSON and content[] markdown trailer
