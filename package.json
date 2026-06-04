@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/hn-mcp-server",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "description": "Browse Hacker News feeds, threads, and user profiles with full-text search via MCP. STDIO or Streamable HTTP.",
   "type": "module",
   "main": "dist/index.js",

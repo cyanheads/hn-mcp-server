@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.9](changelog/0.5.x/0.5.9.md) — 2026-06-04
+
+hn_get_user: surface submission pagination notice via enrichment block
+
 ## [0.5.8](changelog/0.5.x/0.5.8.md) — 2026-06-02
 
 @cyanheads/mcp-ts-core ^0.9.16 → ^0.9.21 — per-request log context fix, secret-stripped error messages, withRetry fail-fast on non-retryable errors
