@@ -3,7 +3,7 @@
  * @module mcp-server/tools/definitions/get-user.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HnItem, HnUser } from '@/services/hn/types.js';
 
@@ -162,6 +162,49 @@ describe('hn_get_user handler', () => {
 
     expect(result.submissions).toHaveLength(1);
     expect(result.submissions?.[0]?.id).toBe(100);
+  });
+
+  it('emits pagination notice when resolved submissions are fewer than total', async () => {
+    const ctx = createMockContext({ errors: getUser.errors });
+    // User has many submissions but we only resolve the default 10
+    const prolificUser: HnUser = {
+      ...baseUser,
+      submitted: Array.from({ length: 100 }, (_, i) => i + 1),
+    };
+    mockFetchUser.mockResolvedValue(prolificUser);
+    mockFetchItems.mockResolvedValue([storyItem, commentItem]);
+
+    await getUser.handler(parse({ includeSubmissions: true, submissionCount: 10 }), ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toMatch(/Showing 2 of 100 submissions/);
+    expect(enrichment.notice).toMatch(/Raise submissionCount \(max 50\)/);
+  });
+
+  it('does not emit notice when resolved submission count equals total', async () => {
+    const ctx = createMockContext({ errors: getUser.errors });
+    // User has 2 submissions and both resolve as live items — no truncation
+    const smallUser: HnUser = { ...baseUser, submitted: [100, 101] };
+    mockFetchUser.mockResolvedValue(smallUser);
+    mockFetchItems.mockResolvedValue([storyItem, commentItem]);
+
+    await getUser.handler(parse({ includeSubmissions: true, submissionCount: 10 }), ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toBeUndefined();
+  });
+
+  it('does not emit notice when all submitted IDs were fetched but some were dead/deleted', async () => {
+    const ctx = createMockContext({ errors: getUser.errors });
+    // User has 3 submissions total, all fetched (submissionCount=10 > 3), but 2 are dead/deleted
+    mockFetchUser.mockResolvedValue({ ...baseUser, submitted: [100, 102, 103] });
+    mockFetchItems.mockResolvedValue([storyItem, deadItem, deletedItem]);
+
+    await getUser.handler(parse({ includeSubmissions: true, submissionCount: 10 }), ctx);
+
+    // submissions.length (1) < totalSubmissions (3) but we already fetched all IDs — not a pagination gap
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toBeUndefined();
   });
 });
 

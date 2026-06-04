@@ -72,6 +72,15 @@ export const getUser = tool('hn_get_user', {
       ),
   }),
 
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Pagination caveat when submissions were truncated. Absent when all submissions fit within the requested count or includeSubmissions is false.',
+      ),
+  },
+
   async handler(input, ctx) {
     const hn = getHnService();
     const user = await hn.fetchUser(input.username, ctx);
@@ -107,6 +116,17 @@ export const getUser = tool('hn_get_user', {
         : undefined;
 
     ctx.log.info('Fetched user', { username: input.username, submissions: submissions?.length });
+
+    if (
+      input.includeSubmissions &&
+      submissions &&
+      user.submitted &&
+      user.submitted.length > input.submissionCount
+    ) {
+      ctx.enrich.notice(
+        `Showing ${submissions.length} of ${profile.totalSubmissions.toLocaleString()} submissions. Raise submissionCount (max 50) for more.`,
+      );
+    }
 
     return { user: profile, submissions };
   },
