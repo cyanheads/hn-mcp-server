@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.10](changelog/0.5.x/0.5.10.md) — 2026-06-12
+
+@cyanheads/mcp-ts-core ^0.9.21 → ^0.10.6 — truncation enrichment signals on every tool, explicit server identity, hardened MCPB bundle packaging
+
 ## [0.5.9](changelog/0.5.x/0.5.9.md) — 2026-06-04
 
 hn_get_user: surface submission pagination notice via enrichment block

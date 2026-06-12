@@ -1,9 +1,10 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-06-02 14:25:06
+Generated on: 2026-06-12 08:27:32
 
 ```text
 hn-mcp-server/
+├── .agents/
 ├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
@@ -36,6 +37,7 @@ hn-mcp-server/
 │   ├── check-framework-antipatterns.ts
 │   ├── check-skill-versions.ts
 │   ├── check-skills-sync.ts
+│   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
@@ -47,7 +49,11 @@ hn-mcp-server/
 ├── skills/
 │   ├── add-app-tool/
 │   │   └── SKILL.md
+│   ├── add-export/
+│   │   └── SKILL.md
 │   ├── add-prompt/
+│   │   └── SKILL.md
+│   ├── add-provider/
 │   │   └── SKILL.md
 │   ├── add-resource/
 │   │   └── SKILL.md
@@ -123,8 +129,13 @@ hn-mcp-server/
 │   │   └── SKILL.md
 │   ├── setup/
 │   │   └── SKILL.md
-│   └── tool-defs-analysis/
-│       └── SKILL.md
+│   ├── techniques/
+│   │   ├── references/
+│   │   │   └── outline-on-overflow.md
+│   │   └── SKILL.md
+│   ├── tool-defs-analysis/
+│   │   └── SKILL.md
+│   └── README.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts

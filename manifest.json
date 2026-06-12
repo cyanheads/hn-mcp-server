@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "hn-mcp-server",
-  "version": "0.5.9",
+  "version": "0.5.10",
   "description": "Browse Hacker News feeds, threads, and user profiles with full-text search via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads"

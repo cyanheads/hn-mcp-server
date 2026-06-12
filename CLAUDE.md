@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** hn-mcp-server
-**Version:** 0.5.9
+**Version:** 0.5.10
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -100,6 +100,22 @@ export function getServerConfig() {
 }
 ```
 
+For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment.
+
+### Server identity
+
+`createApp()` requires `name` and `title`, both set to the hyphenated repo name:
+
+```ts
+await createApp({
+  name: 'hn-mcp-server',
+  title: 'hn-mcp-server',
+  // ...
+});
+```
+
+`lint:packaging` (check 9) validates the pair against the unscoped package name.
+
 ---
 
 ## Context
@@ -110,8 +126,7 @@ Handlers receive a unified `ctx` object. Key properties:
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
 | `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
-| `ctx.elicit` | Ask user for structured input. **Check for presence first:** `if (ctx.elicit) { ... }` |
-| `ctx.sample` | Request LLM completion from the client. **Check for presence first:** `if (ctx.sample) { ... }` |
+| `ctx.elicit` | Ask user for structured input — form call `(message, schema)` or `.url(message, url)` for an external link. **Check for presence first:** `if (ctx.elicit) { ... }` |
 | `ctx.signal` | `AbortSignal` for cancellation. |
 | `ctx.progress` | Task progress (present when `task: true`) — `.setTotal(n)`, `.increment()`, `.update(message)`. |
 | `ctx.requestId` | Unique request ID. |
@@ -225,18 +240,20 @@ Available skills:
 | `git-wrapup` | Land working-tree changes as a versioned commit + annotated tag — version bump, changelog, verify, tag. Local only. |
 | `release-and-publish` | Post-wrapup ship workflow: verification gate, push, publish to npm/MCP Registry/GHCR |
 | `maintenance` | Investigate changelogs, adopt upstream changes, sync skills to agent dirs |
+| `orchestrations` | Chain task skills into a gated multi-phase pipeline — build-out, QA-fix, update-ship — when you can spawn sub-agents |
+| `techniques` | Catalog of reusable response/data-shaping patterns (outline-on-overflow, etc.) |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
+| `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3 opt-in |
 | `api-config` | AppConfig, parseConfig, env vars |
 | `api-context` | Context interface, logger, state, progress |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |
+| `api-linter` | Definition linter rule catalog — invoked by `bun run lint:mcp` and `devcheck` |
+| `api-mirror` | MirrorService: persistent self-refreshing local index (SQLite+FTS5) for bulk/slow upstream datasets |
 | `api-services` | LLM, Speech, Graph services |
 | `api-testing` | createMockContext, test patterns |
-| `api-utils` | Formatting, parsing, security, pagination, scheduling |
+| `api-utils` | Formatting, parsing, security, pagination, scheduling, telemetry helpers |
 | `api-telemetry` | OTel catalog: spans, metrics, completion logs, env config, cardinality rules |
 | `api-workers` | Cloudflare Workers runtime |
-| `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3 opt-in |
-| `api-linter` | Definition linter rule catalog — invoked by `bun run lint:mcp` and `devcheck` |
-| `tool-defs-analysis` | Read-only audit of MCP definition language across the surface — voice, leaks, defaults, recovery hints, output descriptions |
 | `report-issue-framework` | File a bug or feature request against `@cyanheads/mcp-ts-core` via `gh` CLI |
 | `report-issue-local` | File a bug or feature request against this server's own repo via `gh` CLI |
 
@@ -257,7 +274,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run list-skills` | Print skills index from project `skills/` |
 | `bun run lint:mcp` | Validate MCP tool/resource definitions |
 | `bun run lint:packaging` | Validate env-var alignment between `manifest.json` and `server.json` |
-| `bun run bundle` | Build and pack as `.mcpb` for Claude Desktop install |
+| `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
 | `bun run audit:refresh` | Delete `bun.lock`, reinstall, re-audit (clears stale lockfile false positives) |
 | `bun run test` | Run tests |
 | `bun run start:stdio` | Production mode (stdio) |
