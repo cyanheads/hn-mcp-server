@@ -87,6 +87,12 @@ export const getThread = tool('hn_get_thread', {
       .describe(
         'Total comment count from the root item. If totalLoaded < totalAvailable, raise maxComments (and depth, if you want nested replies) and call again.',
       ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when the comment list was capped by maxComments.'),
+    shown: z.number().optional().describe('Number of comments returned.'),
+    cap: z.number().optional().describe('The maxComments cap that was applied.'),
     notice: z
       .string()
       .optional()
@@ -198,6 +204,10 @@ export const getThread = tool('hn_get_thread', {
     const totalLoaded = comments.length;
     const totalAvailable = root.descendants;
     ctx.enrich({ totalLoaded, totalAvailable });
+
+    if (totalLoaded >= input.maxComments) {
+      ctx.enrich.truncated({ shown: totalLoaded, cap: input.maxComments });
+    }
 
     const noticeParts: string[] = [];
     if (omittedDeleted > 0 || omittedDead > 0) {

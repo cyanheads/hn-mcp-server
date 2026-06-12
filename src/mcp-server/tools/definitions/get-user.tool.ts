@@ -73,6 +73,12 @@ export const getUser = tool('hn_get_user', {
   }),
 
   enrichment: {
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when submissions were capped by submissionCount.'),
+    shown: z.number().optional().describe('Number of submissions returned.'),
+    cap: z.number().optional().describe('The submissionCount cap that was applied.'),
     notice: z
       .string()
       .optional()
@@ -123,6 +129,7 @@ export const getUser = tool('hn_get_user', {
       user.submitted &&
       user.submitted.length > input.submissionCount
     ) {
+      ctx.enrich.truncated({ shown: submissions.length, cap: input.submissionCount });
       ctx.enrich.notice(
         `Showing ${submissions.length} of ${profile.totalSubmissions.toLocaleString()} submissions. Raise submissionCount (max 50) for more.`,
       );

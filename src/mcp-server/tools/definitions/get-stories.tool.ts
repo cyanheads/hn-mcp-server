@@ -89,6 +89,12 @@ export const getStories = tool('hn_get_stories', {
       .describe('Total items in the feed (up to 500 for top/new/best, 200 for ask/show/jobs).'),
     offset: z.number().describe('Offset that was applied to this page.'),
     hasMore: z.boolean().describe('Whether more stories are available beyond this page.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when the feed was capped by the count parameter.'),
+    shown: z.number().optional().describe('Number of stories returned on this page.'),
+    cap: z.number().optional().describe('The count cap that was applied.'),
     notice: z
       .string()
       .optional()
@@ -126,6 +132,9 @@ export const getStories = tool('hn_get_stories', {
     const total = feedIds.length;
     const hasMore = input.offset + input.count < total;
     ctx.enrich({ total, offset: input.offset, hasMore });
+    if (hasMore || stories.length === input.count) {
+      ctx.enrich.truncated({ shown: stories.length, cap: input.count });
+    }
 
     if (stories.length === 0) {
       if (total === 0) {

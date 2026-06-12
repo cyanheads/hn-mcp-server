@@ -152,6 +152,12 @@ export const searchHn = tool('hn_search_content', {
     totalHits: z.number().describe('Total matching results across all pages.'),
     page: z.number().describe('Current page number (0-indexed).'),
     totalPages: z.number().describe('Total pages available.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when the hit list was capped by the count parameter.'),
+    shown: z.number().optional().describe('Number of hits returned.'),
+    cap: z.number().optional().describe('The count cap that was applied.'),
     notice: z
       .string()
       .optional()
@@ -193,6 +199,9 @@ export const searchHn = tool('hn_search_content', {
 
     const totalPages = Math.ceil(result.nbHits / input.count);
     ctx.enrich({ totalHits: result.nbHits, page: result.page, totalPages });
+    if (hits.length === input.count && result.nbHits > input.count) {
+      ctx.enrich.truncated({ shown: hits.length, cap: input.count });
+    }
 
     if (hits.length === 0) {
       const filters: string[] = [];
