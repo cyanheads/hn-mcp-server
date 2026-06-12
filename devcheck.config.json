@@ -12,6 +12,16 @@
     "ignorePatterns": []
   },
   "outdated": {
-    "allowlist": []
+    "allowlist": ["typescript"]
+  },
+  "skillVersions": {
+    "ignore": [
+      "api-auth",
+      "api-errors",
+      "api-services",
+      "api-telemetry",
+      "report-issue-local",
+      "tool-defs-analysis"
+    ]
   }
 }
