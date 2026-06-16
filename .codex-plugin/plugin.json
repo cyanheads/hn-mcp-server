@@ -1,5 +1,5 @@
 {
-  "name": "@cyanheads/hn-mcp-server",
+  "name": "hn-mcp-server",
   "version": "0.5.10",
   "description": "Browse Hacker News feeds, threads, and user profiles with full-text search via MCP. STDIO or Streamable HTTP.",
   "author": {
