@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.11](changelog/0.5.x/0.5.11.md) — 2026-06-20
+
+@cyanheads/mcp-ts-core ^0.10.6 → ^0.10.9 — check-dependency-specifiers + plugin-manifest devcheck guards, ctx.content collector, canvas SQL gate classification; dropped unused direct hono dependency; TypeScript 6 adopted
+
 ## [0.5.10](changelog/0.5.x/0.5.10.md) — 2026-06-12
 
 @cyanheads/mcp-ts-core ^0.9.21 → ^0.10.6 — truncation enrichment signals on every tool, explicit server identity, hardened MCPB bundle packaging
