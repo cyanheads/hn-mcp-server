@@ -23,5 +23,8 @@
       "report-issue-local",
       "tool-defs-analysis"
     ]
+  },
+  "packaging": {
+    "pluginManifests": true
   }
 }
