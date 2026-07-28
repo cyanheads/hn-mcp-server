@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.13](changelog/0.5.x/0.5.13.md) — 2026-07-28
+
+hn_get_user gains submissionOffset to page through a user's full submission history; hn_search_content gains a compact view that drops duplicated body text; upstream HTTP failures now classify onto a typed reason and recovery hint instead of a raw fetch error.
+
 ## [0.5.12](changelog/0.5.x/0.5.12.md) — 2026-07-28
 
 Reject fractional and blank/whitespace-only tool inputs; hn_search_content reports Algolia's own page count instead of a recomputation; hn_get_user's Firebase username segment is percent-encoded; hn_get_thread omits totalAvailable instead of rendering undefined. @cyanheads/mcp-ts-core ^0.10.9 → ^0.11.0.
