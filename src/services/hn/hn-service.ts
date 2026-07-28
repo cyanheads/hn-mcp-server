@@ -4,7 +4,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
@@ -125,8 +125,10 @@ function isHtmlErrorBody(text: string): boolean {
 }
 
 /**
- * Parse an HN/Algolia JSON body, throwing a classified error for HTML responses
- * served as 200 OK (common during upstream rate limiting).
+ * Parse an HN/Algolia JSON body. Both ways a 200 response can still be unusable
+ * — an HTML error page (common during upstream rate limiting) and a body that
+ * is not JSON at all — throw a classified error rather than a raw `SyntaxError`,
+ * whose message quotes the offending body back at the client.
  */
 function parseJsonBody<T>(text: string, upstream: string): T {
   if (isHtmlErrorBody(text)) {
@@ -138,7 +140,87 @@ function parseJsonBody<T>(text: string, upstream: string): T {
       },
     });
   }
-  return JSON.parse(text) as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch (err) {
+    throw serviceUnavailable(
+      `${upstream} returned a body that is not JSON.`,
+      {
+        upstream,
+        reason: 'upstream_malformed',
+        recovery: {
+          hint: `${upstream} answered 200 with a body that is not its API response. Retry after a brief delay; no input change helps while the upstream is serving something else.`,
+        },
+      },
+      { cause: err },
+    );
+  }
+}
+
+/**
+ * Map an upstream HTTP status onto a contract reason, its JSON-RPC code, and
+ * the agent's next move. Three buckets: 429 is a pacing problem, 5xx is an
+ * upstream outage, and every other 4xx means the request itself was rejected
+ * and will be rejected again unchanged.
+ *
+ * The code travels with the reason rather than being taken from the framework's
+ * finer-grained status ladder, so each reason surfaces exactly the code its
+ * tools declare in `errors[]`. That ladder would otherwise split one reason
+ * across several codes — HN answers an unknown path with 401, and a 500 or 504
+ * would arrive as `InternalError` or `Timeout`, blurring the two codes that
+ * mean "this server broke" and "this server's own fetch timed out". The exact
+ * status stays on `data.status`.
+ */
+function upstreamFailureFor(upstream: string, status: number) {
+  if (status === 429) {
+    return {
+      code: JsonRpcErrorCode.RateLimited,
+      reason: 'upstream_rate_limited',
+      hint: `${upstream} is rate-limiting this server. Wait several seconds before retrying the same call, and reduce how often it is called.`,
+    };
+  }
+  if (status >= 500) {
+    return {
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      reason: 'upstream_unavailable',
+      hint: `${upstream} is failing or in maintenance. Retry after a short delay — no input change helps while the upstream is down.`,
+    };
+  }
+  return {
+    code: JsonRpcErrorCode.InvalidParams,
+    reason: 'upstream_rejected',
+    hint: `${upstream} rejected the request as malformed. Check the tool input values against the schema; retrying the same input fails identically.`,
+  };
+}
+
+/**
+ * Translate `fetchWithTimeout`'s raw non-2xx throw into a classified error
+ * carrying `reason` and `recovery.hint`, matching the shape `parseJsonBody`
+ * already produces for HTML error bodies.
+ *
+ * Wraps *outside* `withRetry` so the framework's own classification is left
+ * untouched: retry eligibility, `Retry-After` honoring, timeouts, and caller
+ * aborts all resolve against the original error, and only HTTP-status failures
+ * (`errorSource: 'FetchHttpError'`) are rewritten. The message drops the
+ * upstream URL and the verbatim response body, which stay on the `cause` chain
+ * for server-side logs.
+ */
+async function withUpstreamHttpErrors<T>(upstream: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!(err instanceof McpError) || err.data?.errorSource !== 'FetchHttpError') throw err;
+    const status = err.data.status;
+    if (typeof status !== 'number') throw err;
+
+    const { code, reason, hint } = upstreamFailureFor(upstream, status);
+    throw new McpError(
+      code,
+      `${upstream} returned HTTP ${status}.`,
+      { upstream, status, reason, recovery: { hint } },
+      { cause: err },
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -152,18 +234,32 @@ export class HnService {
     this.concurrencyLimit = concurrencyLimit;
   }
 
+  /**
+   * GET a JSON document from an upstream, with retries around the full
+   * fetch-and-parse pipeline and both failure shapes — non-2xx status and
+   * HTML-instead-of-JSON — classified onto a contract reason.
+   */
+  private getJson<T>(
+    upstream: string,
+    operation: string,
+    url: string | URL,
+    ctx: Context,
+  ): Promise<T> {
+    const rc = toRequestContext(ctx);
+    return withUpstreamHttpErrors(upstream, () =>
+      withRetry(
+        async () => {
+          const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS, rc, { signal: ctx.signal });
+          return parseJsonBody<T>(await res.text(), upstream);
+        },
+        { operation, context: rc, signal: ctx.signal },
+      ),
+    );
+  }
+
   /** Fetch a single item by ID. Returns null when HN reports the item is missing. */
   fetchItem(id: number, ctx: Context): Promise<HnItem | null> {
-    const rc = toRequestContext(ctx);
-    return withRetry(
-      async () => {
-        const res = await fetchWithTimeout(`${HN_API}/item/${id}.json`, REQUEST_TIMEOUT_MS, rc, {
-          signal: ctx.signal,
-        });
-        return parseJsonBody<HnItem | null>(await res.text(), 'HN API');
-      },
-      { operation: 'hn.fetchItem', context: rc, signal: ctx.signal },
-    );
+    return this.getJson('HN API', 'hn.fetchItem', `${HN_API}/item/${id}.json`, ctx);
   }
 
   /**
@@ -173,34 +269,18 @@ export class HnService {
    * route and resolve to a different Firebase resource.
    */
   fetchUser(username: string, ctx: Context): Promise<HnUser | null> {
-    const rc = toRequestContext(ctx);
-    return withRetry(
-      async () => {
-        const res = await fetchWithTimeout(
-          `${HN_API}/user/${encodeURIComponent(username)}.json`,
-          REQUEST_TIMEOUT_MS,
-          rc,
-          { signal: ctx.signal },
-        );
-        return parseJsonBody<HnUser | null>(await res.text(), 'HN API');
-      },
-      { operation: 'hn.fetchUser', context: rc, signal: ctx.signal },
+    return this.getJson(
+      'HN API',
+      'hn.fetchUser',
+      `${HN_API}/user/${encodeURIComponent(username)}.json`,
+      ctx,
     );
   }
 
   /** Fetch a feed's ID array. Throws on upstream failure after retries. */
   fetchFeed(type: HnFeedType, ctx: Context): Promise<number[]> {
     const endpoint = type === 'jobs' ? 'jobstories' : `${type}stories`;
-    const rc = toRequestContext(ctx);
-    return withRetry(
-      async () => {
-        const res = await fetchWithTimeout(`${HN_API}/${endpoint}.json`, REQUEST_TIMEOUT_MS, rc, {
-          signal: ctx.signal,
-        });
-        return parseJsonBody<number[]>(await res.text(), 'HN API');
-      },
-      { operation: 'hn.fetchFeed', context: rc, signal: ctx.signal },
-    );
+    return this.getJson('HN API', 'hn.fetchFeed', `${HN_API}/${endpoint}.json`, ctx);
   }
 
   /**
@@ -275,16 +355,7 @@ export class HnService {
     }
     if (numericFilters.length) url.searchParams.set('numericFilters', numericFilters.join(','));
 
-    const rc = toRequestContext(ctx);
-    return withRetry(
-      async () => {
-        const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS, rc, {
-          signal: ctx.signal,
-        });
-        return parseJsonBody<AlgoliaResponse>(await res.text(), 'Algolia');
-      },
-      { operation: 'hn.search', context: rc, signal: ctx.signal },
-    );
+    return this.getJson('Algolia', 'hn.search', url, ctx);
   }
 }
 

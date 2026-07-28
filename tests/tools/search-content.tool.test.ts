@@ -418,6 +418,156 @@ describe('hn_search_content handler', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Result projection (view)
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content view projection', () => {
+  const BODY = 'The model context protocol spec is worth reading end to end.';
+  const HIGHLIGHTED =
+    'The model <em>context</em> <em>protocol</em> spec is worth reading end to end.';
+
+  const longCommentHit = {
+    ...commentHit,
+    comment_text: BODY,
+    _highlightResult: {
+      comment_text: {
+        value: HIGHLIGHTED,
+        matchLevel: 'full' as const,
+        matchedWords: ['context', 'protocol'],
+      },
+      story_title: {
+        value: 'Test <em>Story</em>',
+        matchLevel: 'full' as const,
+        matchedWords: ['story'],
+      },
+    },
+  };
+
+  /** Run the handler, then render content[] from the same result — the two surfaces a client may read. */
+  async function run(view: 'full' | 'compact') {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: [longCommentHit], nbHits: 1, nbPages: 1 }),
+    );
+    const result = await searchHn.handler(
+      searchHn.input.parse({ query: 'model context protocol', view }),
+      createMockContext(),
+    );
+    const rendered = (searchHn.format!(result)[0] as { text: string }).text;
+    return { hit: result.hits[0]!, rendered };
+  }
+
+  it('defaults to the full projection', () => {
+    expect(searchHn.input.parse({ query: 'x' }).view).toBe('full');
+  });
+
+  it('rejects an unknown view value', () => {
+    expect(() => searchHn.input.parse({ query: 'x', view: 'brief' })).toThrow();
+  });
+
+  it('carries body text and body highlight in both surfaces under view "full"', async () => {
+    const { hit, rendered } = await run('full');
+
+    expect(hit.text).toBe(BODY);
+    expect(hit.highlights?.text).toBe(HIGHLIGHTED);
+    expect(rendered).toContain(BODY);
+    expect(rendered).toContain(HIGHLIGHTED);
+  });
+
+  it('omits body text and body highlight from both surfaces under view "compact"', async () => {
+    const { hit, rendered } = await run('compact');
+
+    expect(hit.text).toBeUndefined();
+    expect(hit.highlights?.text).toBeUndefined();
+    /** The body must not survive anywhere in content[] — not as text, not as a highlight fragment. */
+    expect(rendered).not.toContain('worth reading end to end');
+  });
+
+  it('keeps identity, metadata, and matched terms in both surfaces under view "compact"', async () => {
+    const { hit, rendered } = await run('compact');
+
+    expect(hit.text).toBeUndefined();
+    expect(rendered).not.toContain('worth reading end to end');
+
+    expect(hit).toMatchObject({
+      id: 456,
+      author: 'bob',
+      points: 5,
+      createdAt: '2024-01-02T00:00:00Z',
+      storyTitle: 'Test Story',
+      storyId: 123,
+    });
+    expect(hit.highlights?.matchedWords).toEqual(['context', 'protocol', 'story']);
+
+    expect(rendered).toContain('id:456');
+    expect(rendered).toContain('bob');
+    expect(rendered).toContain('5 pts');
+    expect(rendered).toContain('Test Story');
+    expect(rendered).toContain('terms: context, protocol, story');
+  });
+
+  it('keeps the title highlight under view "compact"', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({
+        hits: [
+          {
+            ...storyHit,
+            story_text: BODY,
+            _highlightResult: {
+              title: {
+                value: 'Test <em>Story</em>',
+                matchLevel: 'full' as const,
+                matchedWords: ['story'],
+              },
+              story_text: {
+                value: HIGHLIGHTED,
+                matchLevel: 'full' as const,
+                matchedWords: ['context'],
+              },
+            },
+          },
+        ],
+        nbHits: 1,
+      }),
+    );
+
+    const result = await searchHn.handler(
+      searchHn.input.parse({ query: 'story', view: 'compact' }),
+      createMockContext(),
+    );
+    const rendered = (searchHn.format!(result)[0] as { text: string }).text;
+
+    expect(result.hits[0]!.highlights?.title).toBe('Test <em>Story</em>');
+    expect(result.hits[0]!.highlights?.text).toBeUndefined();
+    expect(result.hits[0]!.text).toBeUndefined();
+    expect(rendered).toContain('title: Test <em>Story</em>');
+    expect(rendered).not.toContain('worth reading end to end');
+  });
+
+  it('drops highlights entirely under view "compact" when only the body matched and no terms were reported', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({
+        hits: [
+          {
+            ...commentHit,
+            _highlightResult: {
+              comment_text: { value: HIGHLIGHTED, matchLevel: 'full' as const, matchedWords: [] },
+            },
+          },
+        ],
+        nbHits: 1,
+      }),
+    );
+
+    const result = await searchHn.handler(
+      searchHn.input.parse({ query: 'x', view: 'compact' }),
+      createMockContext(),
+    );
+
+    expect(result.hits[0]!).not.toHaveProperty('highlights');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Format
 // ---------------------------------------------------------------------------
 

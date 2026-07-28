@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   extractDomain,
   filterLiveItems,
@@ -16,6 +17,42 @@ export const getStories = tool('hn_get_stories', {
   description:
     'Fetch stories from an HN feed (top, new, best, ask, show, jobs), with title, URL, score, author, and comment count for each story.',
   annotations: { readOnlyHint: true },
+  errors: [
+    {
+      reason: 'upstream_rejected',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The HN API answered with a 4xx status other than 429 — it rejected the request as built.',
+      recovery: 'Check the input values against this schema; the same input fails identically.',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'The HN API answered with HTTP 429.',
+      recovery: 'Wait several seconds before retrying, and call this tool less often.',
+      retryable: true,
+    },
+    {
+      reason: 'upstream_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The HN API answered with a 5xx status.',
+      recovery: 'Retry after a short delay; no input change helps while the upstream is down.',
+      retryable: true,
+    },
+    {
+      reason: 'upstream_html',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The HN API served an HTML error page with a 200 status, which it does under rate limiting or maintenance.',
+      recovery: 'Retry after a brief delay; the upstream is throttling or in maintenance.',
+      retryable: true,
+    },
+    {
+      reason: 'upstream_malformed',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The HN API answered with a 200 status and a body that is not JSON.',
+      recovery: 'Retry after a brief delay; no input change helps while the upstream serves this.',
+      retryable: true,
+    },
+  ],
   input: z.object({
     feed: z
       .enum(['top', 'new', 'best', 'ask', 'show', 'jobs'])

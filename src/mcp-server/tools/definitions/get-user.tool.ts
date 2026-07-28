@@ -23,6 +23,40 @@ export const getUser = tool('hn_get_user', {
       when: 'HN reports no user account exists for the given username.',
       recovery: 'Verify the username spelling — HN usernames are case-sensitive.',
     },
+    {
+      reason: 'upstream_rejected',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The HN API answered with a 4xx status other than 429 — it rejected the request as built, which a username outside HN’s charset can cause.',
+      recovery: 'Check the input values against this schema; the same input fails identically.',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'The HN API answered with HTTP 429.',
+      recovery: 'Wait several seconds before retrying, and call this tool less often.',
+      retryable: true,
+    },
+    {
+      reason: 'upstream_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The HN API answered with a 5xx status.',
+      recovery: 'Retry after a short delay; no input change helps while the upstream is down.',
+      retryable: true,
+    },
+    {
+      reason: 'upstream_html',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The HN API served an HTML error page with a 200 status, which it does under rate limiting or maintenance.',
+      recovery: 'Retry after a brief delay; the upstream is throttling or in maintenance.',
+      retryable: true,
+    },
+    {
+      reason: 'upstream_malformed',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The HN API answered with a 200 status and a body that is not JSON.',
+      recovery: 'Retry after a brief delay; no input change helps while the upstream serves this.',
+      retryable: true,
+    },
   ],
   input: z.object({
     username: z
@@ -45,7 +79,15 @@ export const getUser = tool('hn_get_user', {
       .max(50)
       .default(10)
       .describe(
-        'Number of recent submissions to resolve. Only used when includeSubmissions is true.',
+        'Page size — how many submissions to resolve per call. Only used when includeSubmissions is true.',
+      ),
+    submissionOffset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'How many submissions to skip before resolving, counting back from the most recent. Use with submissionCount to page through a long history: request offset 0, then offset submissionCount, and so on. The enrichment block echoes submissionOffset and, when more remain, the offset to send next. Only used when includeSubmissions is true.',
       ),
   }),
   output: z.object({
@@ -75,22 +117,25 @@ export const getUser = tool('hn_get_user', {
       )
       .optional()
       .describe(
-        'Recent submissions, most recent first. Only present when includeSubmissions is true.',
+        'One page of submissions, most recent first, starting at submissionOffset. Absent when includeSubmissions is false or the user has never submitted. Empty when the page holds no live items — either the offset is past the end, or every item in the window was deleted or flagged.',
       ),
   }),
 
   enrichment: {
-    truncated: z
-      .boolean()
+    submissionOffset: z
+      .number()
       .optional()
-      .describe('True when submissions were capped by submissionCount.'),
+      .describe(
+        'The offset this page started at. Absent when includeSubmissions is false or the user has never submitted.',
+      ),
+    truncated: z.boolean().optional().describe('True when submissions remain beyond this page.'),
     shown: z.number().optional().describe('Number of submissions returned.'),
     cap: z.number().optional().describe('The submissionCount cap that was applied.'),
     notice: z
       .string()
       .optional()
       .describe(
-        'Pagination caveat when submissions were truncated. Absent when all submissions fit within the requested count or includeSubmissions is false.',
+        'Pagination context — which window of the history this page covers and the submissionOffset to send next, or a warning that the offset is past the end. Absent when the page reaches the end of the history, or when no submissions were resolved.',
       ),
   },
 
@@ -112,34 +157,45 @@ export const getUser = tool('hn_get_user', {
       totalSubmissions: user.submitted?.length ?? 0,
     };
 
+    const offset = input.submissionOffset;
+    const pageEnd = offset + input.submissionCount;
+
     const submissions =
       input.includeSubmissions && user.submitted?.length
-        ? filterLiveItems(
-            await hn.fetchItems(user.submitted.slice(0, input.submissionCount), ctx),
-          ).map((item) => ({
-            id: item.id,
-            type: item.type,
-            title: item.title ? stripHtml(item.title) : undefined,
-            url: normalizeUrl(item.url),
-            text: item.text ? stripHtml(item.text) : undefined,
-            score: item.score,
-            time: item.time,
-            descendants: item.descendants,
-          }))
+        ? filterLiveItems(await hn.fetchItems(user.submitted.slice(offset, pageEnd), ctx)).map(
+            (item) => ({
+              id: item.id,
+              type: item.type,
+              title: item.title ? stripHtml(item.title) : undefined,
+              url: normalizeUrl(item.url),
+              text: item.text ? stripHtml(item.text) : undefined,
+              score: item.score,
+              time: item.time,
+              descendants: item.descendants,
+            }),
+          )
         : undefined;
 
-    ctx.log.info('Fetched user', { username: input.username, submissions: submissions?.length });
+    ctx.log.info('Fetched user', {
+      username: input.username,
+      offset,
+      submissions: submissions?.length,
+    });
 
-    if (
-      input.includeSubmissions &&
-      submissions &&
-      user.submitted &&
-      user.submitted.length > input.submissionCount
-    ) {
-      ctx.enrich.truncated({ shown: submissions.length, cap: input.submissionCount });
-      ctx.enrich.notice(
-        `Showing ${submissions.length} of ${profile.totalSubmissions.toLocaleString()} submissions. Raise submissionCount (max 50) for more.`,
-      );
+    if (submissions) {
+      const total = profile.totalSubmissions;
+      ctx.enrich({ submissionOffset: offset });
+
+      if (offset >= total) {
+        ctx.enrich.notice(
+          `submissionOffset ${offset} is past the end of ${total.toLocaleString()} submissions. Valid offsets are 0 to ${total - 1}.`,
+        );
+      } else if (pageEnd < total) {
+        ctx.enrich.truncated({ shown: submissions.length, cap: input.submissionCount });
+        ctx.enrich.notice(
+          `Showing ${submissions.length} live item${submissions.length === 1 ? '' : 's'} from positions ${(offset + 1).toLocaleString()}–${pageEnd.toLocaleString()} of ${total.toLocaleString()} submissions. Set submissionOffset to ${pageEnd} for the next page.`,
+        );
+      }
     }
 
     return { user: profile, submissions };
@@ -159,7 +215,7 @@ export const getUser = tool('hn_get_user', {
     if (user.about) lines.push(`\n${user.about}`);
 
     if (result.submissions?.length) {
-      lines.push('\n### Recent submissions');
+      lines.push('\n### Submissions');
       for (const s of result.submissions) {
         const title = s.title || `[${s.type}]`;
         const date = s.time

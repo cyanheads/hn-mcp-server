@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   extractDomain,
   getHnService,
@@ -18,8 +19,11 @@ import type { AlgoliaHighlightValue, AlgoliaHit } from '@/services/hn/types.js';
  * snippet, the body snippet (preferring comment_text over story_text to match
  * the `text` mapping), and the deduplicated union of matched words across all
  * surfaced fields. Returns undefined when nothing matched.
+ *
+ * `includeBody` is false under the compact projection, which drops the body
+ * snippet — the field that duplicates a hit's full comment text.
  */
-function extractHighlights(hit: AlgoliaHit) {
+function extractHighlights(hit: AlgoliaHit, includeBody: boolean) {
   const h = hit._highlightResult;
   if (!h) return;
 
@@ -32,15 +36,16 @@ function extractHighlights(hit: AlgoliaHit) {
     : matched(h.story_text)
       ? h.story_text
       : undefined;
+  const text = includeBody && textHl ? stripHtmlPreservingEm(textHl.value) : undefined;
 
   const fields = [h.title, h.url, h.author, h.comment_text, h.story_text, h.story_title];
   const matchedWords = Array.from(new Set(fields.flatMap((f) => f?.matchedWords ?? [])));
 
-  if (title == null && textHl == null && matchedWords.length === 0) return;
+  if (title == null && text == null && matchedWords.length === 0) return;
 
   return {
     ...(title != null && { title: stripHtmlPreservingEm(title) }),
-    ...(textHl && { text: stripHtmlPreservingEm(textHl.value) }),
+    ...(text != null && { text }),
     matchedWords,
   };
 }
@@ -49,6 +54,42 @@ export const searchHn = tool('hn_search_content', {
   description:
     'Search Hacker News stories and comments via Algolia. Filterable by content type, author, date range, and minimum points.',
   annotations: { readOnlyHint: true },
+  errors: [
+    {
+      reason: 'upstream_rejected',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Algolia answered with a 4xx status other than 429 — it rejected the request as built.',
+      recovery: 'Check the input values against this schema; the same input fails identically.',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'Algolia answered with HTTP 429.',
+      recovery: 'Wait several seconds before retrying, and call this tool less often.',
+      retryable: true,
+    },
+    {
+      reason: 'upstream_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Algolia answered with a 5xx status.',
+      recovery: 'Retry after a short delay; no input change helps while the upstream is down.',
+      retryable: true,
+    },
+    {
+      reason: 'upstream_html',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Algolia served an HTML error page with a 200 status, which it does under rate limiting or maintenance.',
+      recovery: 'Retry after a brief delay; the upstream is throttling or in maintenance.',
+      retryable: true,
+    },
+    {
+      reason: 'upstream_malformed',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Algolia answered with a 200 status and a body that is not JSON.',
+      recovery: 'Retry after a brief delay; no input change helps while the upstream serves this.',
+      retryable: true,
+    },
+  ],
   input: z.object({
     query: z
       .string()
@@ -96,6 +137,12 @@ export const searchHn = tool('hn_search_content', {
       .describe('Minimum score/points. Filters out low-engagement content.'),
     count: z.number().int().min(1).max(50).default(30).describe('Number of results to return.'),
     page: z.number().int().min(0).default(0).describe('Page number for pagination (0-indexed).'),
+    view: z
+      .enum(['full', 'compact'])
+      .default('full')
+      .describe(
+        'How much of each hit to return. "full" includes every field. "compact" omits the two body-text fields — `text` and `highlights.text` — which together can repeat a long comment twice per hit; everything else (id, title, url, domain, author, points, comment count, timestamp, parent story, title highlight, matchedWords) is unchanged. Use "compact" to scan many results, then pass a hit id to hn_get_thread to read the body you skipped.',
+      ),
   }),
   output: z.object({
     hits: z
@@ -123,7 +170,12 @@ export const searchHn = tool('hn_search_content', {
               .number()
               .optional()
               .describe('Parent story ID for comment hits; equals `id` for story hits.'),
-            text: z.string().optional().describe('Comment or story body text (HTML stripped).'),
+            text: z
+              .string()
+              .optional()
+              .describe(
+                'Comment or story body text (HTML stripped). Absent when the hit has no body, and always absent under view "compact" — call hn_get_thread with this id to read it.',
+              ),
             highlights: z
               .object({
                 title: z
@@ -136,7 +188,7 @@ export const searchHn = tool('hn_search_content', {
                   .string()
                   .optional()
                   .describe(
-                    'Body snippet (comment_text or story_text) with matched terms wrapped in `<em>…</em>`. Absent when the body did not match.',
+                    'Body snippet (comment_text or story_text) with matched terms wrapped in `<em>…</em>`. Absent when the body did not match, and always absent under view "compact" — matchedWords still lists what matched.',
                   ),
                 matchedWords: z
                   .array(z.string())
@@ -181,11 +233,13 @@ export const searchHn = tool('hn_search_content', {
     const hn = getHnService();
     const result = await hn.search(input, ctx);
 
+    const includeBody = input.view === 'full';
+
     const hits = result.hits.map((hit) => {
-      const rawText = hit.comment_text ?? hit.story_text;
+      const rawText = includeBody ? (hit.comment_text ?? hit.story_text) : undefined;
       const url = normalizeUrl(hit.url);
       const domain = extractDomain(url);
-      const highlights = extractHighlights(hit);
+      const highlights = extractHighlights(hit, includeBody);
       return {
         id: Number(hit.objectID),
         title: hit.title ?? undefined,

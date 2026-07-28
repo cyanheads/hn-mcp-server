@@ -177,8 +177,8 @@ describe('hn_get_user handler', () => {
     await getUser.handler(parse({ includeSubmissions: true, submissionCount: 10 }), ctx);
 
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.notice).toMatch(/Showing 2 of 100 submissions/);
-    expect(enrichment.notice).toMatch(/Raise submissionCount \(max 50\)/);
+    expect(enrichment.notice).toMatch(/positions 1–10 of 100 submissions/);
+    expect(enrichment.notice).toMatch(/Set submissionOffset to 10 for the next page/);
   });
 
   it('does not emit notice when resolved submission count equals total', async () => {
@@ -205,6 +205,153 @@ describe('hn_get_user handler', () => {
     // submissions.length (1) < totalSubmissions (3) but we already fetched all IDs — not a pagination gap
     const enrichment = getEnrichment(ctx);
     expect(enrichment.notice).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Submission pagination (submissionOffset)
+// ---------------------------------------------------------------------------
+
+describe('hn_get_user submission pagination', () => {
+  /** 25 submissions with IDs 201..225 — offset windows never overlap the first page. */
+  const prolificUser: HnUser = {
+    ...baseUser,
+    submitted: Array.from({ length: 25 }, (_, i) => 201 + i),
+  };
+
+  function itemsFor(ids: number[]): HnItem[] {
+    return ids.map((id) => ({ id, type: 'story', by: 'testuser', title: `Post ${id}` }));
+  }
+
+  it('resolves the first page from the start of the submitted list', async () => {
+    const ctx = createMockContext({ errors: getUser.errors });
+    mockFetchUser.mockResolvedValue(prolificUser);
+    mockFetchItems.mockResolvedValue(itemsFor([201, 202, 203]));
+
+    const result = await getUser.handler(
+      parse({ includeSubmissions: true, submissionCount: 3 }),
+      ctx,
+    );
+
+    expect(mockFetchItems).toHaveBeenCalledWith([201, 202, 203], expect.anything());
+    expect(result.submissions?.map((s) => s.id)).toEqual([201, 202, 203]);
+    expect(getEnrichment(ctx).submissionOffset).toBe(0);
+  });
+
+  it('resolves a later page from the offset window, not the head of the list', async () => {
+    const ctx = createMockContext({ errors: getUser.errors });
+    mockFetchUser.mockResolvedValue(prolificUser);
+    mockFetchItems.mockResolvedValue(itemsFor([211, 212, 213]));
+
+    const result = await getUser.handler(
+      parse({ includeSubmissions: true, submissionCount: 3, submissionOffset: 10 }),
+      ctx,
+    );
+
+    expect(mockFetchItems).toHaveBeenCalledWith([211, 212, 213], expect.anything());
+    expect(result.submissions?.map((s) => s.id)).toEqual([211, 212, 213]);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.submissionOffset).toBe(10);
+    expect(enrichment.notice).toMatch(/positions 11–13 of 25 submissions/);
+    expect(enrichment.notice).toMatch(/Set submissionOffset to 13 for the next page/);
+  });
+
+  it('returns an empty page and a range warning when the offset is past the end', async () => {
+    const ctx = createMockContext({ errors: getUser.errors });
+    mockFetchUser.mockResolvedValue(prolificUser);
+    mockFetchItems.mockResolvedValue([]);
+
+    const result = await getUser.handler(
+      parse({ includeSubmissions: true, submissionCount: 3, submissionOffset: 100 }),
+      ctx,
+    );
+
+    expect(mockFetchItems).toHaveBeenCalledWith([], expect.anything());
+    expect(result.submissions).toEqual([]);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.submissionOffset).toBe(100);
+    expect(enrichment.notice).toMatch(/submissionOffset 100 is past the end of 25 submissions/);
+    expect(enrichment.notice).toMatch(/Valid offsets are 0 to 24/);
+    expect(enrichment.truncated).toBeUndefined();
+  });
+
+  it('emits no next-page notice when the window reaches the end of the history', async () => {
+    const ctx = createMockContext({ errors: getUser.errors });
+    mockFetchUser.mockResolvedValue(prolificUser);
+    mockFetchItems.mockResolvedValue(itemsFor([221, 222, 223, 224, 225]));
+
+    await getUser.handler(
+      parse({ includeSubmissions: true, submissionCount: 5, submissionOffset: 20 }),
+      ctx,
+    );
+
+    expect(mockFetchItems).toHaveBeenCalledWith([221, 222, 223, 224, 225], expect.anything());
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.submissionOffset).toBe(20);
+    expect(enrichment.notice).toBeUndefined();
+    expect(enrichment.truncated).toBeUndefined();
+  });
+
+  it('reports the live count when the offset window contains dead items', async () => {
+    const ctx = createMockContext({ errors: getUser.errors });
+    mockFetchUser.mockResolvedValue(prolificUser);
+    mockFetchItems.mockResolvedValue([
+      { id: 206, type: 'story', title: 'Live' },
+      { id: 207, type: 'story', dead: true },
+      { id: 208, type: 'story', deleted: true },
+    ]);
+
+    const result = await getUser.handler(
+      parse({ includeSubmissions: true, submissionCount: 3, submissionOffset: 5 }),
+      ctx,
+    );
+
+    expect(mockFetchItems).toHaveBeenCalledWith([206, 207, 208], expect.anything());
+    expect(result.submissions?.map((s) => s.id)).toEqual([206]);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toMatch(/Showing 1 live item from positions 6–8 of 25 submissions/);
+    /** The next offset advances by the window, not the live count — otherwise dead items are re-fetched forever. */
+    expect(enrichment.notice).toMatch(/Set submissionOffset to 8 for the next page/);
+    expect(enrichment.shown).toBe(1);
+    expect(enrichment.cap).toBe(3);
+  });
+
+  it('omits submissions and pagination enrichment for a user who has never submitted', async () => {
+    const ctx = createMockContext({ errors: getUser.errors });
+    mockFetchUser.mockResolvedValue({ ...baseUser, submitted: [] });
+
+    const result = await getUser.handler(parse({ includeSubmissions: true }), ctx);
+
+    expect(mockFetchItems).not.toHaveBeenCalled();
+    expect(result.submissions).toBeUndefined();
+    expect(result.user.totalSubmissions).toBe(0);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.submissionOffset).toBeUndefined();
+    expect(enrichment.notice).toBeUndefined();
+  });
+
+  it('echoes submissionOffset only when submissions were resolved', async () => {
+    const skipped = createMockContext({ errors: getUser.errors });
+    mockFetchUser.mockResolvedValue(prolificUser);
+
+    await getUser.handler(parse({ submissionOffset: 10 }), skipped);
+
+    expect(mockFetchItems).not.toHaveBeenCalled();
+    expect(getEnrichment(skipped).submissionOffset).toBeUndefined();
+
+    const resolved = createMockContext({ errors: getUser.errors });
+    mockFetchItems.mockResolvedValue(itemsFor([211]));
+
+    await getUser.handler(
+      parse({ includeSubmissions: true, submissionCount: 1, submissionOffset: 10 }),
+      resolved,
+    );
+
+    expect(getEnrichment(resolved).submissionOffset).toBe(10);
   });
 });
 
@@ -254,7 +401,7 @@ describe('hn_get_user format', () => {
     });
     const text = (blocks[0] as { text: string }).text;
 
-    expect(text).toContain('### Recent submissions');
+    expect(text).toContain('### Submissions');
     expect(text).toContain('**First Post** — id:1 | story | 42 pts | 10 comments');
     expect(text).toMatch(/\*\*\[comment\]\*\* — id:2(?!\s*\|\s*comment)/);
   });
@@ -313,6 +460,21 @@ describe('hn_get_user input validation', () => {
   it('defaults submissionCount to 10', () => {
     const input = getUser.input.parse({ username: 'test' });
     expect(input.submissionCount).toBe(10);
+  });
+
+  it('defaults submissionOffset to 0', () => {
+    expect(getUser.input.parse({ username: 'test' }).submissionOffset).toBe(0);
+  });
+
+  it('rejects a negative or fractional submissionOffset', () => {
+    expect(() => getUser.input.parse({ username: 'test', submissionOffset: -1 })).toThrow();
+    expect(() => getUser.input.parse({ username: 'test', submissionOffset: 2.5 })).toThrow();
+  });
+
+  it('accepts a submissionOffset beyond the 50-item page cap', () => {
+    expect(
+      getUser.input.parse({ username: 'test', submissionOffset: 15000 }).submissionOffset,
+    ).toBe(15000);
   });
 
   it('constrains submissionCount to 1-50', () => {

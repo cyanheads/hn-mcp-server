@@ -3,6 +3,7 @@
  * @module services/hn/hn-service.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -619,6 +620,185 @@ describe('HnService — HTML error body detection (pure logic)', () => {
 
   it('is case-insensitive for DOCTYPE and html tag', () => {
     expect(isHtmlErrorBody('<!doctype HTML><HTML></HTML>')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HnService — upstream HTTP failure classification
+// ---------------------------------------------------------------------------
+
+describe('HnService — upstream HTTP failures', () => {
+  /** Body Firebase returns for a path it refuses to route. */
+  const FIREBASE_400_BODY = '{\n  "error" : "Invalid path: Invalid token in path"\n}\n';
+
+  function stubStatus(status: number, body: string, statusText = 'Error') {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body, { status, statusText })),
+    );
+  }
+
+  /** Reject only once the request is aborted, so the fetch timeout is what resolves the call. */
+  function stubHang() {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url: string | URL, init?: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+          }),
+      ),
+    );
+  }
+
+  async function failure(promise: Promise<unknown>): Promise<McpError> {
+    const err = await promise.then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(McpError);
+    return err as McpError;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('classifies a 4xx as upstream_rejected with a recovery hint', async () => {
+    stubStatus(400, FIREBASE_400_BODY, 'Bad Request');
+
+    const err = await failure(new HnService(1).fetchUser('../item/8863', createMockContext()));
+
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.data).toMatchObject({
+      upstream: 'HN API',
+      status: 400,
+      reason: 'upstream_rejected',
+    });
+    expect(err.data?.recovery).toMatchObject({
+      hint: expect.stringContaining('Check the tool input values against the schema'),
+    });
+  });
+
+  it('keeps the upstream URL and response body out of the client-facing error', async () => {
+    stubStatus(400, FIREBASE_400_BODY, 'Bad Request');
+
+    const err = await failure(new HnService(1).fetchUser('../item/8863', createMockContext()));
+
+    expect(err.message).toBe('HN API returned HTTP 400.');
+    expect(err.message).not.toContain('hacker-news.firebaseio.com');
+    expect(err.message).not.toContain('..%2Fitem%2F8863');
+    const wire = JSON.stringify({ message: err.message, data: err.data });
+    expect(wire).not.toContain('Invalid token in path');
+    expect(wire).not.toContain('firebaseio.com');
+    /** The raw error stays reachable server-side for logs. */
+    expect((err.cause as McpError).message).toContain('hacker-news.firebaseio.com');
+  });
+
+  it('classifies an Algolia 403 as upstream_rejected under the Algolia label', async () => {
+    stubStatus(403, 'forbidden', 'Forbidden');
+
+    const err = await failure(
+      new HnService(1).search(
+        { query: 'rust', sort: 'relevance', count: 10, page: 0 },
+        createMockContext(),
+      ),
+    );
+
+    /** The code follows the reason, not the framework's status ladder — which maps 403 to Forbidden. */
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.message).toBe('Algolia returned HTTP 403.');
+    expect(err.data).toMatchObject({
+      upstream: 'Algolia',
+      status: 403,
+      reason: 'upstream_rejected',
+    });
+  });
+
+  it('classifies a 500 as upstream_unavailable rather than an internal error', async () => {
+    stubStatus(500, 'boom', 'Internal Server Error');
+
+    const err = await failure(new HnService(1).fetchItem(8863, createMockContext()));
+
+    /** InternalError means this server faulted; an upstream 500 did not. */
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toMatchObject({ reason: 'upstream_unavailable', status: 500 });
+  });
+
+  it('classifies a 429 as upstream_rate_limited after retries are exhausted', async () => {
+    vi.useFakeTimers();
+    stubStatus(429, 'slow down', 'Too Many Requests');
+
+    const pending = failure(new HnService(1).fetchFeed('top', createMockContext()));
+    await vi.advanceTimersByTimeAsync(120_000);
+    const err = await pending;
+
+    expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(err.message).toBe('HN API returned HTTP 429.');
+    expect(err.data).toMatchObject({ reason: 'upstream_rate_limited', status: 429 });
+    expect(err.data?.recovery).toMatchObject({
+      hint: expect.stringContaining('Wait several seconds'),
+    });
+  });
+
+  it('classifies a 5xx as upstream_unavailable', async () => {
+    vi.useFakeTimers();
+    stubStatus(503, 'maintenance', 'Service Unavailable');
+
+    const pending = failure(new HnService(1).fetchItem(8863, createMockContext()));
+    await vi.advanceTimersByTimeAsync(120_000);
+    const err = await pending;
+
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.message).toBe('HN API returned HTTP 503.');
+    expect(err.data).toMatchObject({ reason: 'upstream_unavailable', status: 503 });
+    /** Classification runs after retries, so the default budget is untouched: initial call plus three retries. */
+    expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(4);
+  });
+
+  it('leaves a request timeout classified as a timeout, not an upstream HTTP failure', async () => {
+    vi.useFakeTimers();
+    stubHang();
+
+    const pending = failure(new HnService(1).fetchFeed('top', createMockContext()));
+    await vi.advanceTimersByTimeAsync(300_000);
+    const err = await pending;
+
+    expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(err.data?.reason).toBeUndefined();
+    expect(err.data?.errorSource).toBe('FetchTimeout');
+  });
+
+  it('leaves an HTML error body on its own upstream_html reason', async () => {
+    vi.useFakeTimers();
+    stubStatus(200, '<!DOCTYPE html><html><body>rate limited</body></html>', 'OK');
+
+    const pending = failure(new HnService(1).fetchUser('pg', createMockContext()));
+    await vi.advanceTimersByTimeAsync(120_000);
+    const err = await pending;
+
+    expect(err.data).toMatchObject({ reason: 'upstream_html', upstream: 'HN API' });
+    expect(err.data?.status).toBeUndefined();
+  });
+
+  it('classifies a non-JSON 200 body without quoting it back to the client', async () => {
+    vi.useFakeTimers();
+    stubStatus(200, 'proxy-token=abc123 not-json', 'OK');
+
+    const pending = failure(new HnService(1).fetchFeed('top', createMockContext()));
+    await vi.advanceTimersByTimeAsync(120_000);
+    const err = await pending;
+
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toMatchObject({ reason: 'upstream_malformed', upstream: 'HN API' });
+    expect(err.data?.recovery).toMatchObject({
+      hint: expect.stringContaining('not its API response'),
+    });
+    /** A raw SyntaxError message names the token it choked on — that is upstream body content. */
+    const wire = JSON.stringify({ message: err.message, data: err.data });
+    expect(wire).not.toContain('proxy-token');
+    expect(wire).not.toContain('abc123');
   });
 });
 
