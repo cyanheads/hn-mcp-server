@@ -55,6 +55,12 @@ describe('getServerConfig', () => {
     expect(() => getServerConfig()).toThrow();
   });
 
+  it('rejects a fractional concurrencyLimit', async () => {
+    process.env.HN_CONCURRENCY_LIMIT = '5.5';
+    const getServerConfig = await loadConfig();
+    expect(() => getServerConfig()).toThrow();
+  });
+
   it('rejects non-numeric strings', async () => {
     process.env.HN_CONCURRENCY_LIMIT = 'not-a-number';
     const getServerConfig = await loadConfig();

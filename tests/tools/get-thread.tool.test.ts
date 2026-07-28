@@ -121,6 +121,56 @@ describe('hn_get_thread handler', () => {
     expect(getEnrichment(ctx).totalLoaded).toBe(0);
   });
 
+  it('omits the totalAvailable key entirely when the root reports no descendants', async () => {
+    /**
+     * Comment roots carry no `descendants`. Keying `totalAvailable: undefined`
+     * survives the optional enrichment schema and renders as a literal
+     * "undefined" in the framework's content[] trailer, so the key must never
+     * be written at all. `toBeUndefined()` cannot catch this — it passes
+     * whether the key is absent or present-and-undefined.
+     */
+    const commentRoot: HnItem = {
+      id: 10,
+      type: 'comment',
+      by: 'bob',
+      text: 'root comment',
+      kids: [20, 21],
+    };
+    const reply1: HnItem = { id: 20, type: 'comment', by: 'carol', text: 'r1', parent: 10 };
+    const reply2: HnItem = { id: 21, type: 'comment', by: 'dave', text: 'r2', parent: 10 };
+    hn.fetchItem.mockResolvedValue(commentRoot);
+    hn.fetchItems.mockResolvedValueOnce([reply1, reply2]);
+
+    await getThread.handler(parse({ itemId: 10, depth: 1, maxComments: 2 }), ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(Object.hasOwn(enrichment, 'totalAvailable')).toBe(false);
+    /** Truncation fields are unaffected — they must still render. */
+    expect(enrichment).toMatchObject({ totalLoaded: 2, truncated: true, shown: 2, cap: 2 });
+  });
+
+  it('omits the totalAvailable key on the depth-0 path when the root reports no descendants', async () => {
+    const commentRoot: HnItem = { id: 10, type: 'comment', by: 'bob', text: 'root', kids: [20] };
+    hn.fetchItem.mockResolvedValue(commentRoot);
+
+    await getThread.handler(parse({ itemId: 10, depth: 0 }), ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(Object.hasOwn(enrichment, 'totalAvailable')).toBe(false);
+    expect(enrichment.totalLoaded).toBe(0);
+  });
+
+  it('keys totalAvailable when the root does report descendants', async () => {
+    hn.fetchItem.mockResolvedValue(mockStory);
+    hn.fetchItems.mockResolvedValueOnce([mockComment1, mockComment2]);
+
+    await getThread.handler(parse({ depth: 1 }), ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(Object.hasOwn(enrichment, 'totalAvailable')).toBe(true);
+    expect(enrichment.totalAvailable).toBe(3);
+  });
+
   it('resolves direct replies only at depth 1', async () => {
     hn.fetchItem.mockResolvedValue(mockStory);
     hn.fetchItems.mockResolvedValueOnce([mockComment1, mockComment2]);
@@ -415,6 +465,14 @@ describe('hn_get_thread input validation', () => {
 
     expect(() => getThread.input.parse({ itemId: 1, maxComments: 0 })).toThrow();
     expect(() => getThread.input.parse({ itemId: 1, maxComments: 201 })).toThrow();
+  });
+
+  it.each([
+    ['itemId', { itemId: 48683098.5 }],
+    ['depth', { itemId: 1, depth: 1.5 }],
+    ['maxComments', { itemId: 1, maxComments: 2.5 }],
+  ])('rejects fractional %s', (_field, input) => {
+    expect(() => getThread.input.parse(input)).toThrow();
   });
 });
 

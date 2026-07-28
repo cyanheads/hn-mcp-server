@@ -4,7 +4,7 @@
  */
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   decodeHtmlEntities,
@@ -347,6 +347,71 @@ describe('HnService.fetchItems', () => {
 
     expect(result.map((r) => r?.id)).toEqual([10, 20, 30]);
     fetchItemSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HnService.fetchUser — path-segment encoding
+// ---------------------------------------------------------------------------
+
+describe('HnService.fetchUser URL construction', () => {
+  /** Captures the URL handed to global fetch and short-circuits with a "no such user" body. */
+  function stubFetch(): () => string {
+    const seen: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL) => {
+        seen.push(url.toString());
+        return new Response('null', { status: 200 });
+      }),
+    );
+    return () => seen[0]!;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps a dot-segment username inside the /user/ route instead of escaping to /item/', async () => {
+    /**
+     * `../item/8863` unencoded resolves to the Firebase item endpoint, which
+     * returns a story payload that then fails the user output schema. Encoded,
+     * it stays one opaque segment under /user/ and resolves to "not found".
+     */
+    const firstUrl = stubFetch();
+    const result = await new HnService(1).fetchUser('../item/8863', createMockContext());
+
+    const { pathname } = new URL(firstUrl());
+    expect(pathname).toBe('/v0/user/..%2Fitem%2F8863.json');
+    expect(pathname.startsWith('/v0/user/')).toBe(true);
+    expect(pathname).not.toContain('/item/');
+    /** One segment for the username — no traversal into a sibling route. */
+    expect(pathname.split('/')).toHaveLength(4);
+    expect(result).toBeNull();
+  });
+
+  it('encodes query and fragment characters rather than truncating the segment', async () => {
+    const firstUrl = stubFetch();
+    await new HnService(1).fetchUser('a?b#c', createMockContext());
+
+    const parsed = new URL(firstUrl());
+    expect(parsed.pathname).toBe('/v0/user/a%3Fb%23c.json');
+    expect(parsed.search).toBe('');
+    expect(parsed.hash).toBe('');
+  });
+
+  it('leaves an ordinary username unescaped', async () => {
+    const firstUrl = stubFetch();
+    await new HnService(1).fetchUser('pg', createMockContext());
+
+    expect(new URL(firstUrl()).pathname).toBe('/v0/user/pg.json');
+  });
+
+  it('preserves username case in the requested path', async () => {
+    const firstUrl = stubFetch();
+    await new HnService(1).fetchUser('PaulGraham', createMockContext());
+
+    expect(new URL(firstUrl()).pathname).toBe('/v0/user/PaulGraham.json');
   });
 });
 

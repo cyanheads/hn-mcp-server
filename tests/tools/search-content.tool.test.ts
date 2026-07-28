@@ -91,11 +91,16 @@ describe('hn_search_content handler', () => {
   const ctx = createMockContext();
 
   it('maps Algolia response correctly', async () => {
+    /**
+     * nbPages is deliberately far below `Math.ceil(nbHits / count)` (34 vs 3334):
+     * Algolia caps the reachable result window well under nbHits for broad
+     * queries, so the two numbers must not be interchangeable in this fixture.
+     */
     mockSearch.mockResolvedValue(
       algoliaResponse({
         hits: [storyHit, commentHit],
-        nbHits: 100,
-        nbPages: 4,
+        nbHits: 100_000,
+        nbPages: 34,
         page: 0,
       }),
     );
@@ -136,9 +141,9 @@ describe('hn_search_content handler', () => {
     });
 
     const enrichment = getEnrichment(freshCtx);
-    expect(enrichment.totalHits).toBe(100);
+    expect(enrichment.totalHits).toBe(100_000);
     expect(enrichment.page).toBe(0);
-    expect(enrichment.totalPages).toBe(4);
+    expect(enrichment.totalPages).toBe(34);
   });
 
   it('maps story hit fields', async () => {
@@ -664,6 +669,30 @@ describe('hn_search_content input validation', () => {
     const parsed = searchHn.input.parse({ query: 'test', minPoints: 0 });
     expect(parsed.minPoints).toBe(0);
   });
+
+  it.each(['', '   ', '\t\n'])('rejects blank query (%j)', (query) => {
+    expect(() => searchHn.input.parse({ query })).toThrow();
+  });
+
+  it('trims surrounding whitespace from query', () => {
+    expect(searchHn.input.parse({ query: '  rust lang  ' }).query).toBe('rust lang');
+  });
+
+  it.each(['', '   '])('rejects blank author (%j)', (author) => {
+    expect(() => searchHn.input.parse({ query: 'rust', author })).toThrow();
+  });
+
+  it('trims surrounding whitespace from author', () => {
+    expect(searchHn.input.parse({ query: 'rust', author: '  dang  ' }).author).toBe('dang');
+  });
+
+  it.each([
+    ['count', { count: 2.5 }],
+    ['page', { page: 1.5 }],
+    ['minPoints', { minPoints: 10.5 }],
+  ])('rejects fractional %s', (_field, overrides) => {
+    expect(() => searchHn.input.parse({ query: 'rust', ...overrides })).toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -757,17 +786,21 @@ describe('hn_search_content — security and edge cases', () => {
     expect(text).not.toContain('story:"');
   });
 
-  it('totalPages calculation uses input count not hitsPerPage from Algolia', async () => {
-    // nbHits=100, input count=10 → totalPages should be 10
+  it('totalPages reports Algolia nbPages, not a recomputation from nbHits', async () => {
+    /**
+     * Every candidate formula over the other fields is distinct here:
+     * ceil(nbHits / count) = 10, ceil(nbHits / hitsPerPage) = 5 — but Algolia
+     * says 3, and that is the only page count it will serve.
+     */
     mockSearch.mockResolvedValue(
-      algoliaResponse({ hits: [], nbHits: 100, nbPages: 5, hitsPerPage: 20, page: 0 }),
+      algoliaResponse({ hits: [], nbHits: 100, nbPages: 3, hitsPerPage: 20, page: 0 }),
     );
 
     const freshCtx = createMockContext();
     await searchHn.handler(searchHn.input.parse({ query: 'x', count: 10 }), freshCtx);
 
     const enrichment = getEnrichment(freshCtx);
-    expect(enrichment.totalPages).toBe(10);
+    expect(enrichment.totalPages).toBe(3);
   });
 
   it('handles unicode query string without mangling', async () => {

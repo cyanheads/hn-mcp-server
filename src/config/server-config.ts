@@ -8,6 +8,7 @@ import { z } from '@cyanheads/mcp-ts-core';
 const ServerConfigSchema = z.object({
   concurrencyLimit: z.coerce
     .number()
+    .int()
     .min(1)
     .max(50)
     .default(10)

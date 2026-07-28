@@ -25,7 +25,13 @@ export const getUser = tool('hn_get_user', {
     },
   ],
   input: z.object({
-    username: z.string().min(1).describe('HN username. Case-sensitive.'),
+    username: z
+      .string()
+      .trim()
+      .min(1)
+      .describe(
+        'HN username. Case-sensitive. Trimmed; blank or whitespace-only input is rejected.',
+      ),
     includeSubmissions: z
       .boolean()
       .default(false)
@@ -34,6 +40,7 @@ export const getUser = tool('hn_get_user', {
       ),
     submissionCount: z
       .number()
+      .int()
       .min(1)
       .max(50)
       .default(10)

@@ -20,9 +20,10 @@ export const getThread = tool('hn_get_thread', {
     },
   ],
   input: z.object({
-    itemId: z.number().describe('ID of the story, comment, or poll to fetch the thread for.'),
+    itemId: z.number().int().describe('ID of the story, comment, or poll to fetch the thread for.'),
     depth: z
       .number()
+      .int()
       .min(0)
       .max(10)
       .default(3)
@@ -31,6 +32,7 @@ export const getThread = tool('hn_get_thread', {
       ),
     maxComments: z
       .number()
+      .int()
       .min(1)
       .max(200)
       .default(50)
@@ -123,8 +125,17 @@ export const getThread = tool('hn_get_thread', {
       descendants: root.descendants,
     };
 
+    /**
+     * `totalAvailable` is only keyed when HN actually reports `descendants` —
+     * comment and job roots omit it. Passing the key with an `undefined` value
+     * survives the optional schema and renders as a literal "undefined" in the
+     * framework's content[] trailer, diverging from structuredContent.
+     */
     if (input.depth === 0 || !root.kids?.length) {
-      ctx.enrich({ totalLoaded: 0, totalAvailable: root.descendants });
+      ctx.enrich({
+        totalLoaded: 0,
+        ...(root.descendants != null && { totalAvailable: root.descendants }),
+      });
       return {
         item,
         comments: [],
@@ -203,7 +214,7 @@ export const getThread = tool('hn_get_thread', {
 
     const totalLoaded = comments.length;
     const totalAvailable = root.descendants;
-    ctx.enrich({ totalLoaded, totalAvailable });
+    ctx.enrich({ totalLoaded, ...(totalAvailable != null && { totalAvailable }) });
 
     if (totalLoaded >= input.maxComments) {
       ctx.enrich.truncated({ shown: totalLoaded, cap: input.maxComments });

@@ -289,6 +289,22 @@ describe('hn_get_user input validation', () => {
     expect(() => getUser.input.parse({ username: '' })).toThrow();
   });
 
+  it.each(['   ', '\t', '\n '])('rejects whitespace-only username (%j)', (username) => {
+    expect(() => getUser.input.parse({ username })).toThrow();
+  });
+
+  it('trims surrounding whitespace from username', () => {
+    expect(getUser.input.parse({ username: '  dang  ' }).username).toBe('dang');
+  });
+
+  it('preserves username case after trimming', () => {
+    expect(getUser.input.parse({ username: ' PaulGraham ' }).username).toBe('PaulGraham');
+  });
+
+  it('rejects fractional submissionCount', () => {
+    expect(() => getUser.input.parse({ username: 'test', submissionCount: 2.5 })).toThrow();
+  });
+
   it('defaults includeSubmissions to false', () => {
     const input = getUser.input.parse({ username: 'test' });
     expect(input.includeSubmissions).toBe(false);

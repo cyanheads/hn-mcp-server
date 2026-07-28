@@ -166,13 +166,18 @@ export class HnService {
     );
   }
 
-  /** Fetch a user profile by username. Returns null when the user does not exist. */
+  /**
+   * Fetch a user profile by username. Returns null when the user does not exist.
+   * The username is percent-encoded as a single path segment — an unencoded
+   * value containing `/` or dot-segments would otherwise escape the `/user/`
+   * route and resolve to a different Firebase resource.
+   */
   fetchUser(username: string, ctx: Context): Promise<HnUser | null> {
     const rc = toRequestContext(ctx);
     return withRetry(
       async () => {
         const res = await fetchWithTimeout(
-          `${HN_API}/user/${username}.json`,
+          `${HN_API}/user/${encodeURIComponent(username)}.json`,
           REQUEST_TIMEOUT_MS,
           rc,
           { signal: ctx.signal },

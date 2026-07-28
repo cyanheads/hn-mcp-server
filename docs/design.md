@@ -273,7 +273,7 @@ Format functions produce `text` content blocks. Keep them concise — agents can
 
 | Env Var | Required | Description |
 |:--------|:---------|:------------|
-| `HN_CONCURRENCY_LIMIT` | No | Max concurrent HTTP requests for batch item fetches. Default: `10`. |
+| `HN_CONCURRENCY_LIMIT` | No | Max concurrent HTTP requests for batch item fetches (integer, 1–50). Default: `10`. |
 
 No API keys — both APIs are public. Framework-level config (`MCP_TRANSPORT_TYPE`, `MCP_LOG_LEVEL`, etc.) handled by `mcp-ts-core`.
 

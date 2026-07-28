@@ -52,16 +52,22 @@ export const searchHn = tool('hn_search_content', {
   input: z.object({
     query: z
       .string()
-      .describe('Search terms. Supports simple keywords — Algolia handles stemming and relevance.'),
+      .trim()
+      .min(1)
+      .describe(
+        'Search terms. Supports simple keywords — Algolia handles stemming and relevance. Trimmed before searching; blank or whitespace-only input is rejected.',
+      ),
     tags: z
       .enum(['story', 'comment', 'ask_hn', 'show_hn', 'front_page'])
       .optional()
       .describe(`Filter results by content type. Omit to search all types.`),
     author: z
       .string()
+      .trim()
+      .min(1)
       .optional()
       .describe(
-        `Filter results to a specific author. Useful for finding a user's posts on a topic (hn_get_user only shows recent submissions).`,
+        `Filter results to a specific author. Useful for finding a user's posts on a topic (hn_get_user only shows recent submissions). Trimmed before filtering; omit the field to search all authors rather than passing a blank string.`,
       ),
     sort: z
       .enum(['relevance', 'date'])
@@ -84,11 +90,12 @@ export const searchHn = tool('hn_search_content', {
       .describe('Filter to a date window. Useful for finding discussions about recent events.'),
     minPoints: z
       .number()
+      .int()
       .min(0)
       .optional()
       .describe('Minimum score/points. Filters out low-engagement content.'),
-    count: z.number().min(1).max(50).default(30).describe('Number of results to return.'),
-    page: z.number().min(0).default(0).describe('Page number for pagination (0-indexed).'),
+    count: z.number().int().min(1).max(50).default(30).describe('Number of results to return.'),
+    page: z.number().int().min(0).default(0).describe('Page number for pagination (0-indexed).'),
   }),
   output: z.object({
     hits: z
@@ -151,7 +158,11 @@ export const searchHn = tool('hn_search_content', {
   enrichment: {
     totalHits: z.number().describe('Total matching results across all pages.'),
     page: z.number().describe('Current page number (0-indexed).'),
-    totalPages: z.number().describe('Total pages available.'),
+    totalPages: z
+      .number()
+      .describe(
+        'Number of pages Algolia will actually serve for this query. Not derived from totalHits — broad queries report a totalHits far larger than the reachable page range, so paginate against this value.',
+      ),
     truncated: z
       .boolean()
       .optional()
@@ -197,8 +208,7 @@ export const searchHn = tool('hn_search_content', {
       totalHits: result.nbHits,
     });
 
-    const totalPages = Math.ceil(result.nbHits / input.count);
-    ctx.enrich({ totalHits: result.nbHits, page: result.page, totalPages });
+    ctx.enrich({ totalHits: result.nbHits, page: result.page, totalPages: result.nbPages });
     if (hits.length === input.count && result.nbHits > input.count) {
       ctx.enrich.truncated({ shown: hits.length, cap: input.count });
     }

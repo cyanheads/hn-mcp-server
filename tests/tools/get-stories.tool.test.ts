@@ -466,6 +466,13 @@ describe('getStories — security and edge cases', () => {
     expect(() => getStories.input.parse({ feed: 'top', count: 'ten' as any })).toThrow();
   });
 
+  it.each([
+    ['count', { count: 1.5 }],
+    ['offset', { offset: 1.5 }],
+  ])('rejects fractional %s', (_field, overrides) => {
+    expect(() => getStories.input.parse({ feed: 'top', ...overrides })).toThrow();
+  });
+
   it('output schema validates correctly on non-empty result', () => {
     const result = {
       stories: [{ id: 1, type: 'story', title: 'Test', score: 10, by: 'alice', time: 1 }],
