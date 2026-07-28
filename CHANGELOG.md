@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.12](changelog/0.5.x/0.5.12.md) — 2026-07-28
+
+Reject fractional and blank/whitespace-only tool inputs; hn_search_content reports Algolia's own page count instead of a recomputation; hn_get_user's Firebase username segment is percent-encoded; hn_get_thread omits totalAvailable instead of rendering undefined. @cyanheads/mcp-ts-core ^0.10.9 → ^0.11.0.
+
 ## [0.5.11](changelog/0.5.x/0.5.11.md) — 2026-06-20
 
 @cyanheads/mcp-ts-core ^0.10.6 → ^0.10.9 — check-dependency-specifiers + plugin-manifest devcheck guards, ctx.content collector, canvas SQL gate classification; dropped unused direct hono dependency; TypeScript 6 adopted

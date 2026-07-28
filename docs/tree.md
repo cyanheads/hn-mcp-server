@@ -1,6 +1,6 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-06-20 11:47:14
+Generated on: 2026-07-28 12:42:25
 
 ```text
 hn-mcp-server/
@@ -12,10 +12,12 @@ hn-mcp-server/
 │   ├── mcp.json
 │   └── plugin.json
 ├── .github/
-│   └── ISSUE_TEMPLATE/
-│       ├── bug_report.yml
-│       ├── config.yml
-│       └── feature_request.yml
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── config.yml
+│   │   └── feature_request.yml
+│   ├── FUNDING.yml
+│   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
@@ -159,7 +161,9 @@ hn-mcp-server/
 │       ├── get-thread.tool.test.ts
 │       ├── get-user.tool.test.ts
 │       └── search-content.tool.test.ts
+├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
 ├── biome.json
