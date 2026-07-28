@@ -6,14 +6,14 @@
 
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
-| `get_stories` | Fetch stories from an HN feed (top, new, best, ask, show, jobs). Returns enriched story objects with title, URL, score, author, and comment count. | `feed` (enum), `count`, `offset` | `readOnlyHint` |
-| `get_thread` | Get an item and its comment tree as a threaded discussion. Recursively resolves child comments. With depth 0, returns just the item — doubles as an item lookup. | `itemId`, `depth`, `maxComments` | `readOnlyHint` |
-| `get_user` | Get an HN user profile with karma, about, and optionally their most recent submissions resolved into full items. | `username`, `includeSubmissions`, `submissionCount` | `readOnlyHint` |
-| `search_hn` | Search Hacker News stories and comments via Algolia. Supports filtering by content type, author, date range, and minimum points. | `query`, `tags`, `author`, `sort`, `dateRange`, `minPoints`, `count`, `page` | `readOnlyHint` |
+| `hn_get_stories` | Fetch stories from an HN feed (top, new, best, ask, show, jobs). Returns enriched story objects with title, URL, score, author, and comment count. | `feed` (enum), `count`, `offset` | `readOnlyHint` |
+| `hn_get_thread` | Get an item and its comment tree as a threaded discussion. Resolves child comments by ranked breadth-first traversal. With depth 0, returns just the item — doubles as an item lookup. | `itemId`, `depth`, `maxComments` | `readOnlyHint` |
+| `hn_get_user` | Get an HN user profile with karma, about, and optionally one page of their submissions resolved into full items. | `username`, `includeSubmissions`, `submissionCount`, `submissionOffset` | `readOnlyHint` |
+| `hn_search_content` | Search Hacker News stories and comments via Algolia. Supports filtering by content type, author, date range, and minimum points. | `query`, `tags`, `author`, `sort`, `dateRange`, `minPoints`, `count`, `page`, `view` | `readOnlyHint` |
 
 ### Resources
 
-None. Item and user lookups are handled by `get_thread` (depth 0) and `get_user` respectively — both add value over raw API responses by resolving nested IDs.
+None. Item and user lookups are handled by `hn_get_thread` (depth 0) and `hn_get_user` respectively — both add value over raw API responses by resolving nested IDs.
 
 ### Prompts
 
@@ -29,7 +29,7 @@ The server's primary value-add over raw API calls:
 
 1. **Batch resolution** — feeds return ID arrays; the server fetches and enriches them into complete story objects in one tool call
 2. **Thread traversal** — comment trees require recursive `kids` resolution; the server walks the tree and returns a structured, readable discussion
-3. **User enrichment** — user profiles include submission IDs only; the server optionally resolves recent submissions into full items
+3. **User enrichment** — user profiles include submission IDs only; the server optionally resolves a page of submissions into full items
 4. **Unified search** — wraps Algolia's HN search with a clean interface for finding discussions by topic
 
 ## Requirements
@@ -43,169 +43,155 @@ The server's primary value-add over raw API calls:
 
 ---
 
+## Conventions used below
+
+Every tool splits its response across three surfaces:
+
+- **Output** — the tool's `output` schema, returned as `structuredContent` and rendered into `content[]` by `format()`.
+- **Enrichment** — the `enrichment` block: pagination totals, truncation flags, and agent-facing notices. Reaches both surfaces, keyed separately from the data.
+- **Errors** — the `errors[]` contract: the `reason` values a caller can switch on, each with a recovery hint.
+
+Fields marked optional are absent (not null) when HN omits them — the APIs populate fields sparsely.
+
+---
+
 ## Tool Details
 
-### `get_stories`
+### `hn_get_stories`
 
-Browse curated HN feeds. Internally fetches the feed's ID array, slices by offset/count, then batch-fetches each item in parallel.
+Browse curated HN feeds. Fetches the feed's ID array, slices by offset/count, then batch-fetches each item in parallel.
 
-```ts
-input: z.object({
-  feed: z.enum(['top', 'new', 'best', 'ask', 'show', 'jobs'])
-    .describe('Which HN feed to fetch. "top" includes jobs. "ask" and "show" are Ask HN / Show HN posts.'),
-  count: z.number().min(1).max(100).default(30)
-    .describe('Number of stories to return. Each story is fetched individually — larger counts take longer.'),
-  offset: z.number().min(0).default(0)
-    .describe('Number of stories to skip from the start of the feed. Use with count for pagination.'),
-})
+**Input**
 
-output: z.object({
-  stories: z.array(z.object({
-    id: z.number().describe('Item ID — use with get_thread to read comments.'),
-    title: z.string().describe('Story title.'),
-    url: z.string().optional().describe('External link URL. Absent for Ask HN / text posts.'),
-    score: z.number().describe('Upvote count.'),
-    by: z.string().describe('Author username.'),
-    time: z.number().describe('Unix timestamp.'),
-    descendants: z.number().optional().describe('Total comment count. Absent for jobs.'),
-    text: z.string().optional().describe('Body text for Ask HN / text posts. Use get_thread for full discussion.'),
-    type: z.string().describe('Item type (story, job).'),
-  })).describe('Stories from the feed, ordered by HN ranking.'),
-  feed: z.string().describe('Which feed was fetched.'),
-  total: z.number().describe('Total items in the feed (up to 500 for top/new/best, 200 for ask/show/jobs).'),
-  offset: z.number().describe('Offset used.'),
-  hasMore: z.boolean().describe('Whether more stories are available beyond this page.'),
-})
-```
+| Field | Type | Default | Notes |
+|:------|:-----|:--------|:------|
+| `feed` | enum `top \| new \| best \| ask \| show \| jobs` | — | Required. `top` includes jobs. |
+| `count` | integer 1–100 | `30` | Larger counts take longer — each item is a separate fetch. |
+| `offset` | integer ≥ 0 | `0` | Items to skip from the start of the feed. |
 
-### `get_thread`
+**Output**
 
-The highest-value tool. Fetches an item and recursively resolves its comment tree. Handles the tree traversal that would otherwise require dozens of sequential item fetches. Returns a flat comment list ordered by ranked BFS — at each level, comments appear in HN's ranked order before descending to the next depth. On wide threads (many direct replies), this favors breadth over depth; callers can increase `depth` or use a smaller `maxComments` with higher depth to trade coverage for conversational depth.
+| Field | Type | Notes |
+|:------|:-----|:------|
+| `stories[].id` | number | Item ID — chains to `hn_get_thread`. |
+| `stories[].type` | string | `story` or `job`. |
+| `stories[].title` | string? | |
+| `stories[].url` | string? | Absent for Ask HN / text posts. |
+| `stories[].domain` | string? | Bare hostname from `url`, leading `www.` stripped. |
+| `stories[].score` | number? | |
+| `stories[].by` | string? | |
+| `stories[].time` | number? | Unix seconds. |
+| `stories[].descendants` | number? | Total comment count. Absent for jobs. |
+| `stories[].text` | string? | Body text for Ask HN / text posts. |
+| `feed` | string | Which feed was fetched. |
 
-```ts
-input: z.object({
-  itemId: z.number()
-    .describe('ID of the story, comment, or poll to fetch the thread for.'),
-  depth: z.number().min(0).max(10).default(3)
-    .describe('How many levels of replies to resolve. 0 = just the item, no comments. 1 = direct replies only. '
-      + 'Deeper threads on popular stories can be very large — start with 2-3 and go deeper if needed.'),
-  maxComments: z.number().min(1).max(200).default(50)
-    .describe('Maximum total comments to include across all depth levels. '
-      + 'Traversal stops when this limit is reached. Comments are resolved breadth-first by HN ranking.'),
-})
+**Enrichment**: `total`, `offset`, `hasMore`, plus `truncated` / `shown` / `cap` when capped, and `notice` when the page came back empty (empty feed, offset past the end, or every item on the page dead/deleted).
 
-output: z.object({
-  item: z.object({
-    id: z.number(),
-    type: z.string(),
-    by: z.string().optional(),
-    time: z.number().optional(),
-    title: z.string().optional(),
-    url: z.string().optional(),
-    text: z.string().optional(),
-    score: z.number().optional(),
-    descendants: z.number().optional(),
-  }).describe('The root item (story, comment, or poll).'),
-  comments: z.array(z.object({
-    id: z.number(),
-    by: z.string().optional(),
-    time: z.number().optional(),
-    text: z.string().optional(),
-    depth: z.number().describe('Nesting level (0 = direct reply to root).'),
-    parentId: z.number().describe('Parent item ID.'),
-    childCount: z.number().describe('Number of direct child comments (may exceed what was resolved).'),
-  })).describe('Flat comment list ordered by ranked BFS traversal. Use depth/parentId to reconstruct nesting.'),
-  totalLoaded: z.number().describe('Number of comments actually fetched and included.'),
-  totalAvailable: z.number().optional()
-    .describe('Total comment count from the root item (descendants field). '
-      + 'If totalLoaded < totalAvailable, increase maxComments or depth to see more.'),
-})
-```
+**Errors**: `upstream_rejected`, `upstream_rate_limited`, `upstream_unavailable`, `upstream_html`, `upstream_malformed`.
 
-### `get_user`
+### `hn_get_thread`
 
-Fetches an HN user profile and optionally resolves their most recent submissions into full items. Without `includeSubmissions`, returns just the profile. With it, batch-fetches recent submissions so the agent gets actionable content in one call.
+The highest-value tool. Fetches an item and resolves its comment tree, handling traversal that would otherwise require dozens of sequential item fetches. Returns a flat comment list ordered by ranked BFS — at each level, comments appear in HN's ranked order before descending to the next depth. On wide threads (many direct replies), this favors breadth over depth; callers raise `maxComments` alongside `depth`, or call again with a specific comment's `itemId` to drill into a subtree.
 
-```ts
-input: z.object({
-  username: z.string()
-    .describe('HN username. Case-sensitive.'),
-  includeSubmissions: z.boolean().default(false)
-    .describe('Resolve the user\'s most recent submissions into full items. '
-      + 'Without this, only submission IDs are returned.'),
-  submissionCount: z.number().min(1).max(50).default(10)
-    .describe('Number of recent submissions to resolve. Only used when includeSubmissions is true.'),
-})
+**Input**
 
-output: z.object({
-  user: z.object({
-    id: z.string().describe('Username.'),
-    karma: z.number().describe('Karma score.'),
-    created: z.number().describe('Account creation time (Unix timestamp).'),
-    about: z.string().optional().describe('Self-description (HTML).'),
-    totalSubmissions: z.number().describe('Total number of submissions.'),
-  }).describe('User profile.'),
-  submissions: z.array(z.object({
-    id: z.number().describe('Item ID — use with get_thread to read comments.'),
-    type: z.string().describe('Item type (story, comment, job, poll).'),
-    title: z.string().optional().describe('Title (stories/jobs/polls).'),
-    url: z.string().optional().describe('External link URL.'),
-    text: z.string().optional().describe('Body text (HTML).'),
-    score: z.number().optional().describe('Score/upvotes.'),
-    time: z.number().optional().describe('Unix timestamp.'),
-    descendants: z.number().optional().describe('Comment count (stories/polls).'),
-  })).optional().describe('Recent submissions, most recent first. Only present when includeSubmissions is true.'),
-})
-```
+| Field | Type | Default | Notes |
+|:------|:-----|:--------|:------|
+| `itemId` | integer | — | Required. Story, comment, job, or poll. |
+| `depth` | integer 0–10 | `3` | `0` = item only, no comments. |
+| `maxComments` | integer 1–200 | `50` | Total across all depth levels. |
 
-### `search_hn`
+**Output**
+
+| Field | Type | Notes |
+|:------|:-----|:------|
+| `item` | object | `id`, `type`, and optional `by`, `time`, `title`, `url`, `text`, `score`, `descendants`. |
+| `comments[].id` | number | |
+| `comments[].by` | string? | |
+| `comments[].time` | number? | |
+| `comments[].text` | string? | HTML stripped. |
+| `comments[].depth` | number | `0` = direct reply to root. |
+| `comments[].parentId` | number | |
+| `comments[].childCount` | number | Direct children — may exceed what was resolved. |
+| `comments[].isOp` | `true`? | Present only when the comment author matches the root author. |
+
+**Enrichment**: `totalLoaded`, `totalAvailable` (only when HN reports `descendants` — comment and job roots omit it), `truncated` / `shown` / `cap` when the list hit `maxComments`, and `notice` carrying dropped deleted/dead counts and a raise-the-cap hint.
+
+**Errors**: `item_not_found`, plus the five upstream reasons.
+
+### `hn_get_user`
+
+Fetches an HN user profile and optionally resolves one page of their submissions into full items. Without `includeSubmissions`, returns just the profile. `submissionOffset` moves the page window, so a prolific account's older history stays reachable rather than being capped at the first `submissionCount` IDs.
+
+**Input**
+
+| Field | Type | Default | Notes |
+|:------|:-----|:--------|:------|
+| `username` | string | — | Required, trimmed, case-sensitive. |
+| `includeSubmissions` | boolean | `false` | |
+| `submissionCount` | integer 1–50 | `10` | Page size. |
+| `submissionOffset` | integer ≥ 0 | `0` | Submissions to skip, counting back from the most recent. Unbounded — a 15k-submission history is walkable. |
+
+**Output**
+
+| Field | Type | Notes |
+|:------|:-----|:------|
+| `user.id` | string | |
+| `user.karma` | number | |
+| `user.created` | number | Unix seconds. |
+| `user.about` | string? | HTML stripped. |
+| `user.totalSubmissions` | number | Full history length, not the page size. |
+| `submissions[]` | array? | `id`, `type`, and optional `title`, `url`, `text`, `score`, `time`, `descendants`. Absent when `includeSubmissions` is false or the user has never submitted; empty when the window holds no live items. |
+
+**Enrichment**: `submissionOffset` echoes the applied offset; `notice` names the window and the next offset while more remain, or reports the valid range when the offset is past the end; `truncated` / `shown` / `cap` fire only when submissions remain beyond the page.
+
+**Errors**: `user_not_found`, plus the five upstream reasons.
+
+### `hn_search_content`
 
 Wraps Algolia's HN Search API. Supports relevance-sorted and date-sorted search with tag and numeric filters.
 
-```ts
-input: z.object({
-  query: z.string()
-    .describe('Search terms. Supports simple keywords — Algolia handles stemming and relevance.'),
-  tags: z.enum(['story', 'comment', 'ask_hn', 'show_hn', 'front_page']).optional()
-    .describe('Filter results by content type. Single tag only — Algolia supports combining tags, '
-      + 'but a single filter covers most use cases. Omit to search all types.'),
-  author: z.string().optional()
-    .describe('Filter results to a specific author. Useful for finding a user\'s posts on a topic '
-      + '(get_user only shows recent submissions).'),
-  sort: z.enum(['relevance', 'date']).default('relevance')
-    .describe('Sort order. "relevance" for best match, "date" for most recent first.'),
-  dateRange: z.object({
-    start: z.string().optional().describe('Start date (ISO 8601). Results created after this date.'),
-    end: z.string().optional().describe('End date (ISO 8601). Results created before this date.'),
-  }).optional()
-    .describe('Filter to a date window. Useful for finding discussions about recent events.'),
-  minPoints: z.number().min(0).optional()
-    .describe('Minimum score/points. Filters out low-engagement content.'),
-  count: z.number().min(1).max(50).default(30)
-    .describe('Number of results to return.'),
-  page: z.number().min(0).default(0)
-    .describe('Page number for pagination (0-indexed).'),
-})
+**Input**
 
-output: z.object({
-  hits: z.array(z.object({
-    id: z.number().describe('HN item ID — use with get_thread to read the discussion.'),
-    title: z.string().optional().describe('Story title (present for stories).'),
-    url: z.string().optional().describe('External link URL.'),
-    author: z.string().describe('Author username.'),
-    points: z.number().optional().describe('Score/upvotes.'),
-    numComments: z.number().optional().describe('Comment count.'),
-    createdAt: z.string().describe('Creation time (ISO 8601).'),
-    storyTitle: z.string().optional().describe('Parent story title (present for comment results).'),
-    storyId: z.number().optional().describe('Parent story ID (present for comment results).'),
-    text: z.string().optional().describe('Comment or story body text (HTML).'),
-  })).describe('Search results ranked by sort order.'),
-  totalHits: z.number().describe('Total matching results across all pages.'),
-  page: z.number().describe('Current page number.'),
-  totalPages: z.number().describe('Total pages available.'),
-  query: z.string().describe('The query that was searched.'),
-})
-```
+| Field | Type | Default | Notes |
+|:------|:-----|:--------|:------|
+| `query` | string | — | Required, trimmed. Algolia handles stemming and relevance. |
+| `tags` | enum `story \| comment \| ask_hn \| show_hn \| front_page` | — | Single tag. Omit to search all types. |
+| `author` | string | — | Omit rather than passing a blank string. |
+| `sort` | enum `relevance \| date` | `relevance` | |
+| `dateRange` | `{ start?, end? }` | — | ISO 8601 strings, converted to `created_at_i` numeric filters. |
+| `minPoints` | integer ≥ 0 | — | |
+| `count` | integer 1–50 | `30` | |
+| `page` | integer ≥ 0 | `0` | |
+| `view` | enum `full \| compact` | `full` | `compact` omits `text` and `highlights.text`. |
+
+**Output**
+
+| Field | Type | Notes |
+|:------|:-----|:------|
+| `hits[].id` | number | HN item ID — chains to `hn_get_thread`. |
+| `hits[].title` | string? | Present for stories. |
+| `hits[].url` | string? | |
+| `hits[].domain` | string? | Bare hostname from `url`. |
+| `hits[].author` | string | |
+| `hits[].points` | number? | |
+| `hits[].numComments` | number? | |
+| `hits[].createdAt` | string | ISO 8601. |
+| `hits[].storyTitle` | string? | Parent story title for comment hits. |
+| `hits[].storyId` | number? | Equals `id` for story hits. |
+| `hits[].text` | string? | Body text, HTML stripped. Always absent under `view: "compact"`. |
+| `hits[].highlights` | object? | `title`, `text` (both `<em>`-marked snippets), and `matchedWords`. `text` is always absent under `view: "compact"`. |
+| `query` | string | The query that was searched. |
+
+**Enrichment**: `totalHits`, `page`, `totalPages`, plus `truncated` / `shown` / `cap` when the hit list was capped and `notice` naming the applied filters when a page comes back empty.
+
+**Errors**: the five upstream reasons.
+
+#### Result projection
+
+Algolia's `_highlightResult` repeats the matched field's full value with `<em>` markers, so a long comment can arrive twice per hit — once as `text`, once as `highlights.text`. `view: "compact"` drops that pair and keeps everything else, including `matchedWords`, so a caller can scan many results and then pass a hit `id` to `hn_get_thread` for the body.
+
+The projection is applied to the hit before either output surface is built, so `structuredContent` and `content[]` stay equivalent by construction — compact is an explicit projection, not a render-time truncation. `full` remains the default so existing callers are unaffected.
 
 ---
 
@@ -215,10 +201,10 @@ output: z.object({
 |:--------|:------|:--------|
 | `hn` | HN Firebase API + Algolia Search API | All tools |
 
-Single service with two internal API clients:
+Single service (`HnService`) with two internal API clients:
 
-- **Firebase client** — `fetchItem(id)`, `fetchUser(username)`, `fetchFeed(type)`, batch helpers with concurrency limiting
-- **Algolia client** — `search(params)` mapping to the Algolia search/search_by_date endpoints
+- **Firebase client** — `fetchItem(id, ctx)`, `fetchUser(username, ctx)`, `fetchFeed(type, ctx)`, plus `fetchItems(ids, ctx)` for concurrency-limited batches
+- **Algolia client** — `search(params, ctx)` mapping to the Algolia `search` / `search_by_date` endpoints
 
 Both are simple HTTP GET interfaces with no auth, no connection state, and JSON responses. One service directory keeps it cohesive.
 
@@ -226,10 +212,10 @@ Both are simple HTTP GET interfaces with no auth, no connection state, and JSON 
 
 The Firebase API has no batch endpoint — each item is a separate HTTP GET. The service layer provides:
 
-- `fetchItems(ids)` — parallel fetch with configurable concurrency limit (default 10)
-- Failed individual fetches return `null` (item may be deleted/dead) — callers filter
+- `fetchItems(ids)` — parallel fetch with a configurable concurrency limit (default 10), preserving input order
+- Per-item failures after exhausted retries are logged and yield `null` so one bad item does not fail the batch — callers filter
 
-This is the performance-critical path. `get_stories` fetching 30 items and `get_thread` fetching 50+ comments both depend on efficient batching.
+This is the performance-critical path. `hn_get_stories` fetching 30 items and `hn_get_thread` fetching 50+ comments both depend on efficient batching.
 
 ## Conventions
 
@@ -240,10 +226,12 @@ The HN API returns HTML in `title`, `text`, and `about` fields. Raw HTML is nois
 - `<p>` tags → double newline
 - `<a href="...">` → preserve URL in parentheses
 - `<pre><code>` → preserve as-is (code blocks)
-- `<i>` → strip tags, keep content
-- All other tags → strip
+- All other tags → strip, keep content
+- Named and numeric HTML entities → decoded
 
 This applies uniformly across all tools. No raw HTML reaches tool output.
+
+Algolia highlight snippets are the one exception: `stripHtmlPreservingEm` runs the same strip but keeps the `<em>…</em>` markers that carry which terms matched.
 
 ### Dead and Deleted Items
 
@@ -254,6 +242,26 @@ The API returns `dead: true` and `deleted: true` on items. Policy:
 
 Null results from batch fetches (item genuinely missing or API error) are also silently filtered.
 
+Pagination advances by the requested window, not by the live-item count — otherwise a window full of dead items would be re-fetched forever.
+
+### Upstream Failures
+
+Every upstream failure reaches the client as a classified error carrying `data.reason` and `data.recovery.hint`, so a `content[]`-only client gets an actionable next move instead of a plumbing string. The service maps the failure onto five reasons, each declared in every tool's `errors[]` contract:
+
+| Reason | Fires on | JSON-RPC code |
+|:-------|:---------|:--------------|
+| `upstream_rejected` | 4xx other than 429 — the request was rejected and the same input fails again | `InvalidParams` |
+| `upstream_rate_limited` | 429 | `RateLimited` |
+| `upstream_unavailable` | 5xx | `ServiceUnavailable` |
+| `upstream_html` | HTML error page served with a 200 status | `ServiceUnavailable` |
+| `upstream_malformed` | 200 status with a body that is not JSON | `ServiceUnavailable` |
+
+The last two are 200-status failures that would otherwise reach the client as a raw `SyntaxError` from `JSON.parse`, whose message names the token it choked on — upstream body content.
+
+The code travels with the reason rather than with the HTTP status. The framework's finer status ladder would split one reason across several codes — HN answers an unknown path with 401, and a 500 or 504 would surface as `InternalError` or `Timeout`, blurring the codes that mean "this server broke" and "this server's own fetch timed out". The exact status stays on `data.status`.
+
+The HTTP-status wrapper sits *outside* `withRetry`, not inside it: retry eligibility, `Retry-After` honoring, timeouts, and caller aborts all classify against the framework's original error, and only `errorSource: 'FetchHttpError'` throws are rewritten. The upstream URL and the verbatim response body are dropped from the client-facing message and data, and kept on the `cause` chain for server-side logs.
+
 ### URL Normalization
 
 The API occasionally returns empty strings for `url` (e.g., job posts). Normalize `""` to `undefined` so optional URL fields are consistently absent-or-present, never empty.
@@ -262,12 +270,12 @@ The API occasionally returns empty strings for `url` (e.g., job posts). Normaliz
 
 Each tool provides a `format` function that shapes output for LLM readability:
 
-- `get_stories` — numbered list: rank, title, score, comment count, URL
-- `get_thread` — root item summary, then indented comment tree using depth metadata
-- `get_user` — profile summary, optionally followed by numbered submission list
-- `search_hn` — numbered results with title, author, points, date
+- `hn_get_stories` — ranked list: rank, title, domain, id/type/score/author/comment count/date, URL, body text
+- `hn_get_thread` — root item summary, then the comment list indented by depth, with author, id/depth/parent/reply count/date, and an OP marker
+- `hn_get_user` — profile summary, then a submission list with id, type, score, comment count, date, URL, and body text
+- `hn_search_content` — per-hit heading (story title + domain, or the parent story for comment hits), metadata line, URL, body text, and a `> match —` footer carrying the highlight snippets and matched terms
 
-Format functions produce `text` content blocks. Keep them concise — agents can always access the structured output for details.
+Format functions produce `text` content blocks. They must render everything the LLM needs: different clients forward different surfaces, so `content[]` and `structuredContent` have to carry the same data.
 
 ## Config
 
@@ -276,15 +284,3 @@ Format functions produce `text` content blocks. Keep them concise — agents can
 | `HN_CONCURRENCY_LIMIT` | No | Max concurrent HTTP requests for batch item fetches (integer, 1–50). Default: `10`. |
 
 No API keys — both APIs are public. Framework-level config (`MCP_TRANSPORT_TYPE`, `MCP_LOG_LEVEL`, etc.) handled by `mcp-ts-core`.
-
-## Implementation Order
-
-1. Config and server setup (replace echo stubs)
-2. HN service — Firebase client (fetchItem, fetchUser, fetchFeed, fetchItems)
-3. HN service — Algolia client (search)
-4. `get_stories` tool
-5. `get_user` tool
-6. `get_thread` tool
-7. `search_hn` tool
-
-Each step is independently testable. `get_stories` and `get_user` can ship before the more complex `get_thread`.
