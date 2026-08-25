@@ -7,23 +7,12 @@
       "tsc-alias",
       "@cyanheads/mcp-ts-core",
       "depcheck",
-      "hono",
       "@socketsecurity/bun-security-scanner"
     ],
     "ignorePatterns": []
   },
   "outdated": {
     "allowlist": []
-  },
-  "skillVersions": {
-    "ignore": [
-      "api-auth",
-      "api-errors",
-      "api-services",
-      "api-telemetry",
-      "report-issue-local",
-      "tool-defs-analysis"
-    ]
   },
   "packaging": {
     "pluginManifests": true
