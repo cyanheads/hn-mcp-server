@@ -1,11 +1,11 @@
 {
   "name": "hn-mcp-server",
-  "version": "0.5.13",
+  "version": "0.5.14",
   "description": "Browse Hacker News feeds, threads, and user profiles with full-text search via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": "cyanheads",
+    "name": "Casey Hand",
     "email": "casey@caseyjhand.com",
-    "url": "https://github.com/cyanheads"
+    "url": "https://caseyjhand.com"
   },
   "homepage": "https://github.com/cyanheads/hn-mcp-server#readme",
   "repository": "https://github.com/cyanheads/hn-mcp-server",
@@ -17,7 +17,7 @@
     "shortDescription": "Browse Hacker News feeds, threads, and user profiles with full-text search.",
     "longDescription": "Read-only access to Hacker News over the Firebase API and Algolia search. Fetch ranked feeds (top, new, best, ask, show, jobs) with pagination, full-text search items by query with type, author, date, and score filters, retrieve a user profile with their submissions, and pull any item with its full comment tree (drill into a subtree by passing a comment id). Items are addressed by integer id, reused across stories, comments, jobs, and polls. HN populates fields sparsely, so absent values are surfaced as unknown rather than fabricated.",
     "developerName": "cyanheads",
-    "category": "",
+    "category": "News",
     "capabilities": ["Read"],
     "websiteURL": "https://github.com/cyanheads/hn-mcp-server#readme",
     "defaultPrompt": []

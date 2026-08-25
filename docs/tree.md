@@ -1,11 +1,9 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-07-28 12:42:25
+Generated on: 2026-08-25 02:31:21
 
 ```text
 hn-mcp-server/
-├── .agents/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -16,6 +14,8 @@ hn-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/

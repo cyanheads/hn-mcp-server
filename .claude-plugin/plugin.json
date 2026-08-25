@@ -1,9 +1,11 @@
 {
   "name": "hn-mcp-server",
-  "version": "0.5.13",
+  "version": "0.5.14",
   "description": "Browse Hacker News feeds, threads, and user profiles with full-text search via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": "cyanheads"
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
   },
   "homepage": "https://github.com/cyanheads/hn-mcp-server#readme",
   "repository": "https://github.com/cyanheads/hn-mcp-server",

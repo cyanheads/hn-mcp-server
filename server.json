@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/hn-mcp-server",
     "source": "github"
   },
-  "version": "0.5.13",
+  "version": "0.5.14",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/hn-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.5.13",
+      "version": "0.5.14",
       "packageArguments": [
         {
           "type": "positional",
@@ -40,7 +40,7 @@
         },
         {
           "name": "MCP_LOG_LEVEL",
-          "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
+          "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warning').",
           "format": "string",
           "isRequired": false,
           "default": "info"
@@ -55,7 +55,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/hn-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.5.13",
+      "version": "0.5.14",
       "packageArguments": [
         {
           "type": "positional",
@@ -104,7 +104,7 @@
         },
         {
           "name": "MCP_LOG_LEVEL",
-          "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
+          "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warning').",
           "format": "string",
           "isRequired": false,
           "default": "info"

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.14](changelog/0.5.x/0.5.14.md) — 2026-08-24
+
+MCP SDK v2 compatibility, explicit stateless HTTP serving, and current framework-managed tooling
+
 ## [0.5.13](changelog/0.5.x/0.5.13.md) — 2026-07-28
 
 hn_get_user gains submissionOffset to page through a user's full submission history; hn_search_content gains a compact view that drops duplicated body text; upstream HTTP failures now classify onto a typed reason and recovery hint instead of a raw fetch error.
