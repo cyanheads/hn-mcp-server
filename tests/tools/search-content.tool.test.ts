@@ -3,7 +3,10 @@
  * @module mcp-server/tools/definitions/search-content.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createMockContext as createFrameworkMockContext,
+  getEnrichment,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AlgoliaResponse } from '@/services/hn/types.js';
 
@@ -31,6 +34,16 @@ vi.mock('@/services/hn/hn-service.js', () => ({
 
 import { searchHn } from '@/mcp-server/tools/definitions/search-content.tool.js';
 import { getHnService, stripHtml } from '@/services/hn/hn-service.js';
+
+function createMockContext() {
+  return createFrameworkMockContext({ errors: searchHn.errors });
+}
+
+function firstText(blocks: ReturnType<NonNullable<typeof searchHn.format>>): string {
+  const block = blocks[0];
+  if (block?.type !== 'text') throw new Error('Expected a text content block');
+  return block.text;
+}
 
 const mockSearch = vi.fn<(...args: unknown[]) => Promise<AlgoliaResponse>>();
 
@@ -601,7 +614,7 @@ describe('hn_search_content format', () => {
       query: 'rust',
     });
 
-    const text = content[0]!.text;
+    const text = firstText(content);
     expect(text).toContain('## "rust" — search results');
     expect(text).toContain('### Rust is Great (rust.dev)');
     expect(text).toContain('id:123 | alice | 200 pts | 80 comments | 2024-06-15');
@@ -624,7 +637,7 @@ describe('hn_search_content format', () => {
       query: 'rust',
     });
 
-    const text = content[0]!.text;
+    const text = firstText(content);
     expect(text).toContain('### Rust is great');
     expect(text).toContain('> match — title: <em>Rust</em> is great | terms: rust');
   });
@@ -649,7 +662,7 @@ describe('hn_search_content format', () => {
       query: 'rust think',
     });
 
-    const text = content[0]!.text;
+    const text = firstText(content);
     expect(text).toContain('I think Rust is great');
     expect(text).toContain('body: I <em>think</em> <em>Rust</em> is great');
     expect(text).toContain('terms: think, rust');
@@ -672,7 +685,7 @@ describe('hn_search_content format', () => {
       query: 'x',
     });
 
-    expect(content[0]!.text).not.toContain('match —');
+    expect(firstText(content)).not.toContain('match —');
   });
 
   it('formats comment results with "Comment on" and text preview', () => {
@@ -694,7 +707,7 @@ describe('hn_search_content format', () => {
       query: 'best language',
     });
 
-    const text = content[0]!.text;
+    const text = firstText(content);
     expect(text).toContain('## "best language" — search results');
     expect(text).toContain('### Comment on "Ask HN: Best Language?" (story id:100)');
     expect(text).toContain('id:456 | bob | 10 pts | 2024-03-20');
@@ -721,7 +734,7 @@ describe('hn_search_content format', () => {
       query: 'q',
     });
 
-    const text = content[0]!.text;
+    const text = firstText(content);
     expect(text).toContain('a'.repeat(250));
   });
 
@@ -744,7 +757,7 @@ describe('hn_search_content format', () => {
       query: 'q',
     });
 
-    const text = content[0]!.text;
+    const text = firstText(content);
     expect(text).toContain('### Ask HN: Something');
     expect(text).not.toContain('http');
   });
@@ -895,7 +908,7 @@ describe('hn_search_content — security and edge cases', () => {
 
   it('format() escapes query in no-results message without injecting HTML', () => {
     const result = searchHn.format!({ hits: [], query: '<script>alert(1)</script>' });
-    const text = result[0]!.text;
+    const text = firstText(result);
     // The query is embedded in the message — verify it doesn't create executable tags
     expect(text).toContain('<script>alert(1)</script>');
     // The embedding is just text — no DOM execution risk in MCP text content
@@ -931,7 +944,7 @@ describe('hn_search_content — security and edge cases', () => {
       ],
       query: 'x',
     });
-    const text = content[0]!.text;
+    const text = firstText(content);
     // When storyId === id and no storyTitle, parentRef should not appear
     expect(text).not.toContain('story:"');
   });
@@ -997,8 +1010,8 @@ describe('hn_search_content — security and edge cases', () => {
       query: 'story',
     });
     // Heading uses domain (www. already stripped by handler)
-    expect(content[0]!.text).toContain('### Some Story (github.com)');
+    expect(firstText(content)).toContain('### Some Story (github.com)');
     // Heading does not use www prefix
-    expect(content[0]!.text).not.toContain('### Some Story (www.github.com)');
+    expect(firstText(content)).not.toContain('### Some Story (www.github.com)');
   });
 });

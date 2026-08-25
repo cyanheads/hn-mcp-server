@@ -3,7 +3,10 @@
  * @module mcp-server/tools/definitions/get-thread.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createMockContext as createFrameworkMockContext,
+  getEnrichment,
+} from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import type { HnItem } from '@/services/hn/types.js';
 
@@ -15,6 +18,16 @@ vi.mock('@/services/hn/hn-service.js', () => ({
 
 import { getThread } from '@/mcp-server/tools/definitions/get-thread.tool.js';
 import { getHnService, normalizeUrl, stripHtml } from '@/services/hn/hn-service.js';
+
+function createMockContext() {
+  return createFrameworkMockContext({ errors: getThread.errors });
+}
+
+function firstText(blocks: ReturnType<NonNullable<typeof getThread.format>>): string {
+  const block = blocks[0];
+  if (block?.type !== 'text') throw new Error('Expected a text content block');
+  return block.text;
+}
 
 // ---------------------------------------------------------------------------
 // Mock data
@@ -89,7 +102,7 @@ describe('hn_get_thread handler', () => {
   beforeEach(() => {
     hn = createMockHnService();
     (getHnService as Mock).mockReturnValue(hn);
-    ctx = createMockContext({ errors: getThread.errors });
+    ctx = createMockContext();
   });
 
   it('throws when item is not found', async () => {
@@ -212,7 +225,7 @@ describe('hn_get_thread handler', () => {
     const result = await getThread.handler(parse({ depth: 3, maxComments: 1 }), ctx);
 
     expect(result.comments).toHaveLength(1);
-    expect(result.comments[0].id).toBe(10);
+    expect(result.comments[0]!.id).toBe(10);
     expect(getEnrichment(ctx).totalLoaded).toBe(1);
   });
 
@@ -343,11 +356,11 @@ describe('hn_get_thread format', () => {
 
     const blocks = format(result as Parameters<typeof format>[0]);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].type).toBe('text');
-    expect(blocks[0].text).toContain('Test Story');
-    expect(blocks[0].text).toContain('42 pts');
-    expect(blocks[0].text).toContain('by alice');
-    expect(blocks[0].text).toContain('https://example.com');
+    const text = firstText(blocks);
+    expect(text).toContain('Test Story');
+    expect(text).toContain('42 pts');
+    expect(text).toContain('by alice');
+    expect(text).toContain('https://example.com');
   });
 
   it('formats story with indented comment tree', () => {
@@ -376,7 +389,7 @@ describe('hn_get_thread format', () => {
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
-    const text = blocks[0].text;
+    const text = firstText(blocks);
     expect(text).toContain('**bob** (id:10');
     expect(text).toContain('1 replies');
     expect(text).toContain('Top-level');
@@ -411,7 +424,7 @@ describe('hn_get_thread format', () => {
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
-    const text = blocks[0].text;
+    const text = firstText(blocks);
     expect(text).toContain('**alice (OP)**');
     expect(text).toContain('**bob**');
     expect(text).not.toContain('**bob (OP)**');
@@ -426,7 +439,7 @@ describe('hn_get_thread format', () => {
     };
 
     const blocks = format(result as Parameters<typeof format>[0]);
-    expect(blocks[0].text).toContain('Comment by bob');
+    expect(firstText(blocks)).toContain('Comment by bob');
   });
 });
 
@@ -487,7 +500,7 @@ describe('hn_get_thread — security and edge cases', () => {
   beforeEach(() => {
     hn = createMockHnService();
     (getHnService as Mock).mockReturnValue(hn);
-    ctx = createMockContext({ errors: getThread.errors });
+    ctx = createMockContext();
   });
 
   it('handles item with no title and no by (fully sparse)', async () => {
@@ -509,7 +522,7 @@ describe('hn_get_thread — security and edge cases', () => {
     };
     expect(() => getThread.format!(result)).not.toThrow();
     const blocks = getThread.format!(result);
-    expect(blocks[0]!.text).toContain('Comment by unknown');
+    expect(firstText(blocks)).toContain('Comment by unknown');
   });
 
   it('format() caps indent depth at 10 regardless of actual depth value', () => {
@@ -528,7 +541,7 @@ describe('hn_get_thread — security and edge cases', () => {
       ],
     };
     const blocks = getThread.format!(result);
-    const text = blocks[0]!.text;
+    const text = firstText(blocks);
     // Capped at 10 means at most 20 spaces of indent (10 * 2 spaces each)
     const commentLine = text.split('\n').find((l) => l.includes('deeply_nested'))!;
     const leadingSpaces = commentLine.match(/^ */)?.[0]?.length ?? 0;

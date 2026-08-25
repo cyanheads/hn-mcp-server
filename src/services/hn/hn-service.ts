@@ -4,8 +4,13 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import {
+  invalidParams,
+  McpError,
+  rateLimited,
+  serviceUnavailable,
+} from '@cyanheads/mcp-ts-core/errors';
+import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
 import type { AlgoliaResponse, HnFeedType, HnItem, HnUser } from './types.js';
@@ -13,25 +18,6 @@ import type { AlgoliaResponse, HnFeedType, HnItem, HnUser } from './types.js';
 const HN_API = 'https://hacker-news.firebaseio.com/v0';
 const ALGOLIA_API = 'https://hn.algolia.com/api/v1';
 const REQUEST_TIMEOUT_MS = 10_000;
-
-/**
- * Project a handler Context onto a RequestContext shape for framework
- * utilities. Runtime-safe — the framework only reads log-binding fields —
- * but RequestContext's `[key: string]: unknown` index signature is not
- * present on Context, so we materialize a plain object whose literal shape
- * satisfies the index signature.
- */
-function toRequestContext(ctx: Context): RequestContext {
-  const base: RequestContext = {
-    requestId: ctx.requestId,
-    timestamp: ctx.timestamp,
-  };
-  if (ctx.tenantId !== undefined) base.tenantId = ctx.tenantId;
-  if (ctx.traceId !== undefined) base.traceId = ctx.traceId;
-  if (ctx.spanId !== undefined) base.spanId = ctx.spanId;
-  if (ctx.auth !== undefined) base.auth = ctx.auth;
-  return base;
-}
 
 // ---------------------------------------------------------------------------
 // HTML utilities
@@ -171,26 +157,47 @@ function parseJsonBody<T>(text: string, upstream: string): T {
  * mean "this server broke" and "this server's own fetch timed out". The exact
  * status stays on `data.status`.
  */
-function upstreamFailureFor(upstream: string, status: number) {
+function upstreamFailureFor(upstream: string, status: number, cause: McpError): McpError {
   if (status === 429) {
-    return {
-      code: JsonRpcErrorCode.RateLimited,
-      reason: 'upstream_rate_limited',
-      hint: `${upstream} is rate-limiting this server. Wait several seconds before retrying the same call, and reduce how often it is called.`,
-    };
+    return rateLimited(
+      `${upstream} returned HTTP ${status}.`,
+      {
+        upstream,
+        status,
+        reason: 'upstream_rate_limited',
+        recovery: {
+          hint: `${upstream} is rate-limiting this server. Wait several seconds before retrying the same call, and reduce how often it is called.`,
+        },
+      },
+      { cause },
+    );
   }
   if (status >= 500) {
-    return {
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      reason: 'upstream_unavailable',
-      hint: `${upstream} is failing or in maintenance. Retry after a short delay — no input change helps while the upstream is down.`,
-    };
+    return serviceUnavailable(
+      `${upstream} returned HTTP ${status}.`,
+      {
+        upstream,
+        status,
+        reason: 'upstream_unavailable',
+        recovery: {
+          hint: `${upstream} is failing or in maintenance. Retry after a short delay — no input change helps while the upstream is down.`,
+        },
+      },
+      { cause },
+    );
   }
-  return {
-    code: JsonRpcErrorCode.InvalidParams,
-    reason: 'upstream_rejected',
-    hint: `${upstream} rejected the request as malformed. Check the tool input values against the schema; retrying the same input fails identically.`,
-  };
+  return invalidParams(
+    `${upstream} returned HTTP ${status}.`,
+    {
+      upstream,
+      status,
+      reason: 'upstream_rejected',
+      recovery: {
+        hint: `${upstream} rejected the request as malformed. Check the tool input values against the schema; retrying the same input fails identically.`,
+      },
+    },
+    { cause },
+  );
 }
 
 /**
@@ -213,13 +220,7 @@ async function withUpstreamHttpErrors<T>(upstream: string, fn: () => Promise<T>)
     const status = err.data.status;
     if (typeof status !== 'number') throw err;
 
-    const { code, reason, hint } = upstreamFailureFor(upstream, status);
-    throw new McpError(
-      code,
-      `${upstream} returned HTTP ${status}.`,
-      { upstream, status, reason, recovery: { hint } },
-      { cause: err },
-    );
+    throw upstreamFailureFor(upstream, status, err);
   }
 }
 
@@ -245,14 +246,15 @@ export class HnService {
     url: string | URL,
     ctx: Context,
   ): Promise<T> {
-    const rc = toRequestContext(ctx);
     return withUpstreamHttpErrors(upstream, () =>
       withRetry(
         async () => {
-          const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS, rc, { signal: ctx.signal });
+          const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS, ctx, {
+            signal: ctx.signal,
+          });
           return parseJsonBody<T>(await res.text(), upstream);
         },
-        { operation, context: rc, signal: ctx.signal },
+        { operation, context: ctx, signal: ctx.signal },
       ),
     );
   }

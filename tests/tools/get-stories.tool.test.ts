@@ -3,7 +3,10 @@
  * @module mcp-server/tools/definitions/get-stories.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createMockContext as createFrameworkMockContext,
+  getEnrichment,
+} from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/services/hn/hn-service.js', () => ({
@@ -26,6 +29,16 @@ vi.mock('@/services/hn/hn-service.js', () => ({
 import { getStories } from '@/mcp-server/tools/definitions/get-stories.tool.js';
 import { getHnService } from '@/services/hn/hn-service.js';
 import type { HnItem } from '@/services/hn/types.js';
+
+function createMockContext() {
+  return createFrameworkMockContext({ errors: getStories.errors });
+}
+
+function firstText(blocks: ReturnType<NonNullable<typeof getStories.format>>): string {
+  const block = blocks[0];
+  if (block?.type !== 'text') throw new Error('Expected a text content block');
+  return block.text;
+}
 
 function makeItem(overrides: Partial<HnItem> & { id: number }): HnItem {
   return {
@@ -125,7 +138,8 @@ describe('getStories', () => {
     });
 
     it('omits domain when url is absent or unparseable', async () => {
-      const items = [makeItem({ id: 1, url: undefined }), makeItem({ id: 2, url: 'not a url' })];
+      const { url: _url, ...withoutUrl } = makeItem({ id: 1 });
+      const items = [withoutUrl, makeItem({ id: 2, url: 'not a url' })];
       mockService.fetchFeed.mockResolvedValue([1, 2]);
       mockService.fetchItems.mockResolvedValue(items);
 
@@ -247,7 +261,7 @@ describe('getStories', () => {
     });
 
     it('omits text when item has no text field', async () => {
-      const items = [makeItem({ id: 1, text: undefined })];
+      const items = [makeItem({ id: 1 })];
       mockService.fetchFeed.mockResolvedValue([1]);
       mockService.fetchItems.mockResolvedValue(items);
 
@@ -291,7 +305,7 @@ describe('getStories', () => {
         feed: 'top',
       });
 
-      const text = blocks[0]!.text;
+      const text = firstText(blocks);
       // Falls back to type label when title is unknown.
       expect(text).toContain('[1] [story]');
       // Only id is rendered in meta — no fabricated "0 pts" or "by ".
@@ -335,7 +349,7 @@ describe('getStories', () => {
       });
 
       expect(blocks).toHaveLength(1);
-      const text = blocks[0]!.text;
+      const text = firstText(blocks);
       expect(text).toContain('## top stories');
       expect(text).toContain('[1] Test Story (example.com)');
       expect(text).toContain('200 pts | by author | 55 comments');
@@ -359,7 +373,7 @@ describe('getStories', () => {
         feed: 'ask',
       });
 
-      const text = blocks[0]!.text;
+      const text = firstText(blocks);
       expect(text).toContain('[1] Ask HN: Best Editor?\n');
       expect(text).not.toMatch(/\(\)/);
     });
@@ -391,7 +405,7 @@ describe('getStories', () => {
         feed: 'new',
       });
 
-      const text = blocks[0]!.text;
+      const text = firstText(blocks);
       expect(text).toContain('[1] First on Page');
       expect(text).toContain('[2] Second on Page');
     });
@@ -411,7 +425,7 @@ describe('getStories', () => {
         feed: 'jobs',
       });
 
-      const text = blocks[0]!.text;
+      const text = firstText(blocks);
       expect(text).toContain('[1] Job Post');
       expect(text).toContain('10 pts | by employer');
       expect(text).toContain('id:1');
@@ -434,7 +448,7 @@ describe('getStories', () => {
         feed: 'ask',
       });
 
-      const text = blocks[0]!.text;
+      const text = firstText(blocks);
       expect(text).toContain('[1] Ask HN: Something');
       expect(text).toContain('75 pts | by curious | 30 comments');
       expect(text).not.toMatch(/\nhttps?:/);
