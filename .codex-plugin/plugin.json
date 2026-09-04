@@ -1,6 +1,6 @@
 {
   "name": "hn-mcp-server",
-  "version": "0.5.14",
+  "version": "0.5.15",
   "description": "Browse Hacker News feeds, threads, and user profiles with full-text search via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "Casey Hand",

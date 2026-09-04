@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.15](changelog/0.5.x/0.5.15.md) — 2026-09-04 · 🛡️ Security
+
+Cleared 6 transitive advisories in fast-uri and qs via overrides; adopted mcp-ts-core's retried upstream 500s and cancellation classification
+
 ## [0.5.14](changelog/0.5.x/0.5.14.md) — 2026-08-24
 
 MCP SDK v2 compatibility, explicit stateless HTTP serving, and current framework-managed tooling
