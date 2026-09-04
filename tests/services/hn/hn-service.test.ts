@@ -334,6 +334,33 @@ describe('HnService.fetchItems', () => {
     fetchItemSpy.mockRestore();
   });
 
+  it('rethrows a caller cancellation instead of absorbing it as a per-item failure', async () => {
+    /**
+     * A caller that went away is not a bad item: the batch must reject rather
+     * than fill a null slot and keep fetching for nobody. Concurrency 1 makes
+     * the abort-then-stop ordering deterministic.
+     */
+    const svc = new HnService(1);
+    const ctx = createMockContext();
+    const warnSpy = vi.spyOn(ctx.log, 'warning');
+    const attempted: number[] = [];
+    const fetchItemSpy = vi.spyOn(svc, 'fetchItem').mockImplementation(async (id: number) => {
+      attempted.push(id);
+      if (id === 2) {
+        throw new McpError(JsonRpcErrorCode.RequestCancelled, 'client went away');
+      }
+      return { id, type: 'story' as const };
+    });
+
+    await expect(svc.fetchItems([1, 2, 3], ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RequestCancelled,
+    });
+    expect(attempted).toEqual([1, 2]); // id=3 is never spent on an absent caller
+    expect(warnSpy).not.toHaveBeenCalled(); // not logged as an item failure
+    warnSpy.mockRestore();
+    fetchItemSpy.mockRestore();
+  });
+
   it('preserves input order regardless of which worker resolves first', async () => {
     /** Simulate id=1 being slow by resolving after id=2 in a concurrency=1 setup. */
     const svc = new HnService(1);
@@ -716,14 +743,22 @@ describe('HnService — upstream HTTP failures', () => {
     });
   });
 
-  it('classifies a 500 as upstream_unavailable rather than an internal error', async () => {
+  it('classifies a 500 as upstream_unavailable and retries it before giving up', async () => {
+    /**
+     * A 500 is transient, so the call only settles once retries are exhausted —
+     * fake timers drive the backoff rather than waiting it out in real time.
+     */
+    vi.useFakeTimers();
     stubStatus(500, 'boom', 'Internal Server Error');
 
-    const err = await failure(new HnService(1).fetchItem(8863, createMockContext()));
+    const pending = failure(new HnService(1).fetchItem(8863, createMockContext()));
+    await vi.advanceTimersByTimeAsync(120_000);
+    const err = await pending;
 
     /** InternalError means this server faulted; an upstream 500 did not. */
     expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect(err.data).toMatchObject({ reason: 'upstream_unavailable', status: 500 });
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
   });
 
   it('classifies a 429 as upstream_rate_limited after retries are exhausted', async () => {

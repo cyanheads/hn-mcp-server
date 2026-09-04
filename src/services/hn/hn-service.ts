@@ -6,6 +6,7 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import {
   invalidParams,
+  JsonRpcErrorCode,
   McpError,
   rateLimited,
   serviceUnavailable,
@@ -152,10 +153,9 @@ function parseJsonBody<T>(text: string, upstream: string): T {
  * The code travels with the reason rather than being taken from the framework's
  * finer-grained status ladder, so each reason surfaces exactly the code its
  * tools declare in `errors[]`. That ladder would otherwise split one reason
- * across several codes — HN answers an unknown path with 401, and a 500 or 504
- * would arrive as `InternalError` or `Timeout`, blurring the two codes that
- * mean "this server broke" and "this server's own fetch timed out". The exact
- * status stays on `data.status`.
+ * across several codes — HN answers an unknown path with 401, and a 504 would
+ * arrive as `Timeout`, blurring "this server's own fetch timed out" with an
+ * upstream that is merely down. The exact status stays on `data.status`.
  */
 function upstreamFailureFor(upstream: string, status: number, cause: McpError): McpError {
   if (status === 429) {
@@ -288,7 +288,9 @@ export class HnService {
   /**
    * Batch-fetch items with concurrency limiting. Preserves input order.
    * Per-item failures after exhausted retries are logged and yield `null`
-   * so a single bad item does not fail the whole batch.
+   * so a single bad item does not fail the whole batch. A caller abort is the
+   * one failure that is not per-item: it rethrows, ending the batch instead of
+   * spending the rest of the id list on fetches nobody is waiting for.
    */
   async fetchItems(ids: number[], ctx: Context): Promise<(HnItem | null)[]> {
     if (ids.length === 0) return [];
@@ -304,6 +306,7 @@ export class HnService {
         try {
           results[i] = await this.fetchItem(id, ctx);
         } catch (err) {
+          if (err instanceof McpError && err.code === JsonRpcErrorCode.RequestCancelled) throw err;
           ctx.log.warning('Batch item fetch failed after retries', {
             id,
             error: err instanceof Error ? err.message : String(err),
