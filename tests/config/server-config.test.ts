@@ -66,4 +66,23 @@ describe('getServerConfig', () => {
     const getServerConfig = await loadConfig();
     expect(() => getServerConfig()).toThrow();
   });
+
+  it('treats an empty HN_CONCURRENCY_LIMIT as unset', async () => {
+    process.env.HN_CONCURRENCY_LIMIT = '';
+    const getServerConfig = await loadConfig();
+    expect(getServerConfig().concurrencyLimit).toBe(10);
+  });
+
+  it('treats an unsubstituted host placeholder as unset', async () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal placeholder a host forwards is the input under test
+    process.env.HN_CONCURRENCY_LIMIT = '${user_config.HN_CONCURRENCY_LIMIT}';
+    const getServerConfig = await loadConfig();
+    expect(getServerConfig().concurrencyLimit).toBe(10);
+  });
+
+  it('names the env var in a validation failure', async () => {
+    process.env.HN_CONCURRENCY_LIMIT = '51';
+    const getServerConfig = await loadConfig();
+    expect(() => getServerConfig()).toThrow(/HN_CONCURRENCY_LIMIT/);
+  });
 });

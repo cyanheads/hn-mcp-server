@@ -4,6 +4,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
   concurrencyLimit: z.coerce
@@ -18,8 +19,8 @@ const ServerConfigSchema = z.object({
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 
 export function getServerConfig() {
-  _config ??= ServerConfigSchema.parse({
-    concurrencyLimit: process.env.HN_CONCURRENCY_LIMIT,
+  _config ??= parseEnvConfig(ServerConfigSchema, {
+    concurrencyLimit: 'HN_CONCURRENCY_LIMIT',
   });
   return _config;
 }
