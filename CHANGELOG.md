@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.16](changelog/0.5.x/0.5.16.md) — 2026-09-13
+
+Adopted mcp-ts-core ^0.13.0 (blank/unsubstituted env vars now read as unset, dev skills moved to framework-skills/) plus a matching HN_CONCURRENCY_LIMIT fix and routine dependency bumps
+
 ## [0.5.15](changelog/0.5.x/0.5.15.md) — 2026-09-04 · 🛡️ Security
 
 Cleared 6 transitive advisories in fast-uri and qs via overrides; adopted mcp-ts-core's retried upstream 500s and cancellation classification
