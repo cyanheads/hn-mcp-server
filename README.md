@@ -27,76 +27,73 @@
 
 ---
 
-## Tools
+## Overview
 
-Four read-only tools for accessing Hacker News data:
+An MCP server over the Hacker News Firebase API and Algolia Search API. Browse ranked feeds, read full comment threads, look up user profiles, and search stories and comments by type, author, date, or score. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
-| Tool Name | Description |
-|:----------|:------------|
-| `hn_get_stories` | Fetch stories from an HN feed (top, new, best, ask, show, jobs) with pagination. |
-| `hn_get_thread` | Get an item and its comment tree as a threaded discussion with depth/count controls. |
-| `hn_get_user` | Fetch a user profile with karma, about, and optionally a page of their submissions. |
-| `hn_search_content` | Search stories and comments via Algolia with type, author, date, and score filters. |
+### Tools
 
-### `hn_get_stories`
+| Tool | Description |
+|:---|:---|
+| `hn_get_stories` | Fetch stories from an HN feed (top, new, best, ask, show, jobs), with title, URL, score, author, and comment count |
+| `hn_get_thread` | Get an item and its comment tree as a threaded discussion, with depth and comment-count controls |
+| `hn_get_user` | Fetch a user profile with karma, about, and optionally a page of resolved submissions |
+| `hn_search_content` | Search stories and comments via Algolia, filterable by type, author, date range, and minimum points |
 
-Fetch stories from any HN feed with pagination support.
+## Capability reference
 
-- Six feed types: `top`, `new`, `best`, `ask`, `show`, `jobs`
-- Configurable count (1–100, default 30) and offset for pagination
-- Returns enriched story objects with title, URL, score, author, comment count, and body text
+### `hn_get_stories` <sub>tool</sub>
 
----
-
-### `hn_get_thread`
-
-Retrieve an item and its full comment tree via ranked breadth-first traversal.
-
-- Depth control (0–10, default 3) — depth 0 doubles as a single-item lookup
-- Comment limit (1–200, default 50) caps total comments across all levels
-- Breadth-first traversal preserves HN's ranking order
-- Flat comment list with `depth`/`parentId` for tree reconstruction
+- Six feed types: `top`, `new`, `best`, `ask`, `show`, `jobs`; `count` (1–100, default 30) and `offset` for pagination
+- Returns id, type, title, url, domain, score, author, timestamp, comment count, and body text — each field omitted (not null) when HN doesn't provide it
+- Enrichment reports `total`, `offset`, `hasMore`, and a `notice` explaining empty pages (empty feed, offset past end, or every item on the page deleted/flagged)
 
 ---
 
-### `hn_get_user`
+### `hn_get_thread` <sub>tool</sub>
 
-Fetch a user profile with optional submission resolution.
-
-- Profile includes karma, creation date, and about text (HTML stripped)
-- Optionally resolves submissions into full items, up to 50 per page
-- `submissionOffset` pages through a long history; enrichment echoes the applied offset and the offset to request next
-- Submission resolution filters out dead/deleted items
+- `itemId` plus `depth` (0–10, default 3; 0 returns the item with no comments) and `maxComments` (1–200, default 50) capping the total across all levels
+- Breadth-first traversal ranked like HN — top-ranked top-level comments resolve first, replies fill in only after the level above is exhausted
+- Flat comment list carries `depth`/`parentId` for tree reconstruction, plus `childCount` and an `isOp` flag when the comment author matches the root item's author
+- `notice` reports deleted/dead comments omitted during traversal and, when `totalLoaded` is below `totalAvailable`, the hint to raise `maxComments`/`depth`
 
 ---
 
-### `hn_search_content`
+### `hn_get_user` <sub>tool</sub>
 
-Full-text search via the Algolia HN Search API.
+- `username` is case-sensitive and trimmed; `includeSubmissions` (default false) resolves recent submissions, with `submissionCount` (1–50, default 10) and `submissionOffset` paging through a long history
+- Profile includes karma, creation date, and about text (HTML stripped); submissions filter out dead/deleted items
+- Enrichment echoes `submissionOffset` and the offset to send next, or a notice when the requested offset is past the end of the history
 
-- Filter by content type: `story`, `comment`, `ask_hn`, `show_hn`, `front_page`
-- Filter by author, date range (ISO 8601), and minimum points
-- Sort by relevance or date
-- Pagination with page/count controls
+---
+
+### `hn_search_content` <sub>tool</sub>
+
+- Free-text `query` plus `tags` (`story`/`comment`/`ask_hn`/`show_hn`/`front_page`), `author`, `dateRange` (ISO 8601), and `minPoints` filters; `sort` by relevance or date; `count` (1–50, default 30) and `page` for pagination
 - `view: "compact"` drops the two body-text fields (`text`, `highlights.text`), which otherwise repeat a long comment twice per hit — pass a hit id to `hn_get_thread` to read the body
+- Highlight metadata (`highlights.title`, `highlights.text`, `matchedWords`) shows which terms matched and where
+- Enrichment reports `totalHits`, `page`, and the actual reachable `totalPages` — not derived from `totalHits`, since broad queries report far more hits than Algolia will serve
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
-
-- Declarative tool definitions — single file per tool, framework handles registration and validation
-- Unified error handling across all tools
-- Structured logging with request correlation
-- Runs locally (stdio/HTTP) from the same codebase
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
 HN-specific:
 
-- Server-level `instructions` orientation forwarded to LLM clients on `initialize` — item types, ID reuse across tools, case-sensitive usernames, and field sparsity expectations
-- Concurrent batch fetching with configurable parallelism for item resolution
-- HTML entity decoding and tag stripping with code block and link preservation
-- No API keys required — HN APIs are public
+- Two upstream APIs: HN's Firebase API for feeds, items, and users; Algolia's HN Search API for full-text search
+- Concurrent batch fetching with configurable parallelism for item resolution (`HN_CONCURRENCY_LIMIT`)
+- HTML entity decoding and tag stripping, preserving code blocks and links
+- Server-level `instructions` forwarded to LLM clients on `initialize` — item types, ID reuse across tools, case-sensitive usernames, field sparsity
+- No API keys required — both upstream APIs are public
 
-## Getting Started
+Agent-friendly output:
+
+- Graceful partial failure — `hn_get_thread` counts deleted and dead comments dropped during traversal and surfaces the count in `notice` rather than silently shrinking the result; `hn_get_stories` and `hn_get_user` filter dead/deleted items the same way
+- Discriminated output contracts — typed error reasons (`item_not_found`, `upstream_rate_limited`, `upstream_html`, …) with per-reason recovery text, and a `depth`/`parentId` pair on every comment so callers reconstruct the tree without guessing nesting
+- Pagination provenance — every paged tool echoes the offset it used (`offset`, `submissionOffset`, `page`) plus the exact next-offset value in `notice`, so an agent can resume a listing without recomputing state
+- Response shaping — HTML stripping, URL normalization, and domain extraction remove upstream markup noise; `hn_search_content`'s `view: "compact"` drops the two body-text fields that otherwise duplicate a hit's full text
+
+## Getting started
 
 ### Public Hosted Instance
 
@@ -195,47 +192,60 @@ All configuration is via environment variables. No API keys required — HN APIs
 | `MCP_LOG_LEVEL` | Log level: `debug`, `info`, `notice`, `warning`, `error`. | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
 
-## Running the Server
+See [`.env.example`](./.env.example) for the full list of optional overrides.
 
-### Local Development
+## Running the server
 
-```sh
-MCP_TRANSPORT_TYPE=stdio bun --watch src/index.ts   # Dev mode (stdio, auto-reload)
-MCP_TRANSPORT_TYPE=http bun --watch src/index.ts    # Dev mode (HTTP, auto-reload)
-bun run test                                         # Run test suite
-bun run devcheck                                     # Lint + format + typecheck + audit
-```
+### Local development
 
-### Production
+- **Dev mode (auto-reload):**
 
-```sh
-bun run build
-bun run start:stdio     # or start:http
-```
+  ```sh
+  MCP_TRANSPORT_TYPE=stdio bun --watch src/index.ts   # stdio
+  MCP_TRANSPORT_TYPE=http bun --watch src/index.ts    # HTTP
+  ```
+
+- **Build and run:**
+
+  ```sh
+  bun run rebuild
+  bun run start:stdio   # or start:http
+  ```
+
+- **Run checks and tests:**
+
+  ```sh
+  bun run devcheck   # Lint, format, typecheck, security
+  bun run test       # Vitest test suite
+  ```
 
 ### Docker
 
 ```sh
 docker build -t hn-mcp-server .
-docker run -p 3010:3010 hn-mcp-server
+docker run --rm -p 3010:3010 hn-mcp-server
 ```
 
-## Project Structure
+The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/hn-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
+
+## Project structure
 
 | Directory | Purpose |
 |:----------|:--------|
-| `src/index.ts` | `createApp()` entry point. |
-| `src/config/` | Server-specific env var parsing with Zod. |
-| `src/services/hn/` | HN Firebase + Algolia API client and domain types. |
+| `src/index.ts` | `createApp()` entry point — registers tools and inits the HN service. |
+| `src/config/` | Server-specific environment variable parsing and validation with Zod. |
 | `src/mcp-server/tools/definitions/` | Tool definitions (`*.tool.ts`). |
+| `src/services/hn/` | HN Firebase + Algolia API client and domain types. |
+| `tests/` | Unit and integration tests mirroring `src/`. |
 
-## Development Guide
+## Development guide
 
 See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rules. The short version:
 
 - Handlers throw, framework catches — no `try/catch` in tool logic
 - Use `ctx.log` for request-scoped logging
 - All tools are read-only — no auth scopes required
+- Wrap external API calls: validate raw → normalize to domain type → return output schema; never fabricate missing fields
 
 ## Contributing
 
