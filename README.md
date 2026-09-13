@@ -29,7 +29,7 @@
 
 ## Overview
 
-An MCP server over the Hacker News Firebase API and Algolia Search API. Browse ranked feeds, read full comment threads, look up user profiles, and search stories and comments by type, author, date, or score. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Search API. Browse ranked feeds, read full comment threads, look up user profiles, and search stories and comments by type, author, date, or score. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
