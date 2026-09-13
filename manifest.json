@@ -24,8 +24,8 @@
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
         "NODE_ENV": "production",
-        "HN_CONCURRENCY_LIMIT": "${HN_CONCURRENCY_LIMIT}",
-        "MCP_LOG_LEVEL": "${MCP_LOG_LEVEL}"
+        "HN_CONCURRENCY_LIMIT": "${user_config.HN_CONCURRENCY_LIMIT}",
+        "MCP_LOG_LEVEL": "${user_config.MCP_LOG_LEVEL}"
       }
     }
   },

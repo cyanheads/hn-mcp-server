@@ -1,4 +1,5 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "hn-mcp-server",
   "version": "0.5.15",
   "description": "Browse Hacker News feeds, threads, and user profiles with full-text search via MCP. STDIO or Streamable HTTP.",
@@ -10,6 +11,7 @@
   "homepage": "https://github.com/cyanheads/hn-mcp-server#readme",
   "repository": "https://github.com/cyanheads/hn-mcp-server",
   "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "hacker-news", "hn", "firebase", "algolia"],
   "mcpServers": {
     "hn-mcp-server": {
       "command": "npx",
