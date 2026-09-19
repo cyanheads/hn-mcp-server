@@ -60,6 +60,7 @@ export const searchHn = tool('hn_search_content', {
       code: JsonRpcErrorCode.InvalidParams,
       when: 'Algolia answered with a 4xx status other than 429 — it rejected the request as built.',
       recovery: 'Check the input values against this schema; the same input fails identically.',
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_rate_limited',
@@ -67,6 +68,7 @@ export const searchHn = tool('hn_search_content', {
       when: 'Algolia answered with HTTP 429.',
       recovery: 'Wait several seconds before retrying, and call this tool less often.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_unavailable',
@@ -74,6 +76,7 @@ export const searchHn = tool('hn_search_content', {
       when: 'Algolia answered with a 5xx status.',
       recovery: 'Retry after a short delay; no input change helps while the upstream is down.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_html',
@@ -81,6 +84,7 @@ export const searchHn = tool('hn_search_content', {
       when: 'Algolia served an HTML error page with a 200 status, which it does under rate limiting or maintenance.',
       recovery: 'Retry after a brief delay; the upstream is throttling or in maintenance.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_malformed',
@@ -88,6 +92,7 @@ export const searchHn = tool('hn_search_content', {
       when: 'Algolia answered with a 200 status and a body that is not JSON.',
       recovery: 'Retry after a brief delay; no input change helps while the upstream serves this.',
       retryable: true,
+      thrownBy: 'service',
     },
   ],
   input: z.object({

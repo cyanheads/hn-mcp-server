@@ -22,12 +22,14 @@ export const getUser = tool('hn_get_user', {
       code: JsonRpcErrorCode.NotFound,
       when: 'HN reports no user account exists for the given username.',
       recovery: 'Verify the username spelling — HN usernames are case-sensitive.',
+      severity: 'notice',
     },
     {
       reason: 'upstream_rejected',
       code: JsonRpcErrorCode.InvalidParams,
       when: 'The HN API answered with a 4xx status other than 429 — it rejected the request as built, which a username outside HN’s charset can cause.',
       recovery: 'Check the input values against this schema; the same input fails identically.',
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_rate_limited',
@@ -35,6 +37,7 @@ export const getUser = tool('hn_get_user', {
       when: 'The HN API answered with HTTP 429.',
       recovery: 'Wait several seconds before retrying, and call this tool less often.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_unavailable',
@@ -42,6 +45,7 @@ export const getUser = tool('hn_get_user', {
       when: 'The HN API answered with a 5xx status.',
       recovery: 'Retry after a short delay; no input change helps while the upstream is down.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_html',
@@ -49,6 +53,7 @@ export const getUser = tool('hn_get_user', {
       when: 'The HN API served an HTML error page with a 200 status, which it does under rate limiting or maintenance.',
       recovery: 'Retry after a brief delay; the upstream is throttling or in maintenance.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_malformed',
@@ -56,6 +61,7 @@ export const getUser = tool('hn_get_user', {
       when: 'The HN API answered with a 200 status and a body that is not JSON.',
       recovery: 'Retry after a brief delay; no input change helps while the upstream serves this.',
       retryable: true,
+      thrownBy: 'service',
     },
   ],
   input: z.object({
