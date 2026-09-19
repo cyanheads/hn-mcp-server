@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.17](changelog/0.5.x/0.5.17.md) — 2026-09-19
+
+Adopted mcp-ts-core ^0.13.6: the server declares stateless session mode in source, argument rejections carry a reason and a schema-derived recovery hint, and tool errors close with their reason and retryable status.
+
 ## [0.5.16](changelog/0.5.x/0.5.16.md) — 2026-09-13
 
 Adopted mcp-ts-core ^0.13.0 (blank/unsubstituted env vars now read as unset, dev skills moved to framework-skills/) plus a matching HN_CONCURRENCY_LIMIT fix and routine dependency bumps
