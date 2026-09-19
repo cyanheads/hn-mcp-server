@@ -188,7 +188,7 @@ All configuration is via environment variables. No API keys required — HN APIs
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_HTTP_HOST` | HTTP server host. | `localhost` |
-| `MCP_SESSION_MODE` | HTTP session handling: `auto`, `stateful`, or `stateless`. `auto` resolves to `stateful`. The published Docker image and `.env.example` pin `stateless`. | `auto` |
+| `MCP_SESSION_MODE` | HTTP session handling: `stateful`, `stateless`, or `auto` (resolves to `stateful`). The server declares `stateless` in source, and the published Docker image and `.env.example` set it too; a meaningful env value still overrides. | `stateless` |
 | `MCP_LOG_LEVEL` | Log level: `debug`, `info`, `notice`, `warning`, `error`. | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
 
