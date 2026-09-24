@@ -9,7 +9,7 @@
 | `hn_get_stories` | Fetch stories from an HN feed (top, new, best, ask, show, jobs). Returns enriched story objects with title, URL, score, author, and comment count. | `feed` (enum), `count`, `offset` | `readOnlyHint` |
 | `hn_get_thread` | Get an item and its comment tree as a threaded discussion. Resolves child comments by ranked breadth-first traversal. With depth 0, returns just the item — doubles as an item lookup. | `itemId`, `depth`, `maxComments` | `readOnlyHint` |
 | `hn_get_user` | Get an HN user profile with karma, about, and optionally one page of their submissions resolved into full items. | `username`, `includeSubmissions`, `submissionCount`, `submissionOffset` | `readOnlyHint` |
-| `hn_search_content` | Search Hacker News stories and comments via Algolia. Supports filtering by content type, author, date range, and minimum points. | `query`, `tags`, `author`, `sort`, `dateRange`, `minPoints`, `count`, `page`, `view` | `readOnlyHint` |
+| `hn_search_content` | Search Hacker News stories, comments, polls, and jobs via Algolia — by keyword, by filters alone, or both. Supports filtering by content type, author, parent story, date range, and minimum points. | `query`, `tags`, `author`, `storyId`, `sort`, `dateRange`, `minPoints`, `count`, `page`, `view` | `readOnlyHint` |
 
 ### Resources
 
@@ -85,7 +85,7 @@ Browse curated HN feeds. Fetches the feed's ID array, slices by offset/count, th
 | `stories[].text` | string? | Body text for Ask HN / text posts. |
 | `feed` | string | Which feed was fetched. |
 
-**Enrichment**: `total`, `offset`, `hasMore`, plus `truncated` / `shown` / `cap` when capped, and `notice` when the page came back empty (empty feed, offset past the end, or every item on the page dead/deleted).
+**Enrichment**: `total`, `offset`, `hasMore`, plus `truncated` / `shown` / `cap` only while more stories remain (`hasMore`), with a `notice` naming the next `offset` and, below the 100 maximum, suggesting a larger `count`. The last page carries none of them. An empty page gets a `notice` saying why (empty feed, offset past the end, or every item on the page dead/deleted).
 
 **Errors**: `upstream_rejected`, `upstream_rate_limited`, `upstream_unavailable`, `upstream_html`, `upstream_malformed`.
 
@@ -115,7 +115,7 @@ The highest-value tool. Fetches an item and resolves its comment tree, handling 
 | `comments[].childCount` | number | Direct children — may exceed what was resolved. |
 | `comments[].isOp` | `true`? | Present only when the comment author matches the root author. |
 
-**Enrichment**: `totalLoaded`, `totalAvailable` (only when HN reports `descendants` — comment and job roots omit it), `truncated` / `shown` / `cap` when the list hit `maxComments`, and `notice` carrying dropped deleted/dead counts and a raise-the-cap hint.
+**Enrichment**: `totalLoaded`, `totalAvailable` (only when HN reports `descendants` — comment and job roots omit it), `truncated` / `shown` / `cap` when `maxComments` stopped the traversal with comments left (not when `totalLoaded` has reached `totalAvailable`; kept whenever the cap is hit and `totalAvailable` is absent), and `notice` carrying dropped deleted/dead counts plus either how to get past the cap (a larger `maxComments`, or a comment id as `itemId` for its subtree) or a raise-`maxComments`-or-`depth` hint.
 
 **Errors**: `item_not_found`, plus the five upstream reasons.
 
@@ -149,18 +149,19 @@ Fetches an HN user profile and optionally resolves one page of their submissions
 
 ### `hn_search_content`
 
-Wraps Algolia's HN Search API. Supports relevance-sorted and date-sorted search with tag and numeric filters.
+Wraps Algolia's HN Search API. Supports relevance-sorted and date-sorted search with tag and numeric filters, by keyword, by filters alone, or both.
 
 **Input**
 
 | Field | Type | Default | Notes |
 |:------|:-----|:--------|:------|
-| `query` | string | — | Required, trimmed. Algolia handles stemming and relevance. |
-| `tags` | enum `story \| comment \| ask_hn \| show_hn \| front_page` | — | Single tag. Omit to search all types. |
+| `query` | string? | — | Trimmed; a supplied blank is rejected at the schema. Omit for a filter-only search, which needs at least one of `tags`, `author`, `storyId`, `minPoints`, or a `dateRange` bound — `sort`, `count`, `page`, and `view` don't count. Algolia handles stemming and relevance. |
+| `tags` | enum `story \| comment \| poll \| job \| ask_hn \| show_hn \| front_page` | — | Single tag. Omit to search all types. `pollopt` is left out: Algolia's poll-option records carry no text and no parent poll. |
 | `author` | string | — | Omit rather than passing a blank string. |
+| `storyId` | positive integer | — | Sent as a `story_<id>` tag, ANDed with the other tags. Takes a story or poll root id (`hits[].storyId` or the `hn_get_thread` root); a comment id matches nothing. |
 | `sort` | enum `relevance \| date` | `relevance` | |
-| `dateRange` | `{ start?, end? }` | — | ISO 8601 strings, converted to `created_at_i` numeric filters. |
-| `minPoints` | integer ≥ 0 | — | |
+| `dateRange` | `{ start?, end? }` | — | ISO 8601 bounds (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or `YYYY-MM-DDThh:mm[:ss[.sss]]` with optional `Z` / `±hh:mm`), advertised as a `pattern`; calendar-invalid values are rejected at the schema. Converted to `created_at_i>start` and `created_at_i<end`, so both bounds are exclusive; date-only and offset-less values read as UTC. At least one bound, and `start` before `end`. |
+| `minPoints` | integer ≥ 0 | — | Stories and polls only — Algolia stores `points: null` on comments and jobs, so any `points>=N` filter drops them. Rejected with `tags: "comment"` or `"job"`. |
 | `count` | integer 1–50 | `30` | |
 | `page` | integer ≥ 0 | `0` | |
 | `view` | enum `full \| compact` | `full` | `compact` omits `text` and `highlights.text`. |
@@ -181,11 +182,13 @@ Wraps Algolia's HN Search API. Supports relevance-sorted and date-sorted search 
 | `hits[].storyId` | number? | Equals `id` for story hits. |
 | `hits[].text` | string? | Body text, HTML stripped. Always absent under `view: "compact"`. |
 | `hits[].highlights` | object? | `title`, `text` (both `<em>`-marked snippets), and `matchedWords`. `text` is always absent under `view: "compact"`. |
-| `query` | string | The query that was searched. |
+| `query` | string? | The query that was searched. Absent for a filter-only search. |
 
-**Enrichment**: `totalHits`, `page`, `totalPages`, plus `truncated` / `shown` / `cap` when the hit list was capped and `notice` naming the applied filters when a page comes back empty.
+**Enrichment**: `totalHits`, `page`, `totalPages`, plus `truncated` / `shown` / `cap` only while more pages remain (`page + 1 < totalPages`), with a `notice` naming the next `page` and, below the 50 maximum, suggesting a larger `count`. The last page Algolia serves carries none of them. An empty page gets a `notice`: past the end it names the last valid page (`totalPages - 1`), or `page: 0` when that is unknown; an empty first page names the filters to relax, and the `storyId` source when one was set.
 
-**Errors**: the five upstream reasons.
+Algolia serves at most 1,000 hits per search, and `nbPages` already reflects that ceiling. Below it, an out-of-range page keeps the real `nbHits` / `nbPages` with zero hits; past it, Algolia answers `nbHits: 0`, `nbPages: 0`, which is why the last valid page can be unknown.
+
+**Errors**: `missing_query_or_filter` (no query and no filter), `invalid_date_range` (a `dateRange` with no bound, or `start` not before `end`), `min_points_unscored_type` (`minPoints` with `tags: "comment"` or `"job"`), plus the five upstream reasons. The three input checks run in the handler, before any upstream call, so each carries its declared reason and recovery hint; a schema refinement would surface only as `invalid_arguments`. Only an omitted `query` enables a filter-only search: a supplied blank still fails at the schema, following the rule that a supplied-but-empty value is rejected rather than read as omitted. A bare `dateRange: {}` fails as `invalid_date_range`, not `missing_query_or_filter`.
 
 #### Result projection
 
@@ -273,7 +276,7 @@ Each tool provides a `format` function that shapes output for LLM readability:
 - `hn_get_stories` — ranked list: rank, title, domain, id/type/score/author/comment count/date, URL, body text
 - `hn_get_thread` — root item summary, then the comment list indented by depth, with author, id/depth/parent/reply count/date, and an OP marker
 - `hn_get_user` — profile summary, then a submission list with id, type, score, comment count, date, URL, and body text
-- `hn_search_content` — per-hit heading (story title + domain, or the parent story for comment hits), metadata line, URL, body text, and a `> match —` footer carrying the highlight snippets and matched terms
+- `hn_search_content` — a heading quoting the query (or marking a filter-only search), then per-hit heading (story title + domain, or the parent story for comment hits), metadata line, URL, body text, and a `> match —` footer carrying the highlight snippets and matched terms
 
 Format functions produce `text` content blocks. They must render everything the LLM needs: different clients forward different surfaces, so `content[]` and `structuredContent` have to carry the same data.
 

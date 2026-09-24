@@ -29,7 +29,7 @@
 
 ## Overview
 
-Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Search API. Browse ranked feeds, read full comment threads, look up user profiles, and search stories and comments by type, author, date, or score. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Search API. Browse ranked feeds, read full comment threads, look up user profiles, and search stories, comments, polls, and jobs by keyword or by type, author, parent story, date, or score. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
@@ -38,7 +38,7 @@ Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Searc
 | `hn_get_stories` | Fetch stories from an HN feed (top, new, best, ask, show, jobs), with title, URL, score, author, and comment count |
 | `hn_get_thread` | Get an item and its comment tree as a threaded discussion, with depth and comment-count controls |
 | `hn_get_user` | Fetch a user profile with karma, about, and optionally a page of resolved submissions |
-| `hn_search_content` | Search stories and comments via Algolia, filterable by type, author, date range, and minimum points |
+| `hn_search_content` | Search stories, comments, polls, and jobs via Algolia by keyword, by filters alone, or both — type, author, parent story, date range, and minimum points |
 
 ## Capability reference
 
@@ -46,7 +46,7 @@ Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Searc
 
 - Six feed types: `top`, `new`, `best`, `ask`, `show`, `jobs`; `count` (1–100, default 30) and `offset` for pagination
 - Returns id, type, title, url, domain, score, author, timestamp, comment count, and body text — each field omitted (not null) when HN doesn't provide it
-- Enrichment reports `total`, `offset`, `hasMore`, and a `notice` explaining empty pages (empty feed, offset past end, or every item on the page deleted/flagged)
+- Enrichment reports `total`, `offset`, and `hasMore`; while more stories remain, `truncated` is set and `notice` names the next `offset`, and a `notice` explains empty pages (empty feed, offset past end, or every item on the page deleted/flagged). The last page carries no truncation
 
 ---
 
@@ -55,7 +55,7 @@ Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Searc
 - `itemId` plus `depth` (0–10, default 3; 0 returns the item with no comments) and `maxComments` (1–200, default 50) capping the total across all levels
 - Breadth-first traversal ranked like HN — top-ranked top-level comments resolve first, replies fill in only after the level above is exhausted
 - Flat comment list carries `depth`/`parentId` for tree reconstruction, plus `childCount` and an `isOp` flag when the comment author matches the root item's author
-- `notice` reports deleted/dead comments omitted during traversal and, when `totalLoaded` is below `totalAvailable`, the hint to raise `maxComments`/`depth`
+- `notice` reports deleted/dead comments omitted during traversal and, when `totalLoaded` is below `totalAvailable`, the hint to raise `maxComments`/`depth`; `truncated` is set only when `maxComments` stopped the traversal with comments left, not when a thread loads in full at exactly the cap
 
 ---
 
@@ -69,10 +69,13 @@ Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Searc
 
 ### `hn_search_content` <sub>tool</sub>
 
-- Free-text `query` plus `tags` (`story`/`comment`/`ask_hn`/`show_hn`/`front_page`), `author`, `dateRange` (ISO 8601), and `minPoints` filters; `sort` by relevance or date; `count` (1–50, default 30) and `page` for pagination
+- Free-text `query` plus `tags` (`story`/`comment`/`poll`/`job`/`ask_hn`/`show_hn`/`front_page`), `author`, `storyId`, `dateRange`, and `minPoints` filters; `sort` by relevance or date; `count` (1–50, default 30) and `page` for pagination
+- `query` is optional when a filter is set — list Ask HN, Show HN, polls, or jobs on their own, or pass a story's `storyId` with `tags: "comment"` to search within one thread. No query and no filter fails with `missing_query_or_filter`
+- `dateRange` bounds take ISO 8601 (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or a date-time with optional offset), read as UTC and both exclusive; an empty or out-of-order range fails with `invalid_date_range`
+- `minPoints` applies to stories and polls — comments and jobs carry no points, so pairing it with `tags: "comment"` or `"job"` fails with `min_points_unscored_type`
 - `view: "compact"` drops the two body-text fields (`text`, `highlights.text`), which otherwise repeat a long comment twice per hit — pass a hit id to `hn_get_thread` to read the body
 - Highlight metadata (`highlights.title`, `highlights.text`, `matchedWords`) shows which terms matched and where
-- Enrichment reports `totalHits`, `page`, and the actual reachable `totalPages` — not derived from `totalHits`, since broad queries report far more hits than Algolia will serve
+- Enrichment reports `totalHits`, `page`, and the actual reachable `totalPages` — not derived from `totalHits`, since broad queries report far more hits than Algolia will serve. While more pages remain, `truncated` is set and `notice` names the next `page`; a page past the end gets a notice naming the last valid page (or `page: 0` past Algolia's 1,000-hit ceiling)
 
 ## Features
 
