@@ -1,6 +1,6 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-09-19 15:55:52
+Generated on: 2026-09-24 01:24:17
 
 ```text
 hn-mcp-server/
@@ -157,6 +157,8 @@ hn-mcp-server/
 ├── tests/
 │   ├── config/
 │   │   └── server-config.test.ts
+│   ├── helpers/
+│   │   └── hn-api-stub.ts
 │   ├── services/
 │   │   └── hn/
 │   │       └── hn-service.test.ts

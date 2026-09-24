@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.19](changelog/0.5.x/0.5.19.md) — 2026-09-23
+
+hn_get_thread gains a resumable cursor, root relationships, and poll options; hn_get_stories/hn_get_thread/hn_get_user report failed item fetches instead of dropping them, and a 429's Retry-After now reaches the recovery hint.
+
 ## [0.5.18](changelog/0.5.x/0.5.18.md) — 2026-09-23
 
 hn_search_content gains filter-only and story-scoped search plus ISO 8601 date validation and minPoints guarding against unscored types; the feed, thread, and search tools now distinguish terminal pages from truncation.
