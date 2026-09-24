@@ -24,63 +24,195 @@ const REQUEST_TIMEOUT_MS = 10_000;
 // HTML utilities
 // ---------------------------------------------------------------------------
 
-const HTML_ENTITIES: Record<string, string> = {
-  amp: '&',
-  lt: '<',
-  gt: '>',
-  quot: '"',
-  apos: "'",
-  nbsp: ' ',
-};
+/** The named entities HN emits. A `Map`, so a name like `constructor` finds nothing inherited. */
+const HTML_ENTITIES = new Map([
+  ['amp', '&'],
+  ['lt', '<'],
+  ['gt', '>'],
+  ['quot', '"'],
+  ['apos', "'"],
+  ['nbsp', ' '],
+]);
 
-/** Decode numeric and named HTML entities. */
-export function decodeHtmlEntities(text: string): string {
-  return text.replace(/&(?:#x([0-9a-fA-F]+)|#(\d+)|(\w+));/g, (match, hex, dec, named) => {
-    if (hex) return String.fromCodePoint(parseInt(hex, 16));
-    if (dec) return String.fromCodePoint(parseInt(dec, 10));
-    return HTML_ENTITIES[named] ?? match;
-  });
+/**
+ * A numeric reference's character. NUL, surrogates, and values past U+10FFFF
+ * decode to U+FFFD, as in HTML, and so does U+0001 — so decoding never yields
+ * either character the strip masks are built on, and an out-of-range value
+ * never throws.
+ */
+function fromCodePoint(codePoint: number): string {
+  const replaced =
+    codePoint <= 1 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff);
+  return String.fromCodePoint(replaced ? 0xfffd : codePoint);
 }
 
-/** Strip HN HTML to plain text. Preserves code blocks and link URLs. */
-export function stripHtml(html: string): string {
-  if (!html) return '';
-
-  // Preserve code blocks
-  const codeBlocks: string[] = [];
-  let text = html.replace(/<pre><code>([\s\S]*?)<\/code><\/pre>/gi, (_, code: string) => {
-    codeBlocks.push(code);
-    return `@@CODE_${codeBlocks.length - 1}@@`;
+/** Decode numeric and named HTML entities. An undeclared name stays as typed. */
+export function decodeHtmlEntities(text: string): string {
+  return text.replace(/&(?:#x([0-9a-fA-F]+)|#(\d+)|(\w+));/g, (match, hex, dec, named) => {
+    if (hex) return fromCodePoint(parseInt(hex, 16));
+    if (dec) return fromCodePoint(parseInt(dec, 10));
+    return HTML_ENTITIES.get(named) ?? match;
   });
-
-  // Paragraphs → double newline
-  text = text.replace(/<p>/gi, '\n\n');
-
-  // Links → text (URL)
-  text = text.replace(/<a\s+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_, url, linkText) =>
-    linkText === url ? url : `${linkText} (${url})`,
-  );
-
-  // Strip all remaining tags
-  text = text.replace(/<[^>]+>/g, '');
-
-  // Restore code blocks
-  text = text.replace(/@@CODE_(\d+)@@/g, (_, i: string) => codeBlocks[Number(i)] ?? '');
-
-  return decodeHtmlEntities(text).trim();
 }
 
 /**
- * Strip HN HTML but preserve `<em>…</em>` markers — used to clean Algolia
- * highlight snippets, which contain the original field HTML with `<em>` tags
- * inserted around matched terms. Other tags are removed by `stripHtml`.
+ * Masks that hold a code block's place, or a highlight marker's, while the rest
+ * of the HTML is rewritten. Each opens with U+0000 and closes with U+0001, so
+ * text between two adjacent masks cannot borrow the close of one and the open
+ * of the next to spell a third. The strip removes both characters from its
+ * input before masking, and {@link decodeHtmlEntities} never produces either,
+ * so no upstream text can spell a mask.
+ */
+const MASK_OPEN = '\u0000';
+const MASK_CLOSE = '\u0001';
+const EM_OPEN = `${MASK_OPEN}EM_OPEN${MASK_CLOSE}`;
+const EM_CLOSE = `${MASK_OPEN}EM_CLOSE${MASK_CLOSE}`;
+const EM_MASK = new RegExp(`${EM_OPEN}|${EM_CLOSE}`, 'g');
+const CODE_MASK = new RegExp(`${MASK_OPEN}CODE_(\\d+)${MASK_CLOSE}`, 'g');
+const MASK_CHARACTERS = new RegExp(`[${MASK_OPEN}${MASK_CLOSE}]`, 'g');
+
+const CODE_OPEN = /<pre><code>/gi;
+const CODE_CLOSE = /<\/code><\/pre>/gi;
+const LINK_OPEN = /<a\s+href="([^"]*)"[^>]*>/gi;
+const LINK_CLOSE = /<\/a>/gi;
+
+/** A trailing entity a truncation cut short, such as the `&#3` left of `&#38;`. */
+const PARTIAL_ENTITY = /&#?[0-9A-Za-z]*$/;
+
+/**
+ * Replace each `open … close` span, leftmost opener first and the nearest closer
+ * after it, with `render(opener, inner)`. An opener with no closer after it ends
+ * the scan — no later opener can find one either — so every search runs forward
+ * once and a pass stays linear, where a lazy `open([\s\S]*?)close` regex rescans
+ * to the end for each unclosed opener.
+ */
+function replaceSpans(
+  text: string,
+  open: RegExp,
+  close: RegExp,
+  render: (opener: RegExpExecArray, inner: string) => string,
+): string {
+  let out = '';
+  let last = 0;
+  open.lastIndex = 0;
+  for (let opener = open.exec(text); opener; opener = open.exec(text)) {
+    close.lastIndex = open.lastIndex;
+    const closer = close.exec(text);
+    if (!closer) break;
+    out +=
+      text.slice(last, opener.index) + render(opener, text.slice(open.lastIndex, closer.index));
+    last = open.lastIndex = close.lastIndex;
+  }
+  return out + text.slice(last);
+}
+
+/**
+ * Apply `rewrite` to the text up to its last `>`. No tag can close past that
+ * point, and leaving it out keeps a regex from rescanning to the end of the
+ * string for every unmatched `<` there.
+ */
+function throughLastTag(text: string, rewrite: (head: string) => string): string {
+  const end = text.lastIndexOf('>') + 1;
+  return rewrite(text.slice(0, end)) + text.slice(end);
+}
+
+/** Remove every tag, repeating until a pass removes nothing. */
+function stripTags(text: string): string {
+  let prev: string;
+  do {
+    prev = text;
+    text = throughLastTag(text, (head) => head.replace(/<[^>]+>/g, ''));
+  } while (text !== prev);
+  return text;
+}
+
+/**
+ * Render one link. HN cuts long link text to a prefix ending in `...`, and older
+ * items encode `/` in the text but not the href, so the two are compared
+ * decoded, with highlight markers set aside. When the text is the href, or a
+ * `...`-cut prefix of it (less any entity the cut left partial), the href
+ * renders alone, carrying the text's markers on the same characters. Any other
+ * link renders as `text (href)`.
+ *
+ * The collapsed href goes back re-encoded (`&`, `<`, `>`), so the strip's one
+ * decoding pass restores it exactly and its tag strip never reads it as markup.
+ */
+function renderLink(rawHref: string, rawText: string): string {
+  const href = decodeHtmlEntities(rawHref);
+  const markers: { at: number; marker: string }[] = [];
+  let text = '';
+  let from = 0;
+  for (const match of rawText.matchAll(EM_MASK)) {
+    text += decodeHtmlEntities(stripTags(rawText.slice(from, match.index)));
+    markers.push({ at: text.length, marker: match[0] });
+    from = match.index + match[0].length;
+  }
+  text += decodeHtmlEntities(stripTags(rawText.slice(from)));
+
+  const prefix =
+    text === href
+      ? href
+      : text.endsWith('...')
+        ? text.slice(0, -3).replace(PARTIAL_ENTITY, '')
+        : undefined;
+  if (prefix === undefined || !href.startsWith(prefix)) return `${rawText} (${rawHref})`;
+
+  let rendered = '';
+  let cut = 0;
+  for (const { at, marker } of markers) {
+    const position = Math.min(at, prefix.length);
+    rendered += href.slice(cut, position) + marker;
+    cut = position;
+  }
+  rendered += href.slice(cut);
+  return rendered.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+/** The strip both public entry points share; `keepEm` carries Algolia's highlight markers through. */
+function toPlainText(html: string, keepEm: boolean): string {
+  if (!html) return '';
+
+  let text = html.replace(MASK_CHARACTERS, '');
+  if (keepEm) text = text.replaceAll('<em>', EM_OPEN).replaceAll('</em>', EM_CLOSE);
+
+  const codeBlocks: string[] = [];
+  text = replaceSpans(text, CODE_OPEN, CODE_CLOSE, (_opener, code) => {
+    codeBlocks.push(code);
+    return `${MASK_OPEN}CODE_${codeBlocks.length - 1}${MASK_CLOSE}`;
+  });
+
+  text = text.replace(/<p>/gi, '\n\n');
+  text = throughLastTag(text, (head) =>
+    replaceSpans(head, LINK_OPEN, LINK_CLOSE, (opener, inner) =>
+      renderLink(opener[1] ?? '', inner),
+    ),
+  );
+  text = stripTags(text);
+  text = text.replace(CODE_MASK, (_, i: string) => codeBlocks[Number(i)] ?? '');
+  text = decodeHtmlEntities(text).trim();
+
+  return keepEm ? text.replaceAll(EM_OPEN, '<em>').replaceAll(EM_CLOSE, '</em>') : text;
+}
+
+/**
+ * Strip an HN HTML body (`text`, `about`, and Algolia's `comment_text` /
+ * `story_text`) to plain text: `<p>` becomes a blank line, code blocks are kept
+ * verbatim, each link renders once as its full URL — or as `text (url)` when
+ * the text is something else — other tags are removed, and entities are
+ * decoded exactly once. Titles are not HTML, though some arrive entity-encoded:
+ * they take {@link decodeHtmlEntities} alone and never pass through here.
+ */
+export function stripHtml(html: string): string {
+  return toPlainText(html, false);
+}
+
+/**
+ * {@link stripHtml} for an Algolia highlight snippet, which is the field's HTML
+ * with `<em>` inserted around matched terms: the `<em>…</em>` markers survive,
+ * including inside a link collapsed to its href.
  */
 export function stripHtmlPreservingEm(html: string): string {
-  if (!html) return '';
-  const masked = html.replace(/<em>/g, '@@EM_OPEN@@').replace(/<\/em>/g, '@@EM_CLOSE@@');
-  return stripHtml(masked)
-    .replace(/@@EM_OPEN@@/g, '<em>')
-    .replace(/@@EM_CLOSE@@/g, '</em>');
+  return toPlainText(html, true);
 }
 
 /** Normalize empty URL strings to undefined. */

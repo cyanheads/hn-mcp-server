@@ -1,10 +1,30 @@
 /**
  * @fileoverview Stubbed HN Firebase API for tool tests that run the real
- * `HnService` — routes each request by path to a JSON body or an HTTP status.
+ * `HnService` — routes each request by path to a JSON body or an HTTP status —
+ * and a guard that fails any fetch a test did not stub.
  * @module tests/helpers/hn-api-stub
  */
 
-import { vi } from 'vitest';
+import { afterEach, beforeEach, vi } from 'vitest';
+
+/**
+ * Register hooks, for the calling test file, that make any fetch a test did not
+ * stub fail loudly instead of reaching the network, and undo every global stub
+ * after each test.
+ */
+export function rejectUnmockedFetch(): void {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request) => {
+        throw new Error(`Unmocked fetch: ${String(input)}`);
+      }),
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+}
 
 const STATUS = Symbol('httpStatus');
 

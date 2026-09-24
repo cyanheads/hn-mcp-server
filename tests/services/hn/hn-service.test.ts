@@ -20,7 +20,9 @@ import {
   stripHtmlPreservingEm,
 } from '@/services/hn/hn-service.js';
 import type { HnItem } from '@/services/hn/types.js';
-import { httpStatus, stubHnApi } from '../../helpers/hn-api-stub.js';
+import { httpStatus, rejectUnmockedFetch, stubHnApi } from '../../helpers/hn-api-stub.js';
+
+rejectUnmockedFetch();
 
 // ---------------------------------------------------------------------------
 // decodeHtmlEntities
@@ -151,6 +153,261 @@ describe('stripHtmlPreservingEm', () => {
 
   it('handles plain text with no markers', () => {
     expect(stripHtmlPreservingEm('plain text')).toBe('plain text');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stripHtml — code blocks, links, and placeholders
+// ---------------------------------------------------------------------------
+
+describe('stripHtml — code blocks', () => {
+  /** Item 9828205: HN keeps the code's leading indent and encodes `>` and `"` inside it. */
+  const CODE_COMMENT =
+    'If you want to reinterpret a float as an integer or vice versa, you can do that easily enough with Rust&#x27;s unsafe functions:<p><pre><code>    fn approx_invsqrt(r : f32) -&gt; f32\n    {\n        let y : f32 = unsafe {\n            let i : i32 = std::mem::transmute(r);\n            std::mem::transmute(0x5f375a86 - (i&gt;&gt;1))\n        };\n        return y*(1.5-(0.5*r*y*y));\n    }\n\n    fn main()\n    {\n        println!(&quot;approx_invsqrt(2.0) = {}&quot;, approx_invsqrt(2.0));\n    }\n</code></pre>\nResult:<p><pre><code>    approx_invsqrt(2.0) = 0.70693</code></pre>';
+
+  it('keeps code verbatim — indent, operators, and decoded entities — around the prose', () => {
+    expect(stripHtml(CODE_COMMENT)).toBe(
+      [
+        "If you want to reinterpret a float as an integer or vice versa, you can do that easily enough with Rust's unsafe functions:",
+        '',
+        '    fn approx_invsqrt(r : f32) -> f32',
+        '    {',
+        '        let y : f32 = unsafe {',
+        '            let i : i32 = std::mem::transmute(r);',
+        '            std::mem::transmute(0x5f375a86 - (i>>1))',
+        '        };',
+        '        return y*(1.5-(0.5*r*y*y));',
+        '    }',
+        '',
+        '    fn main()',
+        '    {',
+        '        println!("approx_invsqrt(2.0) = {}", approx_invsqrt(2.0));',
+        '    }',
+        '',
+        'Result:',
+        '',
+        '    approx_invsqrt(2.0) = 0.70693',
+      ].join('\n'),
+    );
+  });
+
+  it('restores a code block whose own text reads like a placeholder', () => {
+    expect(stripHtml('x <pre><code>@@CODE_0@@</code></pre>')).toBe('x @@CODE_0@@');
+  });
+
+  it('leaves an unclosed code opener as stripped text', () => {
+    expect(stripHtml('a <pre><code>b')).toBe('a b');
+  });
+});
+
+/** U+FFFD, spelled by code point so the formatter keeps it legible. */
+const REPLACEMENT = String.fromCodePoint(0xfffd);
+
+describe('stripHtml — placeholder collisions (#30)', () => {
+  it('keeps placeholder-shaped text a user typed when the item has no code block', () => {
+    expect(stripHtml('see @@CODE_0@@ here')).toBe('see @@CODE_0@@ here');
+    expect(stripHtml('a @@CODE_1@@ b')).toBe('a @@CODE_1@@ b');
+  });
+
+  it('restores the real code block only where it was masked', () => {
+    expect(stripHtml('a @@CODE_0@@ b<p><pre><code>x = 1</code></pre>')).toBe(
+      'a @@CODE_0@@ b\n\nx = 1',
+    );
+  });
+
+  it('keeps highlight-marker-shaped text a user typed out of the highlight markers', () => {
+    expect(stripHtmlPreservingEm('literal @@EM_OPEN@@x@@EM_CLOSE@@ typed')).toBe(
+      'literal @@EM_OPEN@@x@@EM_CLOSE@@ typed',
+    );
+    expect(stripHtmlPreservingEm('see @@CODE_0@@ <em>here</em>')).toBe(
+      'see @@CODE_0@@ <em>here</em>',
+    );
+  });
+
+  it('keeps typed text between two adjacent masks from borrowing their delimiters', () => {
+    expect(stripHtmlPreservingEm('<em>a</em>CODE_0<em>b</em> <pre><code>SECRET</code></pre>')).toBe(
+      '<em>a</em>CODE_0<em>b</em> SECRET',
+    );
+    expect(stripHtmlPreservingEm('<em>a</em>EM_OPEN<em>b</em>')).toBe(
+      '<em>a</em>EM_OPEN<em>b</em>',
+    );
+    expect(stripHtml('<pre><code>x</code></pre>CODE_0<pre><code>y</code></pre>')).toBe('xCODE_0y');
+  });
+
+  it.each([
+    '<em>a</em>CODE_0<em>b</em> <pre><code>SECRET</code></pre>',
+    '<em>a</em>EM_OPEN<em>b</em>',
+    '<em>a</em>EM_CLOSE<em>b</em><a href="https://x.test/">https://<em>x</em>.test/</a>',
+    'a\u0000CODE_0\u0001 b\u0001\u0000<pre><code>x</code></pre>',
+    'x &#0;EM_OPEN&#1; y &#x1;CODE_0&#x0;',
+  ])('leaves no mask character in the output of %j', (html) => {
+    for (const out of [stripHtml(html), stripHtmlPreservingEm(html)]) {
+      expect(out).not.toContain('\u0000');
+      expect(out).not.toContain('\u0001');
+    }
+  });
+
+  it('drops U+0000 and U+0001 from its input, so upstream text cannot spell a mask', () => {
+    expect(stripHtml('a\u0000CODE_0\u0001 b<pre><code>x</code></pre>')).toBe('aCODE_0 bx');
+    expect(stripHtmlPreservingEm('a\u0000EM_OPEN\u0001b')).toBe('aEM_OPENb');
+  });
+
+  it('never decodes an entity into U+0000 or U+0001, so decoding cannot spell a mask either', () => {
+    expect(stripHtmlPreservingEm('x &#0;EM_OPEN&#1;y &#x0;EM_CLOSE&#x1; z')).toBe(
+      `x ${REPLACEMENT}EM_OPEN${REPLACEMENT}y ${REPLACEMENT}EM_CLOSE${REPLACEMENT} z`,
+    );
+  });
+});
+
+describe('decodeHtmlEntities — code points HTML replaces', () => {
+  it('maps NUL, U+0001, surrogates, and out-of-range code points to U+FFFD instead of throwing', () => {
+    expect(decodeHtmlEntities('&#0;|&#1;|&#x1;|&#xD800;|&#x110000;|&#99999999999;')).toBe(
+      Array(6).fill(REPLACEMENT).join('|'),
+    );
+  });
+});
+
+describe('decodeHtmlEntities — only declared names', () => {
+  const INHERITED = ['&constructor;', '&toString;', '&__proto__;', '&hasOwnProperty;'];
+
+  it.each(INHERITED)('leaves %s as typed in plain text', (entity) => {
+    expect(decodeHtmlEntities(`a ${entity} b &amp;`)).toBe(`a ${entity} b &`);
+  });
+
+  it.each(INHERITED)('leaves %s as typed in a link href', (entity) => {
+    expect(stripHtml(`<a href="https://x.test/${entity}">https://x.test/${entity}</a>`)).toBe(
+      `https://x.test/${entity}`,
+    );
+    expect(stripHtml(`<a href="https://x.test/${entity}">docs</a>`)).toBe(
+      `docs (https://x.test/${entity})`,
+    );
+  });
+});
+
+describe('stripHtml — links (#25)', () => {
+  it('keeps text (href) when the link text is neither the href nor a truncated prefix of it', () => {
+    expect(stripHtml('<a href="https://r.dev/docs">the docs</a>')).toBe(
+      'the docs (https://r.dev/docs)',
+    );
+    expect(stripHtml('<a href="https://a.test/xyz">https://b.test/...</a>')).toBe(
+      'https://b.test/... (https://a.test/xyz)',
+    );
+  });
+
+  it('renders a link whose raw text equals its raw href once', () => {
+    expect(
+      stripHtml(
+        '<a href="https:&#x2F;&#x2F;x.test&#x2F;?q=&amp;lt;b&amp;gt;">https:&#x2F;&#x2F;x.test&#x2F;?q=&amp;lt;b&amp;gt;</a>',
+      ),
+    ).toBe('https://x.test/?q=&lt;b&gt;');
+  });
+
+  it('collapses a link whose text and href differ only in encoding, decoding exactly once', () => {
+    expect(
+      stripHtml(
+        '<a href="https:&#x2F;&#x2F;x.test&#x2F;?q=&amp;lt;b&amp;gt;">https://x.test/?q=&amp;lt;b&amp;gt;</a>',
+      ),
+    ).toBe('https://x.test/?q=&lt;b&gt;');
+  });
+
+  it('renders item 49683953 — encoded href, encoded ...-truncated text — as the full URL', () => {
+    const html =
+      '<a href="https:&#x2F;&#x2F;web.archive.org&#x2F;web&#x2F;20260913134705&#x2F;https:&#x2F;&#x2F;www.theverge.com&#x2F;column&#x2F;994172&#x2F;your-car-is-selling-your-data" rel="nofollow">https:&#x2F;&#x2F;web.archive.org&#x2F;web&#x2F;20260913134705&#x2F;https:&#x2F;&#x2F;www.theve...</a><p><a href="https:&#x2F;&#x2F;archive.ph&#x2F;TWEVZ" rel="nofollow">https:&#x2F;&#x2F;archive.ph&#x2F;TWEVZ</a>';
+    expect(stripHtml(html)).toBe(
+      'https://web.archive.org/web/20260913134705/https://www.theverge.com/column/994172/your-car-is-selling-your-data\n\nhttps://archive.ph/TWEVZ',
+    );
+  });
+
+  it('renders item 7739084 — raw href, encoded text — once per link', () => {
+    const html =
+      'resolver [2].<p>[1] <a href="https://github.com/caolan/async" rel="nofollow">https:&#x2F;&#x2F;github.com&#x2F;caolan&#x2F;async</a>\n[2] <a href="https://github.com/caolan/async#auto" rel="nofollow">https:&#x2F;&#x2F;github.com&#x2F;caolan&#x2F;async#auto</a>\n[3] <a href="http://nodejs.org/api/child_process.html" rel="nofollow">http:&#x2F;&#x2F;nodejs.org&#x2F;api&#x2F;child_process.html</a>';
+    expect(stripHtml(html)).toBe(
+      'resolver [2].\n\n[1] https://github.com/caolan/async\n[2] https://github.com/caolan/async#auto\n[3] http://nodejs.org/api/child_process.html',
+    );
+  });
+
+  it('collapses item 3411329, whose truncation cut an entity in the link text', () => {
+    const html =
+      '[1]: <a href="http://www.pure.com/products/product.asp?Product=VL-61558&#38;Category=" rel="nofollow">http://www.pure.com/products/product.asp?Product=VL-61558&#3...</a>';
+    expect(stripHtml(html)).toBe(
+      '[1]: http://www.pure.com/products/product.asp?Product=VL-61558&Category=',
+    );
+  });
+
+  it('assumes no fixed truncation length', () => {
+    expect(stripHtml('<a href="https://x.test/abcdefgh">https://x.t...</a>')).toBe(
+      'https://x.test/abcdefgh',
+    );
+  });
+});
+
+describe('stripHtmlPreservingEm — links with highlight markers (#25)', () => {
+  it('keeps the markers of distinct link text, which still renders as text (href) (#1)', () => {
+    expect(stripHtmlPreservingEm('<a href="https://r.dev"><em>Rust</em></a>')).toBe(
+      '<em>Rust</em> (https://r.dev)',
+    );
+  });
+
+  it('moves the markers of a truncated link text onto the same characters of the full href', () => {
+    expect(
+      stripHtmlPreservingEm(
+        '<a href="https://github.com/x/y/README.md">https://<em>github.com</em>/x/y/...</a>',
+      ),
+    ).toBe('https://<em>github.com</em>/x/y/README.md');
+  });
+
+  it('renders the live 7739084 caolan-async snippet with each link once, markers kept', () => {
+    const html =
+      '[1] <a href="https://github.com/caolan/async" rel="nofollow">https://github.com/<em>caolan</em>/<em>async</em></a>\n[2] <a href="https://github.com/caolan/async#auto" rel="nofollow">https://github.com/<em>caolan</em>/<em>async</em>#auto</a>\n[3] <a href="http://nodejs.org/api/child_process.html" rel="nofollow">http://nodejs.org/api/child_process.html</a>';
+    expect(stripHtmlPreservingEm(html)).toBe(
+      '[1] https://github.com/<em>caolan</em>/<em>async</em>\n[2] https://github.com/<em>caolan</em>/<em>async</em>#auto\n[3] http://nodejs.org/api/child_process.html',
+    );
+  });
+
+  it('does not read placeholder-shaped text inside link text as a marker (#30)', () => {
+    expect(
+      stripHtmlPreservingEm(
+        '<a href="https://x.test/@@EM_OPEN@@a">https://x.test/@@EM_OPEN@@a</a>',
+      ),
+    ).toBe('https://x.test/@@EM_OPEN@@a');
+  });
+});
+
+describe('stripHtml / stripHtmlPreservingEm — worst-case timing', () => {
+  /** Best of three wall-clock readings, in ms. */
+  function best(fn: () => void): number {
+    let min = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < 3; i++) {
+      const start = performance.now();
+      fn();
+      min = Math.min(min, performance.now() - start);
+    }
+    return min;
+  }
+
+  const repeat = (unit: string) => (n: number) =>
+    unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
+
+  it.each([
+    ['a run of "<" with no ">"', repeat('<')],
+    ['repeated <pre><code> with no closer', repeat('<pre><code>')],
+    ['repeated link openers with no ">"', repeat('<a href="x" ')],
+    ['overlapping unterminated href attributes', repeat('<a href="')],
+    ['repeated links with no </a>', repeat('<a href="x">y')],
+    ['repeated <em> with no </em>', repeat('<em>')],
+    ['a run of "&#"', repeat('&#')],
+    ['a run of "\\"', repeat('\\')],
+  ])('stays linear on %s', (_label, make) => {
+    const inputs = [5_000, 20_000, 80_000].map(make);
+    for (const input of inputs) stripHtmlPreservingEm(input);
+    const [t5k, , t80k] = inputs.map((input) =>
+      best(() => {
+        stripHtml(input);
+        stripHtmlPreservingEm(input);
+      }),
+    ) as [number, number, number];
+    expect(t80k / Math.max(t5k, 0.05)).toBeLessThan(64);
+    expect(t80k).toBeLessThan(250);
   });
 });
 
