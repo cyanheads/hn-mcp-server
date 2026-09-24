@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.18](changelog/0.5.x/0.5.18.md) — 2026-09-23
+
+hn_search_content gains filter-only and story-scoped search plus ISO 8601 date validation and minPoints guarding against unscored types; all three read tools now distinguish terminal pages from truncation.
+
 ## [0.5.17](changelog/0.5.x/0.5.17.md) — 2026-09-19
 
 Adopted mcp-ts-core ^0.13.6: the server declares stateless session mode in source, argument rejections carry a reason and a schema-derived recovery hint, and tool errors close with their reason and retryable status.
