@@ -3,14 +3,19 @@
  * @module mcp-server/tools/definitions/search-content.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   createMockContext as createFrameworkMockContext,
   getEnrichment,
+  runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AlgoliaResponse } from '@/services/hn/types.js';
 
-vi.mock('@/services/hn/hn-service.js', () => ({
+vi.mock('@/services/hn/hn-service.js', async (importOriginal) => ({
+  dateBoundToEpochSeconds: (await importOriginal<typeof import('@/services/hn/hn-service.js')>())
+    .dateBoundToEpochSeconds,
   getHnService: vi.fn(),
   stripHtml: vi.fn((html: string) => html),
   stripHtmlPreservingEm: vi.fn((html: string) =>
@@ -89,6 +94,7 @@ const commentHit = {
 } as const;
 
 beforeEach(() => {
+  mockSearch.mockReset();
   vi.mocked(getHnService).mockReturnValue({ search: mockSearch } as never);
 });
 
@@ -768,8 +774,9 @@ describe('hn_search_content format', () => {
 // ---------------------------------------------------------------------------
 
 describe('hn_search_content input validation', () => {
-  it('requires query', () => {
-    expect(() => searchHn.input.parse({})).toThrow();
+  it('accepts an omitted query at the schema — the handler decides whether a filter is present', () => {
+    expect(searchHn.input.parse({}).query).toBeUndefined();
+    expect(searchHn.input.parse({ tags: 'ask_hn' })).toMatchObject({ tags: 'ask_hn' });
   });
 
   it('applies defaults: sort=relevance, count=30, page=0', () => {
@@ -1013,5 +1020,533 @@ describe('hn_search_content — security and edge cases', () => {
     expect(firstText(content)).toContain('### Some Story (github.com)');
     // Heading does not use www prefix
     expect(firstText(content)).not.toContain('### Some Story (www.github.com)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Contract helpers — run the definition through the production-shaped pipeline
+// so both client surfaces (structuredContent and content[]) can be asserted.
+// ---------------------------------------------------------------------------
+
+type ToolResult = Awaited<ReturnType<typeof runToolContract>>;
+
+interface WireError {
+  code: number;
+  data?: { reason?: string; recovery?: { hint?: string } } & Record<string, unknown>;
+  message: string;
+}
+
+function callSearch(input: Record<string, unknown>): Promise<ToolResult> {
+  return runToolContract(searchHn, input as never, { context: { errors: searchHn.errors } });
+}
+
+function wireError(result: ToolResult): WireError {
+  expect(result.isError).toBe(true);
+  return (result.structuredContent as { error: WireError }).error;
+}
+
+function contentText(result: ToolResult): string {
+  return result.content
+    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n');
+}
+
+function structured(result: ToolResult): Record<string, unknown> {
+  expect(result.isError).toBeFalsy();
+  return result.structuredContent as Record<string, unknown>;
+}
+
+/** A JSON Schema node, narrowed to the keys these tests read. */
+interface SchemaNode {
+  description?: string;
+  minLength?: number;
+  pattern?: string;
+  properties?: Record<string, SchemaNode>;
+}
+
+/** The advertised JSON Schema of one input property, e.g. `inputProperty('dateRange', 'start')`. */
+function inputProperty(...path: string[]): SchemaNode {
+  let node = z.toJSONSchema(searchHn.input) as SchemaNode;
+  for (const key of path) node = node.properties?.[key] ?? {};
+  return node;
+}
+
+// ---------------------------------------------------------------------------
+// #24 — blank-after-trim messages
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content blank-string messages', () => {
+  it.each(['', '   ', '\t\n'])('names the trimmed-blank query and the fix (%j)', async (query) => {
+    const result = await callSearch({ query });
+    const error = wireError(result);
+
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.data?.reason).toBe('invalid_arguments');
+    expect(error.data?.recovery?.hint).toContain('blank after trimming whitespace');
+    expect(error.data?.recovery?.hint).toContain('omit query');
+    expect(contentText(result)).toContain('query: blank after trimming whitespace');
+    expect(contentText(result)).toContain('omit query');
+    expect(contentText(result)).not.toContain('Too small');
+    expect(mockSearch).not.toHaveBeenCalled();
+  });
+
+  it.each(['', '   '])('names the trimmed-blank author and the fix (%j)', async (author) => {
+    const result = await callSearch({ query: 'rust', author });
+    const error = wireError(result);
+
+    expect(error.data?.reason).toBe('invalid_arguments');
+    expect(error.data?.recovery?.hint).toContain('blank after trimming whitespace');
+    expect(error.data?.recovery?.hint).toContain('omit author to search all authors');
+    expect(contentText(result)).toContain(
+      'author: blank after trimming whitespace — omit author to search all authors',
+    );
+    expect(contentText(result)).not.toContain('Too small');
+  });
+
+  it('still advertises minLength 1 on query and author', () => {
+    expect(inputProperty('query').minLength).toBe(1);
+    expect(inputProperty('author').minLength).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #21 — ISO 8601 date bounds, validated and ordered
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content dateRange validation', () => {
+  it.each([
+    '2024',
+    '2024-05',
+    '2024-05-05',
+    '2024-05-05T10:00',
+    '2024-05-05T10:00:00',
+    '2024-05-05T10:00:00.123',
+    '2024-05-05T10:00:00Z',
+    '2024-05-05T10:00:00+02:00',
+    '2024-05-05T10:00-07:00',
+    '2024-02-29',
+  ])('accepts the ISO 8601 form %j', (start) => {
+    expect(searchHn.input.parse({ query: 'x', dateRange: { start } }).dateRange?.start).toBe(start);
+    expect(searchHn.input.parse({ query: 'x', dateRange: { end: start } }).dateRange?.end).toBe(
+      start,
+    );
+  });
+
+  it.each([
+    '1',
+    'May 5 2024',
+    '2024/05/05',
+    '2024-02-30',
+    '2023-02-29',
+    '2024-13-01',
+    '2024-00-10',
+    '2024-05-00',
+    '2024-05-05T24:00',
+    '2024-05-05T10:60',
+    '2024-05-05T10:00:60',
+    '2024-05-05T10:00+24:00',
+    '2024-05-05 10:00',
+    '',
+  ])('rejects the non-ISO or calendar-invalid value %j at the schema', async (value) => {
+    expect(() => searchHn.input.parse({ query: 'x', dateRange: { start: value } })).toThrow();
+    expect(() => searchHn.input.parse({ query: 'x', dateRange: { end: value } })).toThrow();
+
+    const result = await callSearch({ query: 'x', dateRange: { end: value } });
+    expect(wireError(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(mockSearch).not.toHaveBeenCalled();
+  });
+
+  it('advertises the accepted pattern on dateRange.start and dateRange.end', () => {
+    const pattern = inputProperty('dateRange', 'start').pattern ?? '';
+    expect(pattern).not.toBe('');
+    expect(inputProperty('dateRange', 'end').pattern).toBe(pattern);
+    expect(new RegExp(pattern).test('2024-05-05T10:00:00+02:00')).toBe(true);
+    expect(new RegExp(pattern).test('May 5 2024')).toBe(false);
+  });
+
+  it('documents exclusive UTC bound semantics in the start/end descriptions', () => {
+    const start = inputProperty('dateRange', 'start').description;
+    const end = inputProperty('dateRange', 'end').description;
+    expect(start).toMatch(/exclusive/i);
+    expect(start).toMatch(/UTC/);
+    expect(end).toMatch(/exclusive/i);
+    expect(end).toMatch(/next day/i);
+  });
+
+  it('fails an empty dateRange with invalid_date_range on both surfaces, before any upstream call', async () => {
+    const result = await callSearch({ query: 'rust', dateRange: {} });
+    const error = wireError(result);
+
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.data?.reason).toBe('invalid_date_range');
+    expect(error.data?.recovery?.hint).toMatch(/omit dateRange/i);
+    expect(contentText(result)).toMatch(/omit dateRange/i);
+    expect(contentText(result)).toContain('invalid_date_range');
+    expect(mockSearch).not.toHaveBeenCalled();
+  });
+
+  it('treats form-client blank bounds as invalid input, not as an empty range', async () => {
+    const result = await callSearch({ query: 'rust', dateRange: { start: '', end: '' } });
+    expect(wireError(result).data?.reason).toBe('invalid_arguments');
+    expect(mockSearch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['start equals end', { start: '2024-05-05', end: '2024-05-05' }],
+    ['start after end', { start: '2026-08-11T00:00:00Z', end: '2020-01-01T00:00:00Z' }],
+    [
+      'same instant, different offsets',
+      { start: '2024-05-05T12:00+02:00', end: '2024-05-05T10:00Z' },
+    ],
+    ['reduced forms naming one instant', { start: '2024', end: '2024-01-01' }],
+  ])('fails when %s with invalid_date_range on both surfaces', async (_label, dateRange) => {
+    const result = await callSearch({ query: 'rust', dateRange });
+    const error = wireError(result);
+
+    expect(error.data?.reason).toBe('invalid_date_range');
+    expect(error.message).toContain(dateRange.start);
+    expect(error.message).toContain(dateRange.end);
+    expect(error.data?.recovery?.hint).toBeTruthy();
+    expect(contentText(result)).toContain('invalid_date_range');
+    expect(contentText(result)).toContain(error.data!.recovery!.hint!);
+    expect(mockSearch).not.toHaveBeenCalled();
+  });
+
+  it('passes an ordered range and single-bound ranges through to the service', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    for (const dateRange of [
+      { start: '2024-01-01', end: '2024-01-02' },
+      { start: '2024-01-01' },
+      { end: '2024-12-31' },
+    ]) {
+      const result = await callSearch({ query: 'rust', dateRange });
+      expect(result.isError).toBeFalsy();
+    }
+    expect(mockSearch).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #22 — filter-only and story-scoped search
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content filter-only and story-scoped search', () => {
+  it('accepts poll and job in the tags enum', () => {
+    expect(searchHn.input.parse({ tags: 'poll' }).tags).toBe('poll');
+    expect(searchHn.input.parse({ tags: 'job' }).tags).toBe('job');
+  });
+
+  it('accepts a positive integer storyId and rejects anything else', () => {
+    expect(searchHn.input.parse({ storyId: 8863 }).storyId).toBe(8863);
+    for (const storyId of [0, -1, 1.5, '8863']) {
+      expect(() => searchHn.input.parse({ storyId })).toThrow();
+    }
+  });
+
+  it('describes where to get a storyId', () => {
+    expect(inputProperty('storyId').description).toContain('hits[].storyId');
+    expect(inputProperty('storyId').description).toContain('hn_get_thread');
+  });
+
+  it.each([
+    ['tags', { tags: 'ask_hn' }],
+    ['author', { author: 'pg' }],
+    ['storyId', { storyId: 8863 }],
+    ['minPoints', { minPoints: 500 }],
+    ['dateRange.start', { dateRange: { start: '2024-01-01' } }],
+    ['dateRange.end', { dateRange: { end: '2024-01-01' } }],
+  ])('runs a filter-only search with just %s', async (_label, input) => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: [storyHit], nbHits: 1, nbPages: 1, page: 0 }),
+    );
+
+    const result = await callSearch(input);
+    const sc = structured(result);
+
+    expect(mockSearch).toHaveBeenCalledTimes(1);
+    expect(mockSearch.mock.calls[0]![0]).not.toHaveProperty('query');
+    expect(sc).not.toHaveProperty('query');
+    expect(contentText(result)).toContain('### Test Story');
+    expect(contentText(result)).not.toContain('"undefined"');
+  });
+
+  it('forwards storyId to the service alongside tags and query', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    await callSearch({ query: 'lisp', tags: 'comment', storyId: 8863 });
+
+    expect(mockSearch).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'lisp', tags: 'comment', storyId: 8863 }),
+      expect.anything(),
+    );
+  });
+
+  it.each([
+    ['nothing at all', {}],
+    ['only sort, count, page, and view', { sort: 'date', count: 5, page: 1, view: 'compact' }],
+  ])('fails %s with missing_query_or_filter on both surfaces', async (_label, input) => {
+    const result = await callSearch(input);
+    const error = wireError(result);
+
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.data?.reason).toBe('missing_query_or_filter');
+    expect(error.data?.recovery?.hint).toContain('query');
+    expect(error.data?.recovery?.hint).toContain('tags');
+    expect(error.data?.recovery?.hint).toContain('storyId');
+    expect(contentText(result)).toContain('missing_query_or_filter');
+    expect(contentText(result)).toContain(error.data!.recovery!.hint!);
+    expect(mockSearch).not.toHaveBeenCalled();
+  });
+
+  it('fails a bare empty dateRange with invalid_date_range, not missing_query_or_filter', async () => {
+    const result = await callSearch({ dateRange: {} });
+    expect(wireError(result).data?.reason).toBe('invalid_date_range');
+    expect(mockSearch).not.toHaveBeenCalled();
+  });
+
+  it('keeps the blank-query rejection when a blank query is supplied', async () => {
+    const result = await callSearch({ query: '   ', tags: 'story' });
+    expect(wireError(result).data?.reason).toBe('invalid_arguments');
+    expect(mockSearch).not.toHaveBeenCalled();
+  });
+
+  it('renders a filter-only heading and echoes no query', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: [storyHit], nbHits: 1, nbPages: 1, page: 0 }),
+    );
+
+    const result = await callSearch({ tags: 'show_hn' });
+
+    expect(contentText(result)).toContain('## Search results (filters only)');
+    expect(contentText(result)).not.toContain('""');
+  });
+
+  it('format() renders the no-query empty result without an empty quoted query', () => {
+    const text = firstText(searchHn.format!({ hits: [] }));
+    expect(text).toBe('No results.');
+  });
+
+  it('format() keeps the quoted-query heading when a query is present', () => {
+    const text = firstText(searchHn.format!({ hits: [], query: 'rust' }));
+    expect(text).toBe('"rust" — no results.');
+  });
+
+  it('names the applied filters in the zero-result notice of a filter-only search', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await callSearch({ tags: 'poll', author: 'nobody' });
+    const notice = structured(result).notice as string;
+
+    expect(notice).toContain('tags, author');
+    expect(notice).not.toMatch(/broader keywords/);
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('names storyId and where to get one in the zero-result notice', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await callSearch({ storyId: 9707, tags: 'comment' });
+    const notice = structured(result).notice as string;
+
+    expect(notice).toContain('storyId');
+    expect(notice).toContain('hits[].storyId');
+    expect(notice).toContain('hn_get_thread');
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('keeps the broaden-keywords notice for a zero-match keyword search with storyId', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await callSearch({ query: 'zzz', storyId: 8863 });
+    const notice = structured(result).notice as string;
+
+    expect(notice).toContain('Try broader keywords, or relax these filters: storyId.');
+    expect(notice).toContain('hits[].storyId');
+  });
+
+  it('renders poll and job hits with their titles', async () => {
+    const pollHit = { ...storyHit, objectID: '3746692', title: 'Poll: Favorite language?' };
+    const jobHit = { ...storyHit, objectID: '999984', title: 'Acme is hiring', points: null };
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: [pollHit, jobHit], nbHits: 2, nbPages: 1, page: 0 }),
+    );
+
+    const result = await callSearch({ tags: 'job' });
+    const text = contentText(result);
+
+    expect(text).toContain('### Poll: Favorite language?');
+    expect(text).toContain('### Acme is hiring');
+    expect(text).toContain('id:999984');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #28 — minPoints cannot match unscored item types
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content minPoints on unscored types', () => {
+  it.each(['comment', 'job'])(
+    'fails tags %j with minPoints before any upstream call, on both surfaces',
+    async (tags) => {
+      for (const minPoints of [0, 10]) {
+        const result = await callSearch({ query: 'rust', tags, minPoints });
+        const error = wireError(result);
+
+        expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(error.data?.reason).toBe('min_points_unscored_type');
+        expect(error.message).toContain(tags);
+        expect(error.data?.recovery?.hint).toMatch(/drop minPoints/i);
+        expect(contentText(result)).toContain('min_points_unscored_type');
+        expect(contentText(result)).toContain(error.data!.recovery!.hint!);
+      }
+      expect(mockSearch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['story', 'poll', 'ask_hn', 'show_hn', 'front_page'])(
+    'still sends minPoints for tags %j',
+    async (tags) => {
+      mockSearch.mockResolvedValue(algoliaResponse());
+      const result = await callSearch({ query: 'rust', tags, minPoints: 10 });
+      expect(result.isError).toBeFalsy();
+      expect(mockSearch).toHaveBeenCalledWith(
+        expect.objectContaining({ minPoints: 10 }),
+        expect.anything(),
+      );
+    },
+  );
+
+  it('explains in the minPoints description that comments and jobs carry no points', () => {
+    const { description } = inputProperty('minPoints');
+    expect(description).toMatch(/comments/i);
+    expect(description).toMatch(/jobs/i);
+    expect(description).toMatch(/no points/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #17 — terminal pages versus truncation
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content pagination notices', () => {
+  const fiveHits = Array.from({ length: 5 }, (_, i) => ({ ...storyHit, objectID: String(i + 1) }));
+
+  it('keeps truncated/shown/cap on a page with more pages behind it', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: fiveHits, nbHits: 76, nbPages: 16, page: 0, hitsPerPage: 5 }),
+    );
+
+    const result = await callSearch({ query: 'rust', count: 5 });
+
+    expect(structured(result)).toMatchObject({ truncated: true, shown: 5, cap: 5 });
+  });
+
+  it('names the next page and the count ceiling instead of the framework default', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: fiveHits, nbHits: 76, nbPages: 16, page: 0, hitsPerPage: 5 }),
+    );
+
+    const result = await callSearch({ query: 'rust', count: 5 });
+    const notice = structured(result).notice as string;
+
+    expect(notice).toBe(
+      'Showing 5 of 76 hits (page 0 of 16). Pass page: 1 for more, or raise count (max 50).',
+    );
+    expect(notice).not.toContain('narrow with filters');
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('drops the raise-count suggestion when count is already at its max', async () => {
+    const fifty = Array.from({ length: 50 }, (_, i) => ({ ...storyHit, objectID: String(i + 1) }));
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: fifty, nbHits: 1000, nbPages: 20, page: 3, hitsPerPage: 50 }),
+    );
+
+    const result = await callSearch({ query: 'a', count: 50, page: 3 });
+    const notice = structured(result).notice as string;
+
+    expect(notice).toBe('Showing 50 of 1000 hits (page 3 of 20). Pass page: 4 for more.');
+  });
+
+  it('reports the last page Algolia serves as terminal — no truncated, shown, cap, or notice', async () => {
+    const fifty = Array.from({ length: 50 }, (_, i) => ({ ...storyHit, objectID: String(i + 1) }));
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: fifty, nbHits: 2_261_745, nbPages: 20, page: 19, hitsPerPage: 50 }),
+    );
+
+    const result = await callSearch({ query: 'a', count: 50, page: 19 });
+    const sc = structured(result);
+
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc).not.toHaveProperty('shown');
+    expect(sc).not.toHaveProperty('cap');
+    expect(sc).not.toHaveProperty('notice');
+    expect(contentText(result)).not.toContain('capped');
+  });
+
+  it('reports a single full page as terminal', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: fiveHits, nbHits: 5, nbPages: 1, page: 0, hitsPerPage: 5 }),
+    );
+
+    const sc = structured(await callSearch({ query: 'rust', count: 5 }));
+
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc).not.toHaveProperty('notice');
+  });
+
+  it('gives a page past the end an exhausted-page notice naming the last valid page', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: [], nbHits: 9, nbPages: 2, page: 2, hitsPerPage: 5 }),
+    );
+
+    const result = await callSearch({
+      query: 'lisp',
+      tags: 'story',
+      author: 'pg',
+      count: 5,
+      page: 2,
+    });
+    const sc = structured(result);
+    const notice = sc.notice as string;
+
+    expect(sc).toMatchObject({ totalHits: 9, totalPages: 2, page: 2 });
+    expect(sc).not.toHaveProperty('truncated');
+    expect(notice).toContain('Page 2 is past the last page');
+    expect(notice).toContain('page: 1');
+    expect(notice).not.toMatch(/broader keywords|relax these filters/);
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('resets to page 0 when a page lies beyond the 1,000-hit ceiling and the last page is unknown', async () => {
+    /** Past the ceiling Algolia answers nbHits 0 / nbPages 0, so the last valid page is unknown. */
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: [], nbHits: 0, nbPages: 0, page: 20, hitsPerPage: 50 }),
+    );
+
+    const result = await callSearch({ query: 'a', count: 50, page: 20 });
+    const notice = structured(result).notice as string;
+
+    expect(notice).toContain('Page 20');
+    expect(notice).toContain('1,000');
+    expect(notice).toContain('page: 0');
+    expect(notice).not.toMatch(/broader keywords|different terms/);
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('keeps the relax-filters notice on a zero-match first page', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await callSearch({ query: 'zzzz', tags: 'story', page: 0 });
+
+    expect(structured(result).notice).toBe('Try broader keywords, or relax these filters: tags.');
+  });
+
+  it('describes truncated as more pages remaining and notice as covering pagination', () => {
+    const enrichment = searchHn.enrichment as Record<string, z.ZodType>;
+    expect(enrichment.truncated!.description).toMatch(/more pages/i);
+    expect(enrichment.notice!.description).not.toMatch(/Absent on non-empty result pages/);
   });
 });

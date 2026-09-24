@@ -101,6 +101,16 @@ export function extractDomain(url: string | undefined): string | undefined {
   }
 }
 
+/**
+ * Convert a validated ISO 8601 date bound to Unix seconds. A date-time without
+ * a `Z` or `±hh:mm` offset is read as UTC — the same as a date-only value, and
+ * unlike JS's own parsing, which reads it in the host's local time zone.
+ */
+export function dateBoundToEpochSeconds(bound: string): number {
+  const offsetless = bound.includes('T') && !/(?:Z|[+-]\d{2}:\d{2})$/.test(bound);
+  return Math.floor(Date.parse(offsetless ? `${bound}Z` : bound) / 1000);
+}
+
 /** Filter out dead, deleted, and null items. */
 export function filterLiveItems(items: (HnItem | null)[]): HnItem[] {
   return items.filter((item): item is HnItem => item != null && !item.deleted && !item.dead);
@@ -320,12 +330,17 @@ export class HnService {
     return results;
   }
 
-  /** Search HN via Algolia. Throws on upstream failure after retries. */
+  /**
+   * Search HN via Algolia. Throws on upstream failure after retries. An omitted
+   * `query` sends no `query` param, making a filter-only search; the tags are
+   * comma-joined, which Algolia ANDs. Both date bounds are exclusive.
+   */
   search(
     params: {
-      query: string;
+      query?: string | undefined;
       tags?: string | undefined;
       author?: string | undefined;
+      storyId?: number | undefined;
       sort: 'relevance' | 'date';
       dateRange?: { start?: string | undefined; end?: string | undefined } | undefined;
       minPoints?: number | undefined;
@@ -337,26 +352,23 @@ export class HnService {
     const endpoint = params.sort === 'date' ? 'search_by_date' : 'search';
     const url = new URL(`${ALGOLIA_API}/${endpoint}`);
 
-    url.searchParams.set('query', params.query);
+    if (params.query != null) url.searchParams.set('query', params.query);
     url.searchParams.set('hitsPerPage', String(params.count));
     url.searchParams.set('page', String(params.page));
 
     const tagParts: string[] = [];
     if (params.tags) tagParts.push(params.tags);
     if (params.author) tagParts.push(`author_${params.author}`);
+    if (params.storyId != null) tagParts.push(`story_${params.storyId}`);
     if (tagParts.length) url.searchParams.set('tags', tagParts.join(','));
 
     const numericFilters: string[] = [];
     if (params.minPoints != null) numericFilters.push(`points>=${params.minPoints}`);
     if (params.dateRange?.start) {
-      numericFilters.push(
-        `created_at_i>${Math.floor(new Date(params.dateRange.start).getTime() / 1000)}`,
-      );
+      numericFilters.push(`created_at_i>${dateBoundToEpochSeconds(params.dateRange.start)}`);
     }
     if (params.dateRange?.end) {
-      numericFilters.push(
-        `created_at_i<${Math.floor(new Date(params.dateRange.end).getTime() / 1000)}`,
-      );
+      numericFilters.push(`created_at_i<${dateBoundToEpochSeconds(params.dateRange.end)}`);
     }
     if (numericFilters.length) url.searchParams.set('numericFilters', numericFilters.join(','));
 

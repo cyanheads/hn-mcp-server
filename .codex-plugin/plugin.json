@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "hn-mcp-server",
     "shortDescription": "Browse Hacker News feeds, threads, and user profiles with full-text search.",
-    "longDescription": "Read-only access to Hacker News over the Firebase API and Algolia search. Fetch ranked feeds (top, new, best, ask, show, jobs) with pagination, full-text search items by query with type, author, date, and score filters, retrieve a user profile with their submissions, and pull any item with its full comment tree (drill into a subtree by passing a comment id). Items are addressed by integer id, reused across stories, comments, jobs, and polls. HN populates fields sparsely, so absent values are surfaced as unknown rather than fabricated.",
+    "longDescription": "Read-only access to Hacker News over the Firebase API and Algolia search. Fetch ranked feeds (top, new, best, ask, show, jobs) with pagination, search items by keyword, by type, author, story, date, and score filters alone, or both, retrieve a user profile with their submissions, and pull any item with its full comment tree (drill into a subtree by passing a comment id). Items are addressed by integer id, reused across stories, comments, jobs, and polls. HN populates fields sparsely, so absent values are surfaced as unknown rather than fabricated.",
     "developerName": "cyanheads",
     "category": "News",
     "capabilities": ["Read"],

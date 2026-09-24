@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  dateBoundToEpochSeconds,
   extractDomain,
   getHnService,
   normalizeUrl,
@@ -13,6 +14,106 @@ import {
   stripHtmlPreservingEm,
 } from '@/services/hn/hn-service.js';
 import type { AlgoliaHighlightValue, AlgoliaHit } from '@/services/hn/types.js';
+
+/** Largest page `count` accepts, mirrored in the input schema. */
+const MAX_COUNT = 50;
+
+/**
+ * ISO 8601 calendar forms accepted for a date bound: `YYYY`, `YYYY-MM`,
+ * `YYYY-MM-DD`, or `YYYY-MM-DDThh:mm[:ss[.sss]]` with an optional `Z` or
+ * `±hh:mm` offset. Advertised as the bound's `pattern`; the captures feed the
+ * calendar-range check the pattern cannot express.
+ */
+const DATE_BOUND_PATTERN =
+  /^(\d{4})(?:-(\d{2})(?:-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|[+-](\d{2}):(\d{2}))?)?)?)?$/;
+
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * True when a pattern-matching bound names a real calendar instant — rejecting
+ * `2024-02-30` or `T24:00`, which `Date.parse` would silently roll over. A value
+ * the pattern rejects passes here, so it is reported once, as a format error.
+ */
+function isCalendarValid(value: string): boolean {
+  const m = DATE_BOUND_PATTERN.exec(value);
+  if (!m) return true;
+  /** Omitted month and day read as 1; omitted time and offset fields as 0. */
+  const field = (i: number, omitted: number) => Number(m[i] ?? omitted);
+  const [year, month, day] = [field(1, 0), field(2, 1), field(3, 1)];
+  const [hour, minute, second] = [field(4, 0), field(5, 0), field(6, 0)];
+  const [offsetHour, offsetMinute] = [field(7, 0), field(8, 0)];
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = month === 2 && leap ? 29 : DAYS_IN_MONTH[month - 1];
+  return (
+    days !== undefined &&
+    day >= 1 &&
+    day <= days &&
+    hour <= 23 &&
+    minute <= 59 &&
+    second <= 59 &&
+    offsetHour <= 23 &&
+    offsetMinute <= 59
+  );
+}
+
+const dateBound = () =>
+  z
+    .string()
+    .regex(
+      DATE_BOUND_PATTERN,
+      'must be an ISO 8601 date or date-time — YYYY, YYYY-MM, YYYY-MM-DD, or YYYY-MM-DDThh:mm[:ss[.sss]] with an optional Z or ±hh:mm offset.',
+    )
+    .refine(
+      isCalendarValid,
+      'is not a real calendar date or time — check the month, day, hour, minute, second, and offset ranges.',
+    )
+    .optional();
+
+/** The filters a caller set, in the order notices name them. `sort`, `count`, `page`, and `view` are not filters. */
+function appliedFilters(input: {
+  tags?: string | undefined;
+  author?: string | undefined;
+  storyId?: number | undefined;
+  minPoints?: number | undefined;
+  dateRange?: { start?: string | undefined; end?: string | undefined } | undefined;
+}): string[] {
+  const filters: string[] = [];
+  if (input.tags) filters.push('tags');
+  if (input.author) filters.push('author');
+  if (input.storyId != null) filters.push('storyId');
+  if (input.minPoints != null) filters.push('minPoints');
+  if (input.dateRange?.start || input.dateRange?.end) filters.push('dateRange');
+  return filters;
+}
+
+/**
+ * Notice for a page that came back empty. A page past the end names the last
+ * valid page when Algolia reports one; past its 1,000-hit ceiling Algolia
+ * answers `nbPages: 0`, so the last page is unknown and the notice resets to
+ * page 0. Only a first page with no hits is a zero-match search.
+ */
+function emptyPageNotice(
+  input: { query?: string | undefined; storyId?: number | undefined },
+  filters: string[],
+  page: number,
+  totalHits: number,
+  totalPages: number,
+): string {
+  if (page > 0) {
+    return totalPages > 0
+      ? `Page ${page} is past the last page of results (${totalHits} hits across ${totalPages} page${totalPages === 1 ? '' : 's'}). Pass page: ${totalPages - 1} for the last page, or page: 0 to start over.`
+      : `Page ${page} is past the last page Algolia serves for this search (at most 1,000 hits per search), where totalHits and totalPages read 0. Pass page: 0 to start over; if that also returns nothing, the search itself matches nothing.`;
+  }
+  const base =
+    input.query == null
+      ? `No items matched these filters: ${filters.join(', ')}. Relax or change them.`
+      : filters.length
+        ? `Try broader keywords, or relax these filters: ${filters.join(', ')}.`
+        : 'Try broader keywords or different terms.';
+  return input.storyId == null
+    ? base
+    : `${base} storyId must be a story or poll root id — take it from hits[].storyId or the hn_get_thread root; a comment id matches nothing.`;
+}
 
 /**
  * Project Algolia's `_highlightResult` into a flat snippet object: the title
@@ -52,9 +153,33 @@ function extractHighlights(hit: AlgoliaHit, includeBody: boolean) {
 
 export const searchHn = tool('hn_search_content', {
   description:
-    'Search Hacker News stories and comments via Algolia. Filterable by content type, author, date range, and minimum points.',
+    'Search Hacker News stories, comments, polls, and jobs via Algolia — by keyword, by filters alone, or both. Filterable by content type, author, parent story, date range, and minimum points.',
   annotations: { readOnlyHint: true },
   errors: [
+    {
+      reason: 'missing_query_or_filter',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Neither a query nor any filter was supplied, so there is nothing to search by.',
+      recovery:
+        'Pass a query, or at least one filter: tags, author, storyId, minPoints, or a dateRange bound. sort, count, page, and view do not count as filters.',
+      severity: 'notice',
+    },
+    {
+      reason: 'invalid_date_range',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'dateRange was supplied with neither bound, or with start not before end.',
+      recovery:
+        'Give dateRange a start, an end, or both with start before end — both bounds are exclusive — or omit dateRange entirely.',
+      severity: 'notice',
+    },
+    {
+      reason: 'min_points_unscored_type',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'minPoints was combined with tags "comment" or "job", record types Algolia stores without points.',
+      recovery:
+        'Drop minPoints to search comments or jobs, or search a scored type (story, poll, ask_hn, show_hn, front_page) to filter by points.',
+      severity: 'notice',
+    },
     {
       reason: 'upstream_rejected',
       code: JsonRpcErrorCode.InvalidParams,
@@ -99,21 +224,35 @@ export const searchHn = tool('hn_search_content', {
     query: z
       .string()
       .trim()
-      .min(1)
+      .min(
+        1,
+        'blank after trimming whitespace — pass one or more search terms, or omit query for a filter-only search.',
+      )
+      .optional()
       .describe(
-        'Search terms. Supports simple keywords — Algolia handles stemming and relevance. Trimmed before searching; blank or whitespace-only input is rejected.',
+        'Search terms. Supports simple keywords — Algolia handles stemming and relevance. Trimmed before searching; blank or whitespace-only input is rejected. Omit for a filter-only search, which needs at least one of tags, author, storyId, minPoints, or a dateRange bound.',
       ),
     tags: z
-      .enum(['story', 'comment', 'ask_hn', 'show_hn', 'front_page'])
+      .enum(['story', 'comment', 'poll', 'job', 'ask_hn', 'show_hn', 'front_page'])
       .optional()
-      .describe(`Filter results by content type. Omit to search all types.`),
+      .describe(
+        'Filter results by content type: "story", "comment", "poll", or "job", or the story subsets "ask_hn", "show_hn", and "front_page". Omit to search all types.',
+      ),
     author: z
       .string()
       .trim()
-      .min(1)
+      .min(1, 'blank after trimming whitespace — omit author to search all authors.')
       .optional()
       .describe(
         `Filter results to a specific author. Useful for finding a user's posts on a topic (hn_get_user only shows recent submissions). Trimmed before filtering; omit the field to search all authors rather than passing a blank string.`,
+      ),
+    storyId: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        'Restrict results to one discussion: the id of a story or poll root, combined with the other filters. Pair with tags "comment" to search within a thread. Take it from hits[].storyId or the root item of hn_get_thread — a comment id matches nothing.',
       ),
     sort: z
       .enum(['relevance', 'date'])
@@ -121,26 +260,32 @@ export const searchHn = tool('hn_search_content', {
       .describe('Sort order. "relevance" for best match, "date" for most recent first.'),
     dateRange: z
       .object({
-        start: z
-          .string()
-          .refine((s) => !Number.isNaN(Date.parse(s)), 'Must be a parseable ISO 8601 date')
-          .optional()
-          .describe('Start date (ISO 8601). Results created after this date.'),
-        end: z
-          .string()
-          .refine((s) => !Number.isNaN(Date.parse(s)), 'Must be a parseable ISO 8601 date')
-          .optional()
-          .describe('End date (ISO 8601). Results created before this date.'),
+        start: dateBound().describe(
+          'Exclusive lower bound — only items created strictly after this instant match. ISO 8601: YYYY, YYYY-MM, YYYY-MM-DD, or YYYY-MM-DDThh:mm[:ss[.sss]] with an optional Z or ±hh:mm offset. Reduced and date-only forms mean UTC midnight at the start of that period; a date-time without an offset is read as UTC.',
+        ),
+        end: dateBound().describe(
+          'Exclusive upper bound — only items created strictly before this instant match. Same formats and UTC reading as start, and must be later than start. A date-only end excludes that whole UTC day: to include it, pass the next day or a full timestamp.',
+        ),
       })
       .optional()
-      .describe('Filter to a date window. Useful for finding discussions about recent events.'),
+      .describe(
+        'Filter to a creation-time window with a start, an end, or both. An empty object is rejected — omit dateRange instead.',
+      ),
     minPoints: z
       .number()
       .int()
       .min(0)
       .optional()
-      .describe('Minimum score/points. Filters out low-engagement content.'),
-    count: z.number().int().min(1).max(50).default(30).describe('Number of results to return.'),
+      .describe(
+        'Minimum score. Applies to stories and polls, including the ask_hn, show_hn, and front_page subsets. Comments and jobs carry no points in the search index, so any minPoints excludes them — combining it with tags "comment" or "job" is rejected.',
+      ),
+    count: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_COUNT)
+      .default(30)
+      .describe('Number of results to return.'),
     page: z.number().int().min(0).default(0).describe('Page number for pagination (0-indexed).'),
     view: z
       .enum(['full', 'compact'])
@@ -155,7 +300,10 @@ export const searchHn = tool('hn_search_content', {
         z
           .object({
             id: z.number().describe('HN item ID — use with hn_get_thread to read the discussion.'),
-            title: z.string().optional().describe('Story title (present for stories).'),
+            title: z
+              .string()
+              .optional()
+              .describe('Item title (present for stories, polls, and jobs).'),
             url: z.string().optional().describe('External link URL.'),
             domain: z
               .string()
@@ -206,10 +354,13 @@ export const searchHn = tool('hn_search_content', {
                 'Algolia per-field highlight metadata showing which terms matched and where. Absent when no fields produced a match.',
               ),
           })
-          .describe('A single Algolia search hit (story or comment).'),
+          .describe('A single Algolia search hit (story, comment, poll, or job).'),
       )
       .describe('Search results ranked by sort order.'),
-    query: z.string().describe('The query that was searched.'),
+    query: z
+      .string()
+      .optional()
+      .describe('The query that was searched. Absent for a filter-only search.'),
   }),
 
   enrichment: {
@@ -223,18 +374,56 @@ export const searchHn = tool('hn_search_content', {
     truncated: z
       .boolean()
       .optional()
-      .describe('True when the hit list was capped by the count parameter.'),
+      .describe(
+        'True when more pages remain after this one (page + 1 < totalPages). Absent on the last page Algolia serves.',
+      ),
     shown: z.number().optional().describe('Number of hits returned.'),
     cap: z.number().optional().describe('The count cap that was applied.'),
     notice: z
       .string()
       .optional()
       .describe(
-        'Recovery hint when results are empty — names the filters applied, for relaxing the search. Absent on non-empty result pages.',
+        'Agent guidance: the next page to request while more pages remain, the last valid page when the requested page is past the end, or the filters to relax when a first page comes back empty. Absent on the last page of a non-empty result.',
       ),
   },
 
   async handler(input, ctx) {
+    const { dateRange } = input;
+    if (dateRange) {
+      const { start, end } = dateRange;
+      if (!start && !end) {
+        throw ctx.fail(
+          'invalid_date_range',
+          'dateRange has neither a start nor an end bound.',
+          ctx.recoveryFor('invalid_date_range'),
+        );
+      }
+      if (start && end && dateBoundToEpochSeconds(start) >= dateBoundToEpochSeconds(end)) {
+        throw ctx.fail(
+          'invalid_date_range',
+          `dateRange.start (${start}) is not before dateRange.end (${end}); both bounds are exclusive, so the window holds nothing.`,
+          ctx.recoveryFor('invalid_date_range'),
+        );
+      }
+    }
+
+    if (input.minPoints != null && (input.tags === 'comment' || input.tags === 'job')) {
+      throw ctx.fail(
+        'min_points_unscored_type',
+        `minPoints cannot match tags "${input.tags}": ${input.tags} records carry no points, so any minPoints excludes every one.`,
+        ctx.recoveryFor('min_points_unscored_type'),
+      );
+    }
+
+    const filters = appliedFilters(input);
+    if (input.query == null && filters.length === 0) {
+      throw ctx.fail(
+        'missing_query_or_filter',
+        'No query and no filter were supplied, so there is nothing to search by.',
+        ctx.recoveryFor('missing_query_or_filter'),
+      );
+    }
+
     const hn = getHnService();
     const result = await hn.search(input, ctx);
 
@@ -267,32 +456,33 @@ export const searchHn = tool('hn_search_content', {
       totalHits: result.nbHits,
     });
 
-    ctx.enrich({ totalHits: result.nbHits, page: result.page, totalPages: result.nbPages });
-    if (hits.length === input.count && result.nbHits > input.count) {
-      ctx.enrich.truncated({ shown: hits.length, cap: input.count });
-    }
-
+    const { nbHits: totalHits, nbPages: totalPages, page } = result;
+    ctx.enrich({ totalHits, page, totalPages });
     if (hits.length === 0) {
-      const filters: string[] = [];
-      if (input.tags) filters.push('tags');
-      if (input.author) filters.push('author');
-      if (input.minPoints != null) filters.push('minPoints');
-      if (input.dateRange) filters.push('dateRange');
-      const notice = filters.length
-        ? `Try broader keywords, or relax these filters: ${filters.join(', ')}.`
-        : `Try broader keywords or different terms.`;
-      ctx.enrich.notice(notice);
+      ctx.enrich.notice(emptyPageNotice(input, filters, page, totalHits, totalPages));
+    } else if (page + 1 < totalPages) {
+      const raiseCount = input.count < MAX_COUNT ? `, or raise count (max ${MAX_COUNT})` : '';
+      ctx.enrich.truncated({
+        shown: hits.length,
+        cap: input.count,
+        guidance: `Showing ${hits.length} of ${totalHits} hits (page ${page} of ${totalPages}). Pass page: ${page + 1} for more${raiseCount}.`,
+      });
     }
 
     return {
       hits,
-      query: input.query,
+      ...(input.query != null && { query: input.query }),
     };
   },
 
   format: (result) => {
     if (result.hits.length === 0) {
-      return [{ type: 'text' as const, text: `"${result.query}" — no results.` }];
+      return [
+        {
+          type: 'text' as const,
+          text: result.query != null ? `"${result.query}" — no results.` : 'No results.',
+        },
+      ];
     }
 
     /** Render highlight metadata as a `> match: ...` footer. Surfaces each highlights field separately so structured consumers and the LLM both see what matched. */
@@ -344,7 +534,10 @@ export const searchHn = tool('hn_search_content', {
       return `### Comment on "${h.storyTitle ?? 'unknown'}" (story id:${h.storyId ?? '?'})\n${meta}${text}${hlLine}`;
     });
 
-    const header = `## "${result.query}" — search results`;
+    const header =
+      result.query != null
+        ? `## "${result.query}" — search results`
+        : '## Search results (filters only)';
     return [{ type: 'text' as const, text: `${header}\n\n${lines.join('\n\n')}` }];
   },
 });

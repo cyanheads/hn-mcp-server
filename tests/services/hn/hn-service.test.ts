@@ -8,6 +8,7 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  dateBoundToEpochSeconds,
   decodeHtmlEntities,
   extractDomain,
   filterLiveItems,
@@ -444,164 +445,174 @@ describe('HnService.fetchUser URL construction', () => {
 });
 
 // ---------------------------------------------------------------------------
-// HnService.search — URL construction (pure logic, no HTTP calls)
+// HnService.search — URL construction against the real method, fetch stubbed
 // ---------------------------------------------------------------------------
 
-/**
- * Mirror the URL-building logic from HnService.search to test it in isolation.
- * This tests the param construction rules without making network calls.
- */
-function buildSearchUrl(params: {
-  query: string;
-  tags?: string;
-  author?: string;
-  sort: 'relevance' | 'date';
-  dateRange?: { start?: string; end?: string };
-  minPoints?: number;
-  count: number;
-  page: number;
-}): URL {
-  const ALGOLIA_API = 'https://hn.algolia.com/api/v1';
-  const endpoint = params.sort === 'date' ? 'search_by_date' : 'search';
-  const url = new URL(`${ALGOLIA_API}/${endpoint}`);
+describe('HnService.search URL construction', () => {
+  type SearchParams = Parameters<HnService['search']>[0];
 
-  url.searchParams.set('query', params.query);
-  url.searchParams.set('hitsPerPage', String(params.count));
-  url.searchParams.set('page', String(params.page));
+  const EMPTY_PAGE = JSON.stringify({ hits: [], hitsPerPage: 10, nbHits: 0, nbPages: 0, page: 0 });
 
-  const tagParts: string[] = [];
-  if (params.tags) tagParts.push(params.tags);
-  if (params.author) tagParts.push(`author_${params.author}`);
-  if (tagParts.length) url.searchParams.set('tags', tagParts.join(','));
-
-  const numericFilters: string[] = [];
-  if (params.minPoints != null) numericFilters.push(`points>=${params.minPoints}`);
-  if (params.dateRange?.start) {
-    numericFilters.push(
-      `created_at_i>${Math.floor(new Date(params.dateRange.start).getTime() / 1000)}`,
+  /** Run the real `search()` against a stubbed fetch and return the one URL it requested. */
+  async function requestedUrl(overrides: Partial<SearchParams>): Promise<URL> {
+    const seen: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL) => {
+        seen.push(url.toString());
+        return new Response(EMPTY_PAGE, { status: 200 });
+      }),
     );
-  }
-  if (params.dateRange?.end) {
-    numericFilters.push(
-      `created_at_i<${Math.floor(new Date(params.dateRange.end).getTime() / 1000)}`,
+    await new HnService(1).search(
+      { query: 'x', sort: 'relevance', count: 10, page: 0, ...overrides },
+      createMockContext(),
     );
+    expect(seen).toHaveLength(1);
+    return new URL(seen[0]!);
   }
-  if (numericFilters.length) url.searchParams.set('numericFilters', numericFilters.join(','));
 
-  return url;
-}
+  const originalTz = process.env.TZ;
 
-describe('HnService.search URL construction (pure logic)', () => {
-  it('routes sort=relevance to /search endpoint', () => {
-    const url = buildSearchUrl({ query: 'test', sort: 'relevance', count: 10, page: 0 });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
+  });
+
+  it('routes sort=relevance to /search endpoint', async () => {
+    const url = await requestedUrl({ sort: 'relevance' });
     expect(url.pathname).toBe('/api/v1/search');
   });
 
-  it('routes sort=date to /search_by_date endpoint', () => {
-    const url = buildSearchUrl({ query: 'test', sort: 'date', count: 10, page: 0 });
+  it('routes sort=date to /search_by_date endpoint', async () => {
+    const url = await requestedUrl({ sort: 'date' });
     expect(url.pathname).toBe('/api/v1/search_by_date');
   });
 
-  it('encodes query and pagination params', () => {
-    const url = buildSearchUrl({ query: 'rust lang', sort: 'relevance', count: 5, page: 2 });
+  it('encodes query and pagination params', async () => {
+    const url = await requestedUrl({ query: 'rust lang', count: 5, page: 2 });
     expect(url.searchParams.get('query')).toBe('rust lang');
     expect(url.searchParams.get('hitsPerPage')).toBe('5');
     expect(url.searchParams.get('page')).toBe('2');
   });
 
-  it('builds tags param from tags filter only', () => {
-    const url = buildSearchUrl({
-      query: 'x',
-      sort: 'relevance',
-      count: 10,
-      page: 0,
-      tags: 'story',
-    });
+  it('omits the query param entirely for a filter-only search', async () => {
+    const url = await requestedUrl({ query: undefined, tags: 'ask_hn' });
+    expect(url.searchParams.has('query')).toBe(false);
+    expect(url.searchParams.get('tags')).toBe('ask_hn');
+  });
+
+  it('builds tags param from tags filter only', async () => {
+    const url = await requestedUrl({ tags: 'story' });
     expect(url.searchParams.get('tags')).toBe('story');
   });
 
-  it('builds tags param from author only', () => {
-    const url = buildSearchUrl({
-      query: 'x',
-      sort: 'relevance',
-      count: 10,
-      page: 0,
-      author: 'dang',
-    });
+  it('builds tags param from author only', async () => {
+    const url = await requestedUrl({ author: 'dang' });
     expect(url.searchParams.get('tags')).toBe('author_dang');
   });
 
-  it('combines tags and author in tags param', () => {
-    const url = buildSearchUrl({
-      query: 'x',
-      sort: 'relevance',
-      count: 10,
-      page: 0,
-      tags: 'comment',
-      author: 'pg',
-    });
+  it('combines tags and author in tags param', async () => {
+    const url = await requestedUrl({ tags: 'comment', author: 'pg' });
     expect(url.searchParams.get('tags')).toBe('comment,author_pg');
   });
 
-  it('omits tags param when neither tags nor author is set', () => {
-    const url = buildSearchUrl({ query: 'x', sort: 'relevance', count: 10, page: 0 });
+  it('sends storyId as a story_<id> tag ANDed with the other tags', async () => {
+    const url = await requestedUrl({ tags: 'comment', author: 'pg', storyId: 8863 });
+    /** Comma-separated tags are ANDed by Algolia. */
+    expect(url.searchParams.get('tags')).toBe('comment,author_pg,story_8863');
+  });
+
+  it('sends storyId alone as the only tag', async () => {
+    const url = await requestedUrl({ query: undefined, storyId: 8863 });
+    expect(url.searchParams.get('tags')).toBe('story_8863');
+  });
+
+  it('omits tags param when neither tags nor author is set', async () => {
+    const url = await requestedUrl({});
     expect(url.searchParams.get('tags')).toBeNull();
   });
 
-  it('builds numericFilters from minPoints', () => {
-    const url = buildSearchUrl({
-      query: 'x',
-      sort: 'relevance',
-      count: 10,
-      page: 0,
-      minPoints: 50,
-    });
-    expect(url.searchParams.get('numericFilters')).toContain('points>=50');
+  it('builds numericFilters from minPoints', async () => {
+    const url = await requestedUrl({ minPoints: 50 });
+    expect(url.searchParams.get('numericFilters')).toBe('points>=50');
   });
 
-  it('builds numericFilters from dateRange.start', () => {
-    const url = buildSearchUrl({
-      query: 'x',
-      sort: 'relevance',
-      count: 10,
-      page: 0,
-      dateRange: { start: '2024-01-01' },
-    });
-    const nf = url.searchParams.get('numericFilters')!;
-    expect(nf).toMatch(/created_at_i>\d+/);
+  it('converts a date-only start to UTC midnight, exclusive', async () => {
+    const url = await requestedUrl({ dateRange: { start: '2024-01-01' } });
+    expect(url.searchParams.get('numericFilters')).toBe('created_at_i>1704067200');
   });
 
-  it('builds numericFilters from dateRange.end', () => {
-    const url = buildSearchUrl({
-      query: 'x',
-      sort: 'relevance',
-      count: 10,
-      page: 0,
-      dateRange: { end: '2024-12-31' },
-    });
-    const nf = url.searchParams.get('numericFilters')!;
-    expect(nf).toMatch(/created_at_i<\d+/);
+  it('converts a date-only end to UTC midnight, exclusive', async () => {
+    const url = await requestedUrl({ dateRange: { end: '2024-12-31' } });
+    expect(url.searchParams.get('numericFilters')).toBe('created_at_i<1735603200');
   });
 
-  it('combines minPoints and dateRange in numericFilters', () => {
-    const url = buildSearchUrl({
-      query: 'x',
-      sort: 'relevance',
-      count: 10,
-      page: 0,
+  it.each([
+    ['2024', 1704067200],
+    ['2024-05', 1714521600],
+    ['2024-05-05', 1714867200],
+    ['2024-05-05T10:00:00Z', 1714903200],
+    ['2024-05-05T10:00:00+02:00', 1714896000],
+    ['2024-05-05T10:00:00.500Z', 1714903200],
+  ])('converts the ISO form %j to its UTC epoch second', async (start, epoch) => {
+    const url = await requestedUrl({ dateRange: { start } });
+    expect(url.searchParams.get('numericFilters')).toBe(`created_at_i>${epoch}`);
+  });
+
+  it('reads an offset-less date-time as UTC regardless of the host time zone', async () => {
+    /** Under JS's own parsing, "2024-05-05T10:00" is host-local — 17:00Z on a UTC−7 host. */
+    process.env.TZ = 'America/Los_Angeles';
+    const url = await requestedUrl({ dateRange: { start: '2024-05-05T10:00', end: '2024-05-06' } });
+    expect(url.searchParams.get('numericFilters')).toBe(
+      'created_at_i>1714903200,created_at_i<1714953600',
+    );
+  });
+
+  it('combines minPoints and dateRange in numericFilters', async () => {
+    const url = await requestedUrl({
       minPoints: 100,
       dateRange: { start: '2024-01-01', end: '2024-12-31' },
     });
-    const nf = url.searchParams.get('numericFilters')!;
-    expect(nf).toContain('points>=100');
-    expect(nf).toMatch(/created_at_i>\d+/);
-    expect(nf).toMatch(/created_at_i<\d+/);
+    expect(url.searchParams.get('numericFilters')).toBe(
+      'points>=100,created_at_i>1704067200,created_at_i<1735603200',
+    );
   });
 
-  it('omits numericFilters when no filters are set', () => {
-    const url = buildSearchUrl({ query: 'x', sort: 'relevance', count: 10, page: 0 });
+  it('omits numericFilters when no filters are set', async () => {
+    const url = await requestedUrl({});
     expect(url.searchParams.get('numericFilters')).toBeNull();
   });
+});
+
+// ---------------------------------------------------------------------------
+// dateBoundToEpochSeconds
+// ---------------------------------------------------------------------------
+
+describe('dateBoundToEpochSeconds', () => {
+  const originalTz = process.env.TZ;
+
+  afterEach(() => {
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
+  });
+
+  it('reads a date-only bound as UTC midnight', () => {
+    expect(dateBoundToEpochSeconds('2026-09-13')).toBe(1789257600);
+  });
+
+  it('keeps an explicit offset', () => {
+    expect(dateBoundToEpochSeconds('2024-05-05T10:00-07:00')).toBe(1714928400);
+  });
+
+  it.each(['UTC', 'America/Los_Angeles', 'Asia/Kolkata'])(
+    'reads an offset-less date-time as UTC under TZ=%s',
+    (tz) => {
+      process.env.TZ = tz;
+      expect(dateBoundToEpochSeconds('2024-05-05T10:00')).toBe(1714903200);
+      expect(dateBoundToEpochSeconds('2024-05-05T10:00:30.250')).toBe(1714903230);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
