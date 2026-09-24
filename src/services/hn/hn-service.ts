@@ -116,14 +116,12 @@ function throughLastTag(text: string, rewrite: (head: string) => string): string
   return rewrite(text.slice(0, end)) + text.slice(end);
 }
 
-/** Remove every tag, repeating until a pass removes nothing. */
+/**
+ * Remove every tag. One pass is complete: a `<` the pass leaves is followed
+ * directly by `>` or by no `>` at all, and removing a tag changes neither.
+ */
 function stripTags(text: string): string {
-  let prev: string;
-  do {
-    prev = text;
-    text = throughLastTag(text, (head) => head.replace(/<[^>]+>/g, ''));
-  } while (text !== prev);
-  return text;
+  return throughLastTag(text, (head) => head.replace(/<[^>]+>/g, ''));
 }
 
 /**

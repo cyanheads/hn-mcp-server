@@ -255,7 +255,7 @@ The HN API returns HTML in body fields: `text` and `about`, and Algolia's `comme
 - `<p>` tags → a blank line
 - `<pre><code>` → kept verbatim, leading indent included, with entities decoded
 - `<a href="...">` → the href alone when the link text is the href or a `...`-truncated prefix of it; otherwise `text (href)`. HN cuts long link text short and older items encode `/` in the text but not the href, so the two are compared after decoding, with highlight markers set aside and any entity the cut left partial (the `&#3` of `&#38;`) dropped
-- All other tags → stripped, content kept, repeating until a pass removes nothing
+- All other tags → stripped, content kept
 - Named and numeric HTML entities → decoded exactly once; a reference to U+0000, U+0001, a surrogate, or a value past U+10FFFF decodes to U+FFFD, and a name outside the declared set (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`, `&nbsp;`) stays as typed
 
 Titles are not HTML, though some carry entities: `The <Dialog> Element` and `AT&T` arrive as typed, while items 1031 (`&#34;Remember Me&#34; …`) and 3409539 (`Apple&#8217;s …`) arrive encoded on both APIs, and Algolia encodes 26915706 as `Using &lt;details&gt; …` where Firebase sends it raw. Every title projection therefore takes `decodeHtmlEntities` alone and never `stripHtml`, so a title that looks like a tag survives. No raw HTML from a body reaches tool output.
