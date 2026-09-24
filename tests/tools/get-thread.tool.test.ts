@@ -6,6 +6,7 @@
 import {
   createMockContext as createFrameworkMockContext,
   getEnrichment,
+  runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import type { HnItem } from '@/services/hn/types.js';
@@ -597,5 +598,165 @@ describe('hn_get_thread — security and edge cases', () => {
     expect(notice).toMatch(/deleted/i);
     expect(notice).toMatch(/dead/i);
     expect(notice).toMatch(/loaded/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Truncation — terminal threads versus a maxComments cap
+// ---------------------------------------------------------------------------
+
+describe('hn_get_thread truncation', () => {
+  let hn: ReturnType<typeof createMockHnService>;
+
+  type ToolResult = Awaited<ReturnType<typeof runToolContract>>;
+
+  function call(input: Record<string, unknown>): Promise<ToolResult> {
+    return runToolContract(getThread, input as never, { context: { errors: getThread.errors } });
+  }
+
+  function structured(result: ToolResult): Record<string, unknown> {
+    expect(result.isError).toBeFalsy();
+    return result.structuredContent as Record<string, unknown>;
+  }
+
+  function contentText(result: ToolResult): string {
+    return result.content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+  }
+
+  const comment = (id: number, parent: number, kids?: number[]): HnItem => ({
+    id,
+    type: 'comment',
+    by: `u${id}`,
+    text: `c${id}`,
+    parent,
+    ...(kids && { kids }),
+  });
+
+  beforeEach(() => {
+    hn = createMockHnService();
+    (getHnService as Mock).mockReturnValue(hn);
+  });
+
+  it('reports a thread fully loaded at exactly maxComments as terminal', async () => {
+    /** descendants 3, three comments across two levels, maxComments 3 — nothing left to fetch. */
+    hn.fetchItem.mockResolvedValue({ ...mockStory, descendants: 3, kids: [10, 11] });
+    hn.fetchItems
+      .mockResolvedValueOnce([comment(10, 1, [20]), comment(11, 1)])
+      .mockResolvedValueOnce([comment(20, 10)]);
+
+    const result = await call({ itemId: 1, depth: 10, maxComments: 3 });
+    const sc = structured(result);
+
+    expect(sc).toMatchObject({ totalLoaded: 3, totalAvailable: 3 });
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc).not.toHaveProperty('shown');
+    expect(sc).not.toHaveProperty('cap');
+    expect(sc).not.toHaveProperty('notice');
+    expect(contentText(result)).not.toContain('capped');
+  });
+
+  it('keeps truncated with guidance naming maxComments when the cap cut the thread short', async () => {
+    hn.fetchItem.mockResolvedValue({ ...mockStory, descendants: 100, kids: [10, 11, 12] });
+    hn.fetchItems.mockResolvedValueOnce([comment(10, 1), comment(11, 1), comment(12, 1)]);
+
+    const result = await call({ itemId: 1, depth: 3, maxComments: 2 });
+    const sc = structured(result);
+    const notice = sc.notice as string;
+
+    expect(sc).toMatchObject({ totalLoaded: 2, truncated: true, shown: 2, cap: 2 });
+    expect(notice).toBe(
+      'Stopped at maxComments 2 with 2/100 comments loaded. Raise maxComments (max 200) for more, or pass a comment id as itemId to read its subtree.',
+    );
+    expect(notice).not.toContain('narrow with filters');
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('drops the raise-maxComments suggestion when maxComments is already at its max', async () => {
+    const kids = Array.from({ length: 200 }, (_, i) => 1000 + i);
+    hn.fetchItem.mockResolvedValue({ ...mockStory, descendants: 900, kids });
+    hn.fetchItems.mockResolvedValueOnce(kids.map((id) => comment(id, 1)));
+
+    const notice = structured(await call({ itemId: 1, depth: 1, maxComments: 200 }))
+      .notice as string;
+
+    expect(notice).toBe(
+      'Stopped at maxComments 200 with 200/900 comments loaded. Pass a comment id as itemId to read its subtree.',
+    );
+  });
+
+  it('keeps truncated when the cap is hit and the root reports no descendants', async () => {
+    const commentRoot: HnItem = {
+      id: 10,
+      type: 'comment',
+      by: 'bob',
+      text: 'root',
+      kids: [20, 21],
+    };
+    hn.fetchItem.mockResolvedValue(commentRoot);
+    hn.fetchItems.mockResolvedValueOnce([comment(20, 10), comment(21, 10)]);
+
+    const sc = structured(await call({ itemId: 10, depth: 1, maxComments: 2 }));
+
+    expect(sc).toMatchObject({ totalLoaded: 2, truncated: true, shown: 2, cap: 2 });
+    expect(sc).not.toHaveProperty('totalAvailable');
+    expect(sc.notice).toBe(
+      'Stopped at maxComments 2. Raise maxComments (max 200) for more, or pass a comment id as itemId to read its subtree.',
+    );
+  });
+
+  it('hits the cap past the first level and still reports it as truncated', async () => {
+    hn.fetchItem.mockResolvedValue({ ...mockStory, descendants: 10, kids: [10, 11] });
+    hn.fetchItems
+      .mockResolvedValueOnce([comment(10, 1, [20, 21, 22]), comment(11, 1, [23])])
+      .mockResolvedValueOnce([
+        comment(20, 10, [30]),
+        comment(21, 10),
+        comment(22, 10),
+        comment(23, 11),
+      ]);
+
+    const result = await call({ itemId: 1, depth: 5, maxComments: 4 });
+    const sc = structured(result);
+    const comments = sc.comments as Array<{ id: number; depth: number; parentId: number }>;
+
+    expect(comments.map((c) => [c.id, c.depth, c.parentId])).toEqual([
+      [10, 0, 1],
+      [11, 0, 1],
+      [20, 1, 10],
+      [21, 1, 10],
+    ]);
+    expect(sc).toMatchObject({ totalLoaded: 4, truncated: true, cap: 4 });
+    expect(sc.notice).toContain('4/10 comments loaded');
+  });
+
+  it('composes dropped deleted/dead counts with the truncation guidance', async () => {
+    hn.fetchItem.mockResolvedValue({ ...mockStory, descendants: 50, kids: [10, 11, 12, 13] });
+    hn.fetchItems.mockResolvedValueOnce([
+      { id: 10, type: 'comment', deleted: true, parent: 1 },
+      { id: 11, type: 'comment', dead: true, parent: 1 },
+      comment(12, 1),
+      comment(13, 1),
+    ]);
+
+    const result = await call({ itemId: 1, depth: 1, maxComments: 2 });
+    const notice = structured(result).notice as string;
+
+    expect(notice).toBe(
+      '1 deleted, 1 dead — omitted from this view. Stopped at maxComments 2 with 2/50 comments loaded. Raise maxComments (max 200) for more, or pass a comment id as itemId to read its subtree.',
+    );
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('keeps the raise-depth hint when the cap was not hit but comments remain', async () => {
+    hn.fetchItem.mockResolvedValue({ ...mockStory, descendants: 5, kids: [10, 11] });
+    hn.fetchItems.mockResolvedValueOnce([comment(10, 1, [20]), comment(11, 1)]);
+
+    const sc = structured(await call({ itemId: 1, depth: 1, maxComments: 50 }));
+
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc.notice).toBe('2/5 comments loaded — raise maxComments or depth for more.');
   });
 });

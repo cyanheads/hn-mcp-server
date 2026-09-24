@@ -13,6 +13,9 @@ import {
   stripHtml,
 } from '@/services/hn/hn-service.js';
 
+/** Largest page `count` accepts, mirrored in the input schema. */
+const MAX_COUNT = 100;
+
 export const getStories = tool('hn_get_stories', {
   description:
     'Fetch stories from an HN feed (top, new, best, ask, show, jobs), with title, URL, score, author, and comment count for each story.',
@@ -68,7 +71,7 @@ export const getStories = tool('hn_get_stories', {
       .number()
       .int()
       .min(1)
-      .max(100)
+      .max(MAX_COUNT)
       .default(30)
       .describe('Number of stories to return. Larger counts take longer.'),
     offset: z
@@ -136,14 +139,16 @@ export const getStories = tool('hn_get_stories', {
     truncated: z
       .boolean()
       .optional()
-      .describe('True when the feed was capped by the count parameter.'),
+      .describe(
+        'True when more stories remain beyond this page (hasMore). Absent on the last page of the feed.',
+      ),
     shown: z.number().optional().describe('Number of stories returned on this page.'),
     cap: z.number().optional().describe('The count cap that was applied.'),
     notice: z
       .string()
       .optional()
       .describe(
-        'Recovery hint when a page is empty — e.g. offset past end of feed or feed has no items. Absent on non-empty result pages.',
+        'Agent guidance: the offset to pass for the next page while more stories remain, or why a page came back empty — offset past the end of the feed, an empty feed, or every item on the page deleted or flagged. Absent on the last page of a non-empty result.',
       ),
   },
 
@@ -174,13 +179,24 @@ export const getStories = tool('hn_get_stories', {
     ctx.log.info('Fetched stories', { feed: input.feed, count: stories.length });
 
     const total = feedIds.length;
-    const hasMore = input.offset + input.count < total;
+    const nextOffset = input.offset + input.count;
+    const hasMore = nextOffset < total;
     ctx.enrich({ total, offset: input.offset, hasMore });
-    if (hasMore || stories.length === input.count) {
-      ctx.enrich.truncated({ shown: stories.length, cap: input.count });
-    }
 
-    if (stories.length === 0) {
+    const deadPageMessage = `No live stories on this page of the ${input.feed} feed (offset:${input.offset}, total:${total}). Items may have been deleted or flagged.`;
+
+    if (hasMore) {
+      const raiseCount = input.count < MAX_COUNT ? `, or raise count (max ${MAX_COUNT})` : '';
+      const nextPage = `Pass offset: ${nextOffset} for the next page${raiseCount}.`;
+      ctx.enrich.truncated({
+        shown: stories.length,
+        cap: input.count,
+        guidance:
+          stories.length === 0
+            ? `${deadPageMessage} ${nextPage}`
+            : `Showing items ${input.offset + 1}–${nextOffset} of ${total} in the ${input.feed} feed. ${nextPage}`,
+      });
+    } else if (stories.length === 0) {
       if (total === 0) {
         ctx.enrich.notice(`${input.feed} feed is empty.`);
       } else if (input.offset >= total) {
@@ -188,9 +204,7 @@ export const getStories = tool('hn_get_stories', {
           `Offset ${input.offset} is past the end of the ${input.feed} feed (${total} item${total === 1 ? '' : 's'}). Reset offset below ${total}.`,
         );
       } else {
-        ctx.enrich.notice(
-          `No live stories on this page of the ${input.feed} feed (offset:${input.offset}, total:${total}). Items may have been deleted or flagged.`,
-        );
+        ctx.enrich.notice(deadPageMessage);
       }
     }
 

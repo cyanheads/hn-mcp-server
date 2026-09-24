@@ -6,6 +6,7 @@
 import {
   createMockContext as createFrameworkMockContext,
   getEnrichment,
+  runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -547,5 +548,117 @@ describe('getStories — security and edge cases', () => {
     const result = await getStories.handler(input, ctx);
 
     expect(result.stories).toHaveLength(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pagination notices — terminal pages versus truncation
+// ---------------------------------------------------------------------------
+
+describe('getStories — pagination notices', () => {
+  const mockService = {
+    fetchFeed: vi.fn<() => Promise<number[]>>(),
+    fetchItems: vi.fn<(ids: number[]) => Promise<(HnItem | null)[]>>(),
+  };
+
+  const feed500 = Array.from({ length: 500 }, (_, i) => i + 1);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getHnService).mockReturnValue(mockService as any);
+    mockService.fetchFeed.mockResolvedValue(feed500);
+    mockService.fetchItems.mockImplementation(async (ids) => ids.map((id) => makeItem({ id })));
+  });
+
+  type ToolResult = Awaited<ReturnType<typeof runToolContract>>;
+
+  function call(input: Record<string, unknown>): Promise<ToolResult> {
+    return runToolContract(getStories, input as never, {
+      context: { errors: getStories.errors },
+    });
+  }
+
+  function structured(result: ToolResult): Record<string, unknown> {
+    expect(result.isError).toBeFalsy();
+    return result.structuredContent as Record<string, unknown>;
+  }
+
+  function contentText(result: ToolResult): string {
+    return result.content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+  }
+
+  it('keeps truncated/shown/cap while more stories remain', async () => {
+    const sc = structured(await call({ feed: 'top', count: 30, offset: 0 }));
+    expect(sc).toMatchObject({ hasMore: true, truncated: true, shown: 30, cap: 30 });
+  });
+
+  it('names the next offset and the count ceiling instead of the framework default', async () => {
+    const result = await call({ feed: 'top', count: 30, offset: 30 });
+    const notice = structured(result).notice as string;
+
+    expect(notice).toBe(
+      'Showing items 31–60 of 500 in the top feed. Pass offset: 60 for the next page, or raise count (max 100).',
+    );
+    expect(notice).not.toContain('narrow with filters');
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('drops the raise-count suggestion when count is already at its max', async () => {
+    const notice = structured(await call({ feed: 'top', count: 100, offset: 0 })).notice;
+    expect(notice).toBe(
+      'Showing items 1–100 of 500 in the top feed. Pass offset: 100 for the next page.',
+    );
+  });
+
+  it('reports the last page as terminal — no truncated, shown, cap, or notice', async () => {
+    const result = await call({ feed: 'top', count: 3, offset: 497 });
+    const sc = structured(result);
+
+    expect(sc.hasMore).toBe(false);
+    expect(sc.stories).toHaveLength(3);
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc).not.toHaveProperty('shown');
+    expect(sc).not.toHaveProperty('cap');
+    expect(sc).not.toHaveProperty('notice');
+    expect(contentText(result)).not.toContain('capped');
+  });
+
+  it('reports a page that exactly consumes a short feed as terminal', async () => {
+    mockService.fetchFeed.mockResolvedValue([1, 2, 3]);
+    const sc = structured(await call({ feed: 'jobs', count: 3, offset: 0 }));
+
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc).not.toHaveProperty('notice');
+  });
+
+  it('names the next offset on an all-dead page that still has stories behind it', async () => {
+    mockService.fetchItems.mockImplementation(async (ids) =>
+      ids.map((id) => makeItem({ id, dead: true })),
+    );
+
+    const result = await call({ feed: 'new', count: 5, offset: 10 });
+    const sc = structured(result);
+    const notice = sc.notice as string;
+
+    expect(sc).toMatchObject({ truncated: true, shown: 0, cap: 5 });
+    expect(notice).toContain('No live stories on this page');
+    expect(notice).toContain('Pass offset: 15 for the next page');
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('keeps the offset-past-end notice without truncation', async () => {
+    const sc = structured(await call({ feed: 'top', count: 10, offset: 600 }));
+
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc.notice).toMatch(/past the end/);
+  });
+
+  it('describes truncated as more stories remaining, and notice as covering pagination', () => {
+    const enrichment = getStories.enrichment as Record<string, { description?: string }>;
+    expect(enrichment.truncated!.description).toMatch(/more stories remain/i);
+    expect(enrichment.notice!.description).not.toMatch(/Absent on non-empty result pages/);
   });
 });

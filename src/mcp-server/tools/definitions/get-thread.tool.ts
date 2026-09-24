@@ -7,6 +7,9 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getHnService, normalizeUrl, stripHtml } from '@/services/hn/hn-service.js';
 
+/** Largest `maxComments` accepts, mirrored in the input schema. */
+const MAX_COMMENTS = 200;
+
 export const getThread = tool('hn_get_thread', {
   description:
     'Get an item and its comment tree as a threaded discussion, with child comments resolved recursively. Use depth 0 for an item-only lookup.',
@@ -74,7 +77,7 @@ export const getThread = tool('hn_get_thread', {
       .number()
       .int()
       .min(1)
-      .max(200)
+      .max(MAX_COMMENTS)
       .default(50)
       .describe(
         `Maximum total comments to include across all depth levels. Highest-ranked top-level comments resolve first; replies fill in only after the level above is exhausted.`,
@@ -132,14 +135,16 @@ export const getThread = tool('hn_get_thread', {
     truncated: z
       .boolean()
       .optional()
-      .describe('True when the comment list was capped by maxComments.'),
+      .describe(
+        'True when maxComments stopped the traversal while comments remained. Absent when every available comment was loaded, even at exactly maxComments.',
+      ),
     shown: z.number().optional().describe('Number of comments returned.'),
     cap: z.number().optional().describe('The maxComments cap that was applied.'),
     notice: z
       .string()
       .optional()
       .describe(
-        'Truncation context: counts of deleted/dead comments dropped during traversal, or pagination hint when totalLoaded < totalAvailable. Absent when no comments were dropped and all available comments were loaded.',
+        'Truncation context: counts of deleted/dead comments dropped during traversal, then either how to get past the maxComments cap when it stopped the traversal, or a raise-maxComments-or-depth hint when totalLoaded < totalAvailable. Absent when no comments were dropped and all available comments were loaded.',
       ),
   },
 
@@ -256,21 +261,35 @@ export const getThread = tool('hn_get_thread', {
     const totalAvailable = root.descendants;
     ctx.enrich({ totalLoaded, ...(totalAvailable != null && { totalAvailable }) });
 
-    if (totalLoaded >= input.maxComments) {
-      ctx.enrich.truncated({ shown: totalLoaded, cap: input.maxComments });
-    }
-
     const noticeParts: string[] = [];
     if (omittedDeleted > 0 || omittedDead > 0) {
       noticeParts.push(`${omittedDeleted} deleted, ${omittedDead} dead — omitted from this view.`);
     }
-    if (totalAvailable != null && totalLoaded < totalAvailable) {
-      noticeParts.push(
-        `${totalLoaded}/${totalAvailable} comments loaded — raise maxComments or depth for more.`,
-      );
-    }
-    if (noticeParts.length > 0) {
-      ctx.enrich.notice(noticeParts.join(' '));
+
+    /** Hitting the cap truncates only while comments remain; a thread loaded in full at exactly maxComments is terminal. */
+    const allLoaded = totalAvailable != null && totalLoaded >= totalAvailable;
+    if (totalLoaded >= input.maxComments && !allLoaded) {
+      const loaded =
+        totalAvailable != null ? ` with ${totalLoaded}/${totalAvailable} comments loaded` : '';
+      const next =
+        input.maxComments < MAX_COMMENTS
+          ? `Raise maxComments (max ${MAX_COMMENTS}) for more, or pass a comment id as itemId to read its subtree.`
+          : 'Pass a comment id as itemId to read its subtree.';
+      noticeParts.push(`Stopped at maxComments ${input.maxComments}${loaded}. ${next}`);
+      ctx.enrich.truncated({
+        shown: totalLoaded,
+        cap: input.maxComments,
+        guidance: noticeParts.join(' '),
+      });
+    } else {
+      if (totalAvailable != null && totalLoaded < totalAvailable) {
+        noticeParts.push(
+          `${totalLoaded}/${totalAvailable} comments loaded — raise maxComments or depth for more.`,
+        );
+      }
+      if (noticeParts.length > 0) {
+        ctx.enrich.notice(noticeParts.join(' '));
+      }
     }
 
     return {
