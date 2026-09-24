@@ -6,7 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
-  dateBoundToEpochSeconds,
+  dateBoundToEpochMs,
   extractDomain,
   getHnService,
   normalizeUrl,
@@ -191,7 +191,8 @@ export const searchHn = tool('hn_search_content', {
       reason: 'upstream_rate_limited',
       code: JsonRpcErrorCode.RateLimited,
       when: 'Algolia answered with HTTP 429.',
-      recovery: 'Wait several seconds before retrying, and call this tool less often.',
+      recovery:
+        'Wait the interval in retryAfter when the error carries one, otherwise several seconds, then retry and call this tool less often.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -398,7 +399,7 @@ export const searchHn = tool('hn_search_content', {
           ctx.recoveryFor('invalid_date_range'),
         );
       }
-      if (start && end && dateBoundToEpochSeconds(start) >= dateBoundToEpochSeconds(end)) {
+      if (start && end && dateBoundToEpochMs(start) >= dateBoundToEpochMs(end)) {
         throw ctx.fail(
           'invalid_date_range',
           `dateRange.start (${start}) is not before dateRange.end (${end}); both bounds are exclusive, so the window holds nothing.`,

@@ -14,8 +14,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AlgoliaResponse } from '@/services/hn/types.js';
 
 vi.mock('@/services/hn/hn-service.js', async (importOriginal) => ({
-  dateBoundToEpochSeconds: (await importOriginal<typeof import('@/services/hn/hn-service.js')>())
-    .dateBoundToEpochSeconds,
+  dateBoundToEpochMs: (await importOriginal<typeof import('@/services/hn/hn-service.js')>())
+    .dateBoundToEpochMs,
   getHnService: vi.fn(),
   stripHtml: vi.fn((html: string) => html),
   stripHtmlPreservingEm: vi.fn((html: string) =>
@@ -1225,6 +1225,28 @@ describe('hn_search_content dateRange validation', () => {
       expect(result.isError).toBeFalsy();
     }
     expect(mockSearch).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ['with a Z offset', { start: '2024-05-05T10:00:00.2Z', end: '2024-05-05T10:00:00.7Z' }],
+    ['offset-less, read as UTC', { start: '2024-05-05T10:00:00.2', end: '2024-05-05T10:00:00.7' }],
+  ])('accepts a start before end within the same second (%s)', async (_label, dateRange) => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await callSearch({ query: 'rust', dateRange });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockSearch).toHaveBeenCalledTimes(1);
+  });
+
+  it('still rejects one sub-second instant written with and without an offset', async () => {
+    const result = await callSearch({
+      query: 'rust',
+      dateRange: { start: '2024-05-05T12:00:00.5+02:00', end: '2024-05-05T10:00:00.5' },
+    });
+
+    expect(wireError(result).data?.reason).toBe('invalid_date_range');
+    expect(mockSearch).not.toHaveBeenCalled();
   });
 });
 
