@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.5.18](changelog/0.5.x/0.5.18.md) — 2026-09-23
 
-hn_search_content gains filter-only and story-scoped search plus ISO 8601 date validation and minPoints guarding against unscored types; all three read tools now distinguish terminal pages from truncation.
+hn_search_content gains filter-only and story-scoped search plus ISO 8601 date validation and minPoints guarding against unscored types; the feed, thread, and search tools now distinguish terminal pages from truncation.
 
 ## [0.5.17](changelog/0.5.x/0.5.17.md) — 2026-09-19
 
