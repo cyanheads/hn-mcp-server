@@ -36,7 +36,7 @@ Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Searc
 | Tool | Description |
 |:---|:---|
 | `hn_get_stories` | Fetch stories from an HN feed (top, new, best, ask, show, jobs), with title, URL, score, author, and comment count |
-| `hn_get_thread` | Get an item and its comment tree as a threaded discussion, with depth and comment-count controls |
+| `hn_get_thread` | Get an item and its comment tree as a threaded discussion, with depth and comment-count controls and a cursor to page through long threads |
 | `hn_get_user` | Fetch a user profile with karma, about, and optionally a page of resolved submissions |
 | `hn_search_content` | Search stories, comments, polls, and jobs via Algolia by keyword, by filters alone, or both — type, author, parent story, date range, and minimum points |
 
@@ -47,15 +47,19 @@ Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Searc
 - Six feed types: `top`, `new`, `best`, `ask`, `show`, `jobs`; `count` (1–100, default 30) and `offset` for pagination
 - Returns id, type, title, url, domain, score, author, timestamp, comment count, and body text — each field omitted (not null) when HN doesn't provide it
 - Enrichment reports `total`, `offset`, and `hasMore`; while more stories remain, `truncated` is set and `notice` names the next `offset`, and a `notice` explains empty pages (empty feed, offset past end, or every item on the page deleted/flagged). The last page carries no truncation
+- Items whose fetch failed after retries are listed in `failedIds` with a `notice` naming the retry; a page where every item failed returns the classified upstream error instead of an empty list
 
 ---
 
 ### `hn_get_thread` <sub>tool</sub>
 
-- `itemId` plus `depth` (0–10, default 3; 0 returns the item with no comments) and `maxComments` (1–200, default 50) capping the total across all levels
+- `itemId` plus `depth` (0–10, default 3; 0 returns the item with no comments) and `maxComments` (1–200, default 50) capping one response across all levels, alongside a fixed 64,000-byte text budget that cuts only between comments
 - Breadth-first traversal ranked like HN — top-ranked top-level comments resolve first, replies fill in only after the level above is exhausted
+- Resumable: a response stopped by `maxComments`, the byte budget, or an upstream rate limit returns `nextCursor`; passing it back as `cursor` with the same `itemId` continues at the next unseen comment. The cursor carries the unvisited comments themselves, so re-ranked replies cannot shift it, and the server keeps no session state. A cursor passed with a different `itemId` fails with `invalid_cursor`
+- The root carries its relationships and state: `parent` for a comment, `poll` for a poll option, `parts` and resolved `options` (text and votes, at every depth) for a poll, and `deleted`/`dead` markers. The `content[]` heading names the type — a title, `Comment by <author>`, `Poll option by <author> on poll <id>` — and marks a deleted or dead root
 - Flat comment list carries `depth`/`parentId` for tree reconstruction, plus `childCount` and an `isOp` flag when the comment author matches the root item's author
-- `notice` reports deleted/dead comments omitted during traversal and, when `totalLoaded` is below `totalAvailable`, the hint to raise `maxComments`/`depth`; `truncated` is set only when `maxComments` stopped the traversal with comments left, not when a thread loads in full at exactly the cap
+- `truncated` and `truncationReason` (`count`, `size`, `rate_limited`, or `depth` when replies lie below the depth limit) are set only while comments remain unread — never on a terminal page, including a thread that loads in full at exactly the cap. `notice` reports deleted/dead comments omitted during traversal and the next step: the cursor, or a larger `depth` or a comment id as `itemId`
+- Comments and poll options whose fetch failed after retries are listed in `failedIds`, and `notice` names them with the retry; failed comments ride in `nextCursor`, so paging on retries them rather than skipping them. The root item is still returned, and a failure is never passed off as a `maxComments`/`depth` limit
 
 ---
 
@@ -63,7 +67,9 @@ Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Searc
 
 - `username` is case-sensitive and trimmed; `includeSubmissions` (default false) resolves recent submissions, with `submissionCount` (1–50, default 10) and `submissionOffset` paging through a long history
 - Profile includes karma, creation date, and about text (HTML stripped); submissions filter out dead/deleted items
+- A comment submission carries its `parent` and a poll-option submission its `poll`, so either links back to what it answered
 - Enrichment echoes `submissionOffset` and the offset to send next, or a notice when the requested offset is past the end of the history
+- Submissions whose fetch failed after retries are listed in `failedIds` with a `notice` naming the retry; a window where every submission failed returns the classified upstream error
 
 ---
 
@@ -91,9 +97,9 @@ HN-specific:
 
 Agent-friendly output:
 
-- Graceful partial failure — `hn_get_thread` counts deleted and dead comments dropped during traversal and surfaces the count in `notice` rather than silently shrinking the result; `hn_get_stories` and `hn_get_user` filter dead/deleted items the same way
-- Discriminated output contracts — typed error reasons (`item_not_found`, `upstream_rate_limited`, `upstream_html`, …) with per-reason recovery text, and a `depth`/`parentId` pair on every comment so callers reconstruct the tree without guessing nesting
-- Pagination provenance — every paged tool echoes the offset it used (`offset`, `submissionOffset`, `page`) plus the exact next-offset value in `notice`, so an agent can resume a listing without recomputing state
+- Graceful partial failure — an item whose fetch fails after retries is reported by ID in `failedIds`, apart from deleted, dead, or nonexistent items, rather than silently shrinking the result; `hn_get_thread` also counts the deleted and dead comments it drops, and a rate-limited item stops the batch instead of sending every remaining item through its own retry ladder
+- Discriminated output contracts — typed error reasons (`item_not_found`, `upstream_rate_limited`, `upstream_html`, …) with per-reason recovery text (a rate limit passes on the upstream's `Retry-After` as `retryAfter`), and a `depth`/`parentId` pair on every comment so callers reconstruct the tree without guessing nesting
+- Pagination provenance — every paged listing echoes the offset it used (`offset`, `submissionOffset`, `page`) plus the exact next-offset value in `notice`, and `hn_get_thread` returns a self-contained `nextCursor`, so an agent can resume without recomputing state
 - Response shaping — HTML stripping, URL normalization, and domain extraction remove upstream markup noise; `hn_search_content`'s `view: "compact"` drops the two body-text fields that otherwise duplicate a hit's full text
 
 ## Getting started
