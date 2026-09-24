@@ -5,12 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import {
-  filterLiveItems,
-  getHnService,
-  normalizeUrl,
-  stripHtml,
-} from '@/services/hn/hn-service.js';
+import { getHnService, normalizeUrl, settlePage, stripHtml } from '@/services/hn/hn-service.js';
 
 export const getUser = tool('hn_get_user', {
   description:
@@ -35,7 +30,8 @@ export const getUser = tool('hn_get_user', {
       reason: 'upstream_rate_limited',
       code: JsonRpcErrorCode.RateLimited,
       when: 'The HN API answered with HTTP 429.',
-      recovery: 'Wait several seconds before retrying, and call this tool less often.',
+      recovery:
+        'Wait the interval in retryAfter when the error carries one, otherwise several seconds, then retry and call this tool less often.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -111,7 +107,14 @@ export const getUser = tool('hn_get_user', {
         z
           .object({
             id: z.number().describe('Item ID — use with hn_get_thread to read comments.'),
-            type: z.string().describe('Item type (story, comment, job, poll).'),
+            type: z.string().describe('Item type (story, comment, job, poll, pollopt).'),
+            parent: z
+              .number()
+              .optional()
+              .describe(
+                'For a comment, the ID of the story or comment it replied to — pass it to hn_get_thread for the context.',
+              ),
+            poll: z.number().optional().describe('For a poll option, the ID of its poll.'),
             title: z.string().optional().describe('Title (stories/jobs/polls).'),
             url: z.string().optional().describe('External link URL.'),
             text: z.string().optional().describe('Body text (HTML stripped).'),
@@ -119,11 +122,11 @@ export const getUser = tool('hn_get_user', {
             time: z.number().optional().describe('Unix timestamp.'),
             descendants: z.number().optional().describe('Comment count (stories/polls).'),
           })
-          .describe('A single submission by the user (story, comment, job, or poll).'),
+          .describe('A single submission by the user (story, comment, job, poll, or poll option).'),
       )
       .optional()
       .describe(
-        'One page of submissions, most recent first, starting at submissionOffset. Absent when includeSubmissions is false or the user has never submitted. Empty when the page holds no live items — either the offset is past the end, or every item in the window was deleted or flagged.',
+        'One page of submissions, most recent first, starting at submissionOffset. Absent when includeSubmissions is false or the user has never submitted. Empty when the page holds no live items — either the offset is past the end, or every item in the window was deleted, flagged, or failed to load (failedIds lists the failures).',
       ),
   }),
 
@@ -137,12 +140,21 @@ export const getUser = tool('hn_get_user', {
     truncated: z.boolean().optional().describe('True when submissions remain beyond this page.'),
     shown: z.number().optional().describe('Number of submissions returned.'),
     cap: z.number().optional().describe('The submissionCount cap that was applied.'),
+    failedIds: z
+      .array(z.number())
+      .optional()
+      .describe(
+        'Submission IDs in this window whose fetch failed after retries. They are not deleted or missing and may load on a later call: retry with the same submissionOffset, or pass an ID to hn_get_thread to fetch that item alone. Absent when every submission in the window loaded.',
+      ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Pagination context — which window of the history this page covers and the submissionOffset to send next, or a warning that the offset is past the end. Absent when the page reaches the end of the history, or when no submissions were resolved.',
+        'Pagination context — which window of the history this page covers and the submissionOffset to send next, the submission IDs that failed to load and how to retry them, or a warning that the offset is past the end. Absent when the page reaches the end of the history with no failed IDs, or when no submissions were resolved.',
       ),
+  },
+  enrichmentTrailer: {
+    failedIds: { render: (ids) => `**Failed to load:** ${(ids ?? []).join(', ')}` },
   },
 
   async handler(input, ctx) {
@@ -166,41 +178,60 @@ export const getUser = tool('hn_get_user', {
     const offset = input.submissionOffset;
     const pageEnd = offset + input.submissionCount;
 
-    const submissions =
+    const windowIds =
       input.includeSubmissions && user.submitted?.length
-        ? filterLiveItems(await hn.fetchItems(user.submitted.slice(offset, pageEnd), ctx)).map(
-            (item) => ({
-              id: item.id,
-              type: item.type,
-              title: item.title ? stripHtml(item.title) : undefined,
-              url: normalizeUrl(item.url),
-              text: item.text ? stripHtml(item.text) : undefined,
-              score: item.score,
-              time: item.time,
-              descendants: item.descendants,
-            }),
-          )
+        ? user.submitted.slice(offset, pageEnd)
         : undefined;
+    const page = windowIds ? settlePage(await hn.fetchItems(windowIds, ctx)) : undefined;
+
+    const submissions = page?.items.map((item) => ({
+      id: item.id,
+      type: item.type,
+      ...(item.parent != null && { parent: item.parent }),
+      ...(item.poll != null && { poll: item.poll }),
+      title: item.title ? stripHtml(item.title) : undefined,
+      url: normalizeUrl(item.url),
+      text: item.text ? stripHtml(item.text) : undefined,
+      score: item.score,
+      time: item.time,
+      descendants: item.descendants,
+    }));
 
     ctx.log.info('Fetched user', {
       username: input.username,
       offset,
       submissions: submissions?.length,
+      failed: page?.failedIds.length,
     });
 
-    if (submissions) {
+    if (page && windowIds) {
       const total = profile.totalSubmissions;
-      ctx.enrich({ submissionOffset: offset });
+      const { failedIds } = page;
+      const shown = page.items.length;
+      ctx.enrich({ submissionOffset: offset, ...(failedIds.length > 0 && { failedIds }) });
+
+      const failureMessage =
+        failedIds.length > 0
+          ? `Could not fetch ${failedIds.length} of ${windowIds.length} submissions in this window (id${failedIds.length === 1 ? '' : 's'} ${failedIds.join(', ')}). Retry with submissionOffset: ${offset}, or pass an id as itemId to hn_get_thread to fetch that item alone.`
+          : undefined;
 
       if (offset >= total) {
         ctx.enrich.notice(
           `submissionOffset ${offset} is past the end of ${total.toLocaleString()} submissions. Valid offsets are 0 to ${total - 1}.`,
         );
       } else if (pageEnd < total) {
-        ctx.enrich.truncated({ shown: submissions.length, cap: input.submissionCount });
+        ctx.enrich.truncated({ shown, cap: input.submissionCount });
         ctx.enrich.notice(
-          `Showing ${submissions.length} live item${submissions.length === 1 ? '' : 's'} from positions ${(offset + 1).toLocaleString()}–${pageEnd.toLocaleString()} of ${total.toLocaleString()} submissions. Set submissionOffset to ${pageEnd} for the next page.`,
+          [
+            `Showing ${shown} live item${shown === 1 ? '' : 's'} from positions ${(offset + 1).toLocaleString()}–${pageEnd.toLocaleString()} of ${total.toLocaleString()} submissions.`,
+            failureMessage,
+            `Set submissionOffset to ${pageEnd} for the next page.`,
+          ]
+            .filter(Boolean)
+            .join(' '),
         );
+      } else if (failureMessage) {
+        ctx.enrich.notice(failureMessage);
       }
     }
 
@@ -229,6 +260,8 @@ export const getUser = tool('hn_get_user', {
           : '';
         const meta = [
           `id:${s.id}`,
+          s.parent != null ? `parent:${s.parent}` : null,
+          s.poll != null ? `poll:${s.poll}` : null,
           s.title ? s.type : null,
           s.score != null ? `${s.score} pts` : null,
           s.descendants != null ? `${s.descendants} comments` : null,

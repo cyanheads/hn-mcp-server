@@ -6,23 +6,32 @@
 import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HnItem, HnUser } from '@/services/hn/types.js';
 
-vi.mock('@/services/hn/hn-service.js', () => ({
+/**
+ * Only the accessor and the text helpers are faked. `settlePage` and
+ * `HnService` stay real, so the partial-failure suite below runs the actual
+ * service against a stubbed fetch.
+ */
+vi.mock('@/services/hn/hn-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/hn/hn-service.js')>()),
   getHnService: vi.fn(),
-  filterLiveItems: vi.fn((items: (HnItem | null)[]) =>
-    items.filter((i): i is HnItem => i != null && !i.deleted && !i.dead),
-  ),
   stripHtml: vi.fn((html: string) => html),
   normalizeUrl: vi.fn((url?: string) => url || undefined),
 }));
 
 import { getUser } from '@/mcp-server/tools/definitions/get-user.tool.js';
-import { getHnService, stripHtml } from '@/services/hn/hn-service.js';
+import { getHnService, HnService, type ItemSlot, stripHtml } from '@/services/hn/hn-service.js';
+import { httpStatus, stubHnApi } from '../helpers/hn-api-stub.js';
 
 const mockFetchUser = vi.fn<(username: string) => Promise<HnUser | null>>();
-const mockFetchItems = vi.fn<(ids: number[]) => Promise<(HnItem | null)[]>>();
+const mockFetchItems = vi.fn<(ids: number[]) => Promise<ItemSlot[]>>();
+
+/** Wrap returned items as the batch slots `fetchItems` yields. */
+function slotsOf(items: HnItem[]): ItemSlot[] {
+  return items.map((item) => ({ kind: 'item', id: item.id, item }));
+}
 
 const baseUser: HnUser = {
   id: 'testuser',
@@ -134,7 +143,7 @@ describe('hn_get_user handler', () => {
   it('fetches and returns submissions when includeSubmissions is true', async () => {
     const ctx = createMockContext({ errors: getUser.errors });
     mockFetchUser.mockResolvedValue(baseUser);
-    mockFetchItems.mockResolvedValue([storyItem, commentItem]);
+    mockFetchItems.mockResolvedValue(slotsOf([storyItem, commentItem]));
 
     const result = await getUser.handler(parse({ includeSubmissions: true }), ctx);
 
@@ -148,7 +157,7 @@ describe('hn_get_user handler', () => {
   it('limits fetched submissions to submissionCount', async () => {
     const ctx = createMockContext({ errors: getUser.errors });
     mockFetchUser.mockResolvedValue(baseUser);
-    mockFetchItems.mockResolvedValue([storyItem]);
+    mockFetchItems.mockResolvedValue(slotsOf([storyItem]));
 
     await getUser.handler(parse({ includeSubmissions: true, submissionCount: 1 }), ctx);
 
@@ -158,7 +167,7 @@ describe('hn_get_user handler', () => {
   it('filters out dead and deleted submissions', async () => {
     const ctx = createMockContext({ errors: getUser.errors });
     mockFetchUser.mockResolvedValue({ ...baseUser, submitted: [100, 102, 103] });
-    mockFetchItems.mockResolvedValue([storyItem, deadItem, deletedItem]);
+    mockFetchItems.mockResolvedValue(slotsOf([storyItem, deadItem, deletedItem]));
 
     const result = await getUser.handler(parse({ includeSubmissions: true }), ctx);
 
@@ -174,7 +183,7 @@ describe('hn_get_user handler', () => {
       submitted: Array.from({ length: 100 }, (_, i) => i + 1),
     };
     mockFetchUser.mockResolvedValue(prolificUser);
-    mockFetchItems.mockResolvedValue([storyItem, commentItem]);
+    mockFetchItems.mockResolvedValue(slotsOf([storyItem, commentItem]));
 
     await getUser.handler(parse({ includeSubmissions: true, submissionCount: 10 }), ctx);
 
@@ -188,7 +197,7 @@ describe('hn_get_user handler', () => {
     // User has 2 submissions and both resolve as live items — no truncation
     const smallUser: HnUser = { ...baseUser, submitted: [100, 101] };
     mockFetchUser.mockResolvedValue(smallUser);
-    mockFetchItems.mockResolvedValue([storyItem, commentItem]);
+    mockFetchItems.mockResolvedValue(slotsOf([storyItem, commentItem]));
 
     await getUser.handler(parse({ includeSubmissions: true, submissionCount: 10 }), ctx);
 
@@ -200,7 +209,7 @@ describe('hn_get_user handler', () => {
     const ctx = createMockContext({ errors: getUser.errors });
     // User has 3 submissions total, all fetched (submissionCount=10 > 3), but 2 are dead/deleted
     mockFetchUser.mockResolvedValue({ ...baseUser, submitted: [100, 102, 103] });
-    mockFetchItems.mockResolvedValue([storyItem, deadItem, deletedItem]);
+    mockFetchItems.mockResolvedValue(slotsOf([storyItem, deadItem, deletedItem]));
 
     await getUser.handler(parse({ includeSubmissions: true, submissionCount: 10 }), ctx);
 
@@ -221,8 +230,8 @@ describe('hn_get_user submission pagination', () => {
     submitted: Array.from({ length: 25 }, (_, i) => 201 + i),
   };
 
-  function itemsFor(ids: number[]): HnItem[] {
-    return ids.map((id) => ({ id, type: 'story', by: 'testuser', title: `Post ${id}` }));
+  function itemsFor(ids: number[]): ItemSlot[] {
+    return slotsOf(ids.map((id) => ({ id, type: 'story', by: 'testuser', title: `Post ${id}` })));
   }
 
   it('resolves the first page from the start of the submitted list', async () => {
@@ -299,11 +308,13 @@ describe('hn_get_user submission pagination', () => {
   it('reports the live count when the offset window contains dead items', async () => {
     const ctx = createMockContext({ errors: getUser.errors });
     mockFetchUser.mockResolvedValue(prolificUser);
-    mockFetchItems.mockResolvedValue([
-      { id: 206, type: 'story', title: 'Live' },
-      { id: 207, type: 'story', dead: true },
-      { id: 208, type: 'story', deleted: true },
-    ]);
+    mockFetchItems.mockResolvedValue(
+      slotsOf([
+        { id: 206, type: 'story', title: 'Live' },
+        { id: 207, type: 'story', dead: true },
+        { id: 208, type: 'story', deleted: true },
+      ]),
+    );
 
     const result = await getUser.handler(
       parse({ includeSubmissions: true, submissionCount: 3, submissionOffset: 5 }),
@@ -651,5 +662,157 @@ describe('hn_get_user blank username message', () => {
       properties: Record<string, { minLength?: number }>;
     };
     expect(schema.properties.username?.minLength).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Partial submission failures — the real HnService against a stubbed HN API
+// ---------------------------------------------------------------------------
+
+describe('hn_get_user — partial submission failures', () => {
+  type ToolResult = Awaited<ReturnType<typeof runToolContract>>;
+
+  /** User `pg` whose submissions all load, with `overrides` replacing individual item routes. */
+  function user(submitted: number[], overrides: Record<number, unknown> = {}) {
+    return stubHnApi({
+      '/user/pg.json': { id: 'pg', karma: 1, created: 1600000000, submitted },
+      ...Object.fromEntries(
+        submitted.map((id) => [
+          `/item/${id}.json`,
+          overrides[id] ?? { id, type: 'story', title: `Post ${id}`, by: 'pg' },
+        ]),
+      ),
+    });
+  }
+
+  /** Run the tool, letting fake timers drive any retry backoff to completion. */
+  async function call(input: Record<string, unknown>): Promise<ToolResult> {
+    const pending = runToolContract(
+      getUser,
+      { username: 'pg', includeSubmissions: true, ...input } as never,
+      { context: { errors: getUser.errors } },
+    );
+    await vi.advanceTimersByTimeAsync(120_000);
+    return pending;
+  }
+
+  function structured(result: ToolResult): Record<string, unknown> {
+    expect(result.isError).toBeFalsy();
+    return result.structuredContent as Record<string, unknown>;
+  }
+
+  function contentText(result: ToolResult): string {
+    return result.content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+  }
+
+  const range = (from: number, count: number) => Array.from({ length: count }, (_, i) => from + i);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(getHnService).mockReturnValue(new HnService(3));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('names a failed submission on both surfaces', async () => {
+    user([301, 302, 303], { 302: httpStatus(500) });
+
+    const result = await call({});
+    const sc = structured(result);
+
+    expect((sc.submissions as Array<{ id: number }>).map((s) => s.id)).toEqual([301, 303]);
+    expect(sc.failedIds).toEqual([302]);
+    expect(sc.notice).toBe(
+      'Could not fetch 1 of 3 submissions in this window (id 302). Retry with submissionOffset: 0, or pass an id as itemId to hn_get_thread to fetch that item alone.',
+    );
+    const text = contentText(result);
+    expect(text).toContain('id:301');
+    expect(text).toContain('id:303');
+    expect(text).toContain(sc.notice as string);
+    expect(text).toContain('**Failed to load:** 302');
+  });
+
+  it('keeps the next-offset guidance and pagination by window when a failure lands mid-history', async () => {
+    user(range(401, 25), { 405: httpStatus(500) });
+
+    const sc = structured(await call({ submissionCount: 3, submissionOffset: 3 }));
+
+    expect((sc.submissions as Array<{ id: number }>).map((s) => s.id)).toEqual([404, 406]);
+    expect(sc).toMatchObject({ truncated: true, shown: 2, cap: 3, failedIds: [405] });
+    expect(sc.notice).toBe(
+      'Showing 2 live items from positions 4–6 of 25 submissions. Could not fetch 1 of 3 submissions in this window (id 405). Retry with submissionOffset: 3, or pass an id as itemId to hn_get_thread to fetch that item alone. Set submissionOffset to 6 for the next page.',
+    );
+  });
+
+  it('returns an empty page, not an error, when failures and deletions leave nothing live', async () => {
+    user([301, 302], { 301: httpStatus(500), 302: { id: 302, type: 'story', deleted: true } });
+
+    const result = await call({});
+    const sc = structured(result);
+
+    expect(sc.submissions).toEqual([]);
+    expect(sc.failedIds).toEqual([301]);
+    expect(sc.notice).toMatch(/^Could not fetch 1 of 2 submissions in this window \(id 301\)/);
+  });
+
+  it('throws the classified upstream error, Retry-After included, when every submission failed', async () => {
+    const limited = httpStatus(429, { 'Retry-After': '120' });
+    user([301, 302, 303], { 301: limited, 302: limited, 303: limited });
+
+    const result = await call({});
+    const error = (
+      result.structuredContent as { error: { code: number; data: Record<string, unknown> } }
+    ).error;
+
+    expect(result.isError).toBe(true);
+    expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(error.data).toMatchObject({ reason: 'upstream_rate_limited', retryAfter: '120' });
+    expect(contentText(result)).toContain('retry after 120 seconds');
+  });
+
+  it('carries no failure field or failure notice when every submission loaded', async () => {
+    user([301, 302]);
+
+    const result = await call({});
+    const sc = structured(result);
+
+    expect(sc).not.toHaveProperty('failedIds');
+    expect(sc).not.toHaveProperty('notice');
+    expect(contentText(result)).not.toContain('Failed to load');
+  });
+
+  it('fetches no items and reports no failure when submissionOffset is past the end', async () => {
+    const { requested } = user([301, 302]);
+
+    const sc = structured(await call({ submissionOffset: 5 }));
+
+    expect(requested()).toEqual(['/user/pg.json']);
+    expect(sc).not.toHaveProperty('failedIds');
+    expect(sc.notice).toMatch(/submissionOffset 5 is past the end of 2 submissions/);
+  });
+
+  it('links a comment submission to its parent and a poll option to its poll, on both surfaces', async () => {
+    user([501, 502, 503], {
+      501: { id: 501, type: 'comment', by: 'pg', text: 'reply', parent: 400 },
+      502: { id: 502, type: 'pollopt', by: 'pg', text: 'Yes', poll: 450, score: 9 },
+    });
+
+    const result = await call({});
+    const submissions = structured(result).submissions as Array<Record<string, unknown>>;
+
+    expect(submissions[0]).toMatchObject({ id: 501, parent: 400 });
+    expect(submissions[1]).toMatchObject({ id: 502, poll: 450 });
+    expect(submissions[2]).toMatchObject({ id: 503 });
+    expect(submissions[2]).not.toHaveProperty('parent');
+    expect(submissions[2]).not.toHaveProperty('poll');
+    const text = contentText(result);
+    expect(text).toMatch(/id:501 \| parent:400/);
+    expect(text).toMatch(/id:502 \| poll:450/);
   });
 });
