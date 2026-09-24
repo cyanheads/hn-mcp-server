@@ -68,7 +68,7 @@ export const getUser = tool('hn_get_user', {
     username: z
       .string()
       .trim()
-      .min(1)
+      .min(1, 'blank after trimming whitespace — pass an HN username.')
       .describe(
         'HN username. Case-sensitive. Trimmed; blank or whitespace-only input is rejected.',
       ),

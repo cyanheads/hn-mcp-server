@@ -3,7 +3,9 @@
  * @module mcp-server/tools/definitions/get-user.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HnItem, HnUser } from '@/services/hn/types.js';
 
@@ -608,5 +610,46 @@ describe('hn_get_user — security and edge cases', () => {
       submissions: [{ id: 1, type: 'story' }],
     };
     expect(() => getUser.output.parse(withSubmissions)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Blank-after-trim username message
+// ---------------------------------------------------------------------------
+
+describe('hn_get_user blank username message', () => {
+  it.each(['', '  ', '\t\n'])(
+    'names the trimmed-blank username and the fix (%j)',
+    async (username) => {
+      const result = await runToolContract(getUser, { username } as never, {
+        context: { errors: getUser.errors },
+      });
+      const error = (
+        result.structuredContent as {
+          error: { code: number; data?: { reason?: string; recovery?: { hint?: string } } };
+        }
+      ).error;
+      const text = result.content
+        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n');
+
+      expect(result.isError).toBe(true);
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data?.reason).toBe('invalid_arguments');
+      expect(error.data?.recovery?.hint).toContain(
+        'blank after trimming whitespace — pass an HN username',
+      );
+      expect(text).toContain('username: blank after trimming whitespace — pass an HN username');
+      expect(text).not.toContain('Too small');
+      expect(mockFetchUser).not.toHaveBeenCalled();
+    },
+  );
+
+  it('still advertises minLength 1 on username', () => {
+    const schema = z.toJSONSchema(getUser.input) as {
+      properties: Record<string, { minLength?: number }>;
+    };
+    expect(schema.properties.username?.minLength).toBe(1);
   });
 });
