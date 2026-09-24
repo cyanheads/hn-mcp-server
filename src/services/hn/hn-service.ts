@@ -102,18 +102,70 @@ export function extractDomain(url: string | undefined): string | undefined {
 }
 
 /**
- * Convert a validated ISO 8601 date bound to Unix seconds. A date-time without
- * a `Z` or `±hh:mm` offset is read as UTC — the same as a date-only value, and
- * unlike JS's own parsing, which reads it in the host's local time zone.
+ * Convert a validated ISO 8601 date bound to its exact instant in Unix
+ * milliseconds. A date-time without a `Z` or `±hh:mm` offset is read as UTC —
+ * the same as a date-only value, and unlike JS's own parsing, which reads it in
+ * the host's local time zone.
  */
-export function dateBoundToEpochSeconds(bound: string): number {
+export function dateBoundToEpochMs(bound: string): number {
   const offsetless = bound.includes('T') && !/(?:Z|[+-]\d{2}:\d{2})$/.test(bound);
-  return Math.floor(Date.parse(offsetless ? `${bound}Z` : bound) / 1000);
+  return Date.parse(offsetless ? `${bound}Z` : bound);
 }
 
-/** Filter out dead, deleted, and null items. */
-export function filterLiveItems(items: (HnItem | null)[]): HnItem[] {
-  return items.filter((item): item is HnItem => item != null && !item.deleted && !item.dead);
+/**
+ * Convert a validated ISO 8601 date bound to Unix seconds, read as
+ * {@link dateBoundToEpochMs} reads it.
+ *
+ * A fractional second rounds down by default, which suits an exclusive start.
+ * An exclusive end over whole-second timestamps passes `'ceil'`: an end at
+ * `10:00:00.5` must still admit an item created at `10:00:00`.
+ */
+export function dateBoundToEpochSeconds(
+  bound: string,
+  rounding: 'floor' | 'ceil' = 'floor',
+): number {
+  return Math[rounding](dateBoundToEpochMs(bound) / 1000);
+}
+
+/**
+ * One slot of a {@link HnService.fetchItems} batch, in input order.
+ *
+ * - `item` — HN returned the item. It may be dead or deleted; callers filter.
+ * - `absent` — HN answered `null`: no item exists under this ID.
+ * - `failed` — the fetch failed after retries, or never started because an
+ *   earlier slot was rate-limited. `error` is the classified failure. A later
+ *   call may succeed, so a caller reports the ID rather than dropping it.
+ */
+export type ItemSlot =
+  | { kind: 'item'; id: number; item: HnItem }
+  | { kind: 'absent'; id: number }
+  | { kind: 'failed'; id: number; error: unknown };
+
+/**
+ * Settle one page of a batch for the paged tools: the live items in input
+ * order, and the IDs whose fetch failed. Dead, deleted, and absent slots drop
+ * out of both. When every slot failed, throws the first failure's classified
+ * error, since an empty success would read as a page with nothing on it.
+ */
+export function settlePage(slots: readonly ItemSlot[]): { items: HnItem[]; failedIds: number[] } {
+  const items: HnItem[] = [];
+  const failedIds: number[] = [];
+  let firstFailure: { error: unknown } | undefined;
+  for (const slot of slots) {
+    if (slot.kind === 'failed') {
+      failedIds.push(slot.id);
+      firstFailure ??= slot;
+    } else if (slot.kind === 'item' && !slot.item.deleted && !slot.item.dead) {
+      items.push(slot.item);
+    }
+  }
+  if (firstFailure && failedIds.length === slots.length) throw firstFailure.error;
+  return { items, failedIds };
+}
+
+/** True for the classified 429 `getJson` throws once retries are spent or the wait outlasts them. */
+export function isRateLimited(err: unknown): err is McpError {
+  return err instanceof McpError && err.data?.reason === 'upstream_rate_limited';
 }
 
 /** Detect HTML error bodies returned by upstream APIs under rate limiting or maintenance. */
@@ -166,17 +218,28 @@ function parseJsonBody<T>(text: string, upstream: string): T {
  * across several codes — HN answers an unknown path with 401, and a 504 would
  * arrive as `Timeout`, blurring "this server's own fetch timed out" with an
  * upstream that is merely down. The exact status stays on `data.status`.
+ *
+ * A 429's raw `Retry-After` header (delta-seconds or an HTTP-date), which
+ * `fetchWithTimeout` leaves on the cause, is copied to `data.retryAfter`
+ * unchanged and named in the hint, so the caller can wait exactly the interval
+ * the upstream asked for.
  */
 function upstreamFailureFor(upstream: string, status: number, cause: McpError): McpError {
   if (status === 429) {
+    const header = cause.data?.retryAfter;
+    const retryAfter = typeof header === 'string' && header.trim() !== '' ? header : undefined;
+    const wait = retryAfter && (/^\d+$/.test(retryAfter) ? `${retryAfter} seconds` : retryAfter);
     return rateLimited(
       `${upstream} returned HTTP ${status}.`,
       {
         upstream,
         status,
         reason: 'upstream_rate_limited',
+        ...(retryAfter && { retryAfter }),
         recovery: {
-          hint: `${upstream} is rate-limiting this server. Wait several seconds before retrying the same call, and reduce how often it is called.`,
+          hint: wait
+            ? `${upstream} is rate-limiting this server and asked it to retry after ${wait}. Wait that long before retrying the same call, and reduce how often it is called.`
+            : `${upstream} is rate-limiting this server. Wait several seconds before retrying the same call, and reduce how often it is called.`,
         },
       },
       { cause },
@@ -296,30 +359,40 @@ export class HnService {
   }
 
   /**
-   * Batch-fetch items with concurrency limiting. Preserves input order.
-   * Per-item failures after exhausted retries are logged and yield `null`
-   * so a single bad item does not fail the whole batch. A caller abort is the
-   * one failure that is not per-item: it rethrows, ending the batch instead of
-   * spending the rest of the id list on fetches nobody is waiting for.
+   * Batch-fetch items with concurrency limiting: one {@link ItemSlot} per ID,
+   * in input order. A per-item failure after exhausted retries fills a
+   * `failed` slot, so one bad item does not fail the batch. Two failures are
+   * not per-item:
+   *
+   * - A caller abort rethrows, ending the batch instead of spending the rest of
+   *   the ID list on fetches nobody is waiting for.
+   * - An `upstream_rate_limited` failure stops the batch. Fetches already in
+   *   flight settle, and every slot not yet started is reported `failed` with
+   *   that error, rather than each running its own retry ladder against a
+   *   throttled upstream.
    */
-  async fetchItems(ids: number[], ctx: Context): Promise<(HnItem | null)[]> {
-    if (ids.length === 0) return [];
-
-    const results = new Array<HnItem | null>(ids.length).fill(null);
+  async fetchItems(ids: readonly number[], ctx: Context): Promise<ItemSlot[]> {
+    const slots = new Array<ItemSlot | undefined>(ids.length);
+    let rateLimit: McpError | undefined;
     let next = 0;
 
     const worker = async () => {
-      while (next < ids.length) {
+      while (!rateLimit && next < ids.length) {
         const i = next++;
         const id = ids[i];
         if (id == null) continue;
         try {
-          results[i] = await this.fetchItem(id, ctx);
-        } catch (err) {
-          if (err instanceof McpError && err.code === JsonRpcErrorCode.RequestCancelled) throw err;
+          const item = await this.fetchItem(id, ctx);
+          slots[i] = item ? { kind: 'item', id, item } : { kind: 'absent', id };
+        } catch (error) {
+          if (error instanceof McpError && error.code === JsonRpcErrorCode.RequestCancelled) {
+            throw error;
+          }
+          slots[i] = { kind: 'failed', id, error };
+          if (isRateLimited(error)) rateLimit ??= error;
           ctx.log.warning('Batch item fetch failed after retries', {
             id,
-            error: err instanceof Error ? err.message : String(err),
+            error: error instanceof Error ? error.message : String(error),
           });
         }
       }
@@ -327,7 +400,14 @@ export class HnService {
 
     const workerCount = Math.min(this.concurrencyLimit, ids.length);
     await Promise.all(Array.from({ length: workerCount }, worker));
-    return results;
+
+    const skipped = ids.length - next;
+    if (rateLimit && skipped > 0) {
+      ctx.log.warning('Batch stopped: upstream rate-limited, remaining items not fetched', {
+        skipped,
+      });
+    }
+    return ids.map((id, i) => slots[i] ?? { kind: 'failed', id, error: rateLimit });
   }
 
   /**
@@ -368,7 +448,7 @@ export class HnService {
       numericFilters.push(`created_at_i>${dateBoundToEpochSeconds(params.dateRange.start)}`);
     }
     if (params.dateRange?.end) {
-      numericFilters.push(`created_at_i<${dateBoundToEpochSeconds(params.dateRange.end)}`);
+      numericFilters.push(`created_at_i<${dateBoundToEpochSeconds(params.dateRange.end, 'ceil')}`);
     }
     if (numericFilters.length) url.searchParams.set('numericFilters', numericFilters.join(','));
 

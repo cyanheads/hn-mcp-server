@@ -8,16 +8,19 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  dateBoundToEpochMs,
   dateBoundToEpochSeconds,
   decodeHtmlEntities,
   extractDomain,
-  filterLiveItems,
   HnService,
+  type ItemSlot,
   normalizeUrl,
+  settlePage,
   stripHtml,
   stripHtmlPreservingEm,
 } from '@/services/hn/hn-service.js';
 import type { HnItem } from '@/services/hn/types.js';
+import { httpStatus, stubHnApi } from '../../helpers/hn-api-stub.js';
 
 // ---------------------------------------------------------------------------
 // decodeHtmlEntities
@@ -221,41 +224,6 @@ describe('normalizeUrl', () => {
 });
 
 // ---------------------------------------------------------------------------
-// filterLiveItems
-// ---------------------------------------------------------------------------
-
-describe('filterLiveItems', () => {
-  const live: HnItem = { id: 1, type: 'story' };
-  const dead: HnItem = { id: 2, type: 'story', dead: true };
-  const deleted: HnItem = { id: 3, type: 'comment', deleted: true };
-  const deadAndDeleted: HnItem = { id: 4, type: 'story', dead: true, deleted: true };
-
-  it('returns only live items', () => {
-    expect(filterLiveItems([live, dead, deleted, null, deadAndDeleted])).toEqual([live]);
-  });
-
-  it('returns empty array when all items are filtered out', () => {
-    expect(filterLiveItems([null, dead, deleted])).toEqual([]);
-  });
-
-  it('returns empty array for empty input', () => {
-    expect(filterLiveItems([])).toEqual([]);
-  });
-
-  it('preserves items where dead/deleted are explicitly false', () => {
-    const explicit: HnItem = { id: 5, type: 'job', dead: false, deleted: false };
-    expect(filterLiveItems([explicit])).toEqual([explicit]);
-  });
-
-  it('preserves order of surviving items', () => {
-    const a: HnItem = { id: 10, type: 'story' };
-    const b: HnItem = { id: 20, type: 'comment' };
-    const c: HnItem = { id: 30, type: 'job' };
-    expect(filterLiveItems([a, null, dead, b, deleted, c])).toEqual([a, b, c]);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // getHnService / initHnService
 // ---------------------------------------------------------------------------
 
@@ -318,27 +286,30 @@ describe('HnService.fetchItems', () => {
     expect(result).toEqual([]);
   });
 
-  it('returns null slots for items that fail after retries (does not throw)', async () => {
+  it('returns a failed slot for an item that fails after retries (does not throw)', async () => {
     /** Patch fetchItem to throw on id=2 only. */
     const svc = new HnService(2);
     const ctx = createMockContext();
+    const failure = new Error('network failure');
     const fetchItemSpy = vi.spyOn(svc, 'fetchItem').mockImplementation(async (id: number) => {
-      if (id === 2) throw new Error('network failure');
+      if (id === 2) throw failure;
       return { id, type: 'story' as const };
     });
 
     const result = await svc.fetchItems([1, 2, 3], ctx);
 
-    expect(result[0]).toMatchObject({ id: 1 });
-    expect(result[1]).toBeNull(); // failed item yields null
-    expect(result[2]).toMatchObject({ id: 3 });
+    expect(result).toEqual([
+      { kind: 'item', id: 1, item: { id: 1, type: 'story' } },
+      { kind: 'failed', id: 2, error: failure },
+      { kind: 'item', id: 3, item: { id: 3, type: 'story' } },
+    ]);
     fetchItemSpy.mockRestore();
   });
 
   it('rethrows a caller cancellation instead of absorbing it as a per-item failure', async () => {
     /**
      * A caller that went away is not a bad item: the batch must reject rather
-     * than fill a null slot and keep fetching for nobody. Concurrency 1 makes
+     * than fill a failed slot and keep fetching for nobody. Concurrency 1 makes
      * the abort-then-stop ordering deterministic.
      */
     const svc = new HnService(1);
@@ -374,8 +345,182 @@ describe('HnService.fetchItems', () => {
 
     const result = await svc.fetchItems([10, 20, 30], ctx);
 
-    expect(result.map((r) => r?.id)).toEqual([10, 20, 30]);
+    expect(result.map((r) => r.id)).toEqual([10, 20, 30]);
     fetchItemSpy.mockRestore();
+  });
+});
+
+describe('HnService.fetchItems against a stubbed HN API', () => {
+  /**
+   * Route item fetches by ID: a number answers that HTTP status, `null` is
+   * Firebase's answer for an item that does not exist, anything else is the
+   * item body.
+   */
+  function stubItems(
+    routes: Record<number, HnItem | null | number>,
+    headers?: Record<string, string>,
+  ) {
+    const { requested } = stubHnApi(
+      Object.fromEntries(
+        Object.entries(routes).map(([id, route]) => [
+          `/item/${id}.json`,
+          typeof route === 'number' ? httpStatus(route, headers) : route,
+        ]),
+      ),
+    );
+    return {
+      /** How many times each item id was requested. */
+      attempts: () => {
+        const counts: Record<number, number> = {};
+        for (const path of requested()) {
+          const id = Number(/^\/item\/(\d+)\.json$/.exec(path)?.[1]);
+          counts[id] = (counts[id] ?? 0) + 1;
+        }
+        return counts;
+      },
+    };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('distinguishes a returned item, an absent item, and a failed fetch', async () => {
+    vi.useFakeTimers();
+    stubItems({ 1: { id: 1, type: 'story' }, 2: null, 3: 500 });
+
+    const pending = new HnService(3).fetchItems([1, 2, 3], createMockContext());
+    await vi.advanceTimersByTimeAsync(120_000);
+    const slots = await pending;
+
+    expect(slots[0]).toEqual({ kind: 'item', id: 1, item: { id: 1, type: 'story' } });
+    expect(slots[1]).toEqual({ kind: 'absent', id: 2 });
+    expect(slots[2]).toMatchObject({ kind: 'failed', id: 3 });
+    const { error } = slots[2] as { error: McpError };
+    expect(error).toBeInstanceOf(McpError);
+    expect(error.data).toMatchObject({ reason: 'upstream_unavailable', status: 500 });
+  });
+
+  it('keeps a dead or deleted item as an item slot for the caller to filter', async () => {
+    stubItems({
+      1: { id: 1, type: 'comment', dead: true },
+      2: { id: 2, type: 'comment', deleted: true },
+    });
+
+    const slots = await new HnService(2).fetchItems([1, 2], createMockContext());
+
+    expect(slots.map((s) => s.kind)).toEqual(['item', 'item']);
+  });
+
+  it('stops the batch at a rate-limited item and reports the unfetched slots as failed', async () => {
+    /** Concurrency 1 fixes the order: 1 succeeds, 2 exhausts its retries on 429, 3 and 4 never start. */
+    vi.useFakeTimers();
+    const { attempts } = stubItems({ 1: { id: 1, type: 'story' }, 2: 429, 3: 500, 4: 500 });
+    const ctx = createMockContext();
+    const warnSpy = vi.spyOn(ctx.log, 'warning');
+
+    const pending = new HnService(1).fetchItems([1, 2, 3, 4], ctx);
+    await vi.advanceTimersByTimeAsync(120_000);
+    const slots = await pending;
+
+    expect(attempts()).toEqual({ 1: 1, 2: 4 });
+    expect(slots.map((s) => [s.id, s.kind])).toEqual([
+      [1, 'item'],
+      [2, 'failed'],
+      [3, 'failed'],
+      [4, 'failed'],
+    ]);
+    const rateLimit = (slots[1] as { error: McpError }).error;
+    expect(rateLimit.data?.reason).toBe('upstream_rate_limited');
+    /** The skipped slots carry the rate-limit error that stopped the batch. */
+    expect((slots[2] as { error: unknown }).error).toBe(rateLimit);
+    expect((slots[3] as { error: unknown }).error).toBe(rateLimit);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('rate-limited'),
+      expect.objectContaining({ skipped: 2 }),
+    );
+  });
+
+  it('lets in-flight fetches settle but starts none after a rate limit', async () => {
+    /** Retry-After past the budget fails each 429 fast; three workers start three fetches, then stop. */
+    const routes = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [i + 1, 429]));
+    const { attempts } = stubItems(routes, { 'Retry-After': '120' });
+
+    const slots = await new HnService(3).fetchItems(
+      Array.from({ length: 10 }, (_, i) => i + 1),
+      createMockContext(),
+    );
+
+    expect(attempts()).toEqual({ 1: 1, 2: 1, 3: 1 });
+    expect(slots).toHaveLength(10);
+    expect(slots.every((s) => s.kind === 'failed')).toBe(true);
+    expect((slots[9] as { error: McpError }).error.data).toMatchObject({
+      reason: 'upstream_rate_limited',
+      retryAfter: '120',
+    });
+  });
+
+  it('does not stop the batch for a failure other than a rate limit', async () => {
+    const { attempts } = stubItems({ 1: 400, 2: { id: 2, type: 'story' }, 3: 400 });
+
+    const slots = await new HnService(1).fetchItems([1, 2, 3], createMockContext());
+
+    expect(attempts()).toEqual({ 1: 1, 2: 1, 3: 1 });
+    expect(slots.map((s) => s.kind)).toEqual(['failed', 'item', 'failed']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// settlePage
+// ---------------------------------------------------------------------------
+
+describe('settlePage', () => {
+  const live: HnItem = { id: 1, type: 'story' };
+  const dead: HnItem = { id: 2, type: 'story', dead: true };
+  const deleted: HnItem = { id: 3, type: 'comment', deleted: true };
+  const item = (i: HnItem): ItemSlot => ({ kind: 'item', id: i.id, item: i });
+  const failed = (id: number, error: unknown = new Error(`item ${id}`)): ItemSlot => ({
+    kind: 'failed',
+    id,
+    error,
+  });
+
+  it('keeps live items in order and lists failed ids apart from dead, deleted, and absent ones', () => {
+    const b: HnItem = { id: 20, type: 'comment' };
+    const page = settlePage([
+      item(live),
+      failed(7),
+      item(dead),
+      { kind: 'absent', id: 8 },
+      item(b),
+      item(deleted),
+      failed(9),
+    ]);
+
+    expect(page).toEqual({ items: [live, b], failedIds: [7, 9] });
+  });
+
+  it('returns no failed ids when nothing failed', () => {
+    expect(settlePage([item(live), item(dead)])).toEqual({ items: [live], failedIds: [] });
+  });
+
+  it('returns an empty page for an empty batch without throwing', () => {
+    expect(settlePage([])).toEqual({ items: [], failedIds: [] });
+  });
+
+  it('returns an empty page, not a throw, when the non-failed slots are all dead or absent', () => {
+    expect(settlePage([failed(1), item(dead), { kind: 'absent', id: 4 }])).toEqual({
+      items: [],
+      failedIds: [1],
+    });
+  });
+
+  it('throws the first failure when every slot failed', () => {
+    const first = new McpError(JsonRpcErrorCode.RateLimited, 'HN API returned HTTP 429.', {
+      reason: 'upstream_rate_limited',
+    });
+    expect(() => settlePage([failed(1, first), failed(2), failed(3)])).toThrow(first);
   });
 });
 
@@ -560,6 +705,20 @@ describe('HnService.search URL construction', () => {
     expect(url.searchParams.get('numericFilters')).toBe(`created_at_i>${epoch}`);
   });
 
+  it.each([
+    ['2024-05-05T10:00:00Z', 1714903200],
+    ['2024-05-05T10:00:00.500Z', 1714903201],
+    ['2024-05-05T10:00:00.001Z', 1714903201],
+    ['2024-05-05T09:59:59.999Z', 1714903200],
+  ])('rounds a fractional exclusive end %j up to the next whole second', async (end, epoch) => {
+    /**
+     * Algolia stores whole seconds. An exclusive end at 10:00:00.5 still admits
+     * an item created at exactly 10:00:00, so the bound rounds up, not down.
+     */
+    const url = await requestedUrl({ dateRange: { end } });
+    expect(url.searchParams.get('numericFilters')).toBe(`created_at_i<${epoch}`);
+  });
+
   it('reads an offset-less date-time as UTC regardless of the host time zone', async () => {
     /** Under JS's own parsing, "2024-05-05T10:00" is host-local — 17:00Z on a UTC−7 host. */
     process.env.TZ = 'America/Los_Angeles';
@@ -605,14 +764,26 @@ describe('dateBoundToEpochSeconds', () => {
     expect(dateBoundToEpochSeconds('2024-05-05T10:00-07:00')).toBe(1714928400);
   });
 
+  it('rounds a fractional second up under ceil and leaves a whole second unchanged', () => {
+    expect(dateBoundToEpochSeconds('2024-05-05T10:00:00.250', 'ceil')).toBe(1714903201);
+    expect(dateBoundToEpochSeconds('2024-05-05T10:00:00', 'ceil')).toBe(1714903200);
+    expect(dateBoundToEpochSeconds('2024-05-05', 'ceil')).toBe(1714867200);
+  });
+
   it.each(['UTC', 'America/Los_Angeles', 'Asia/Kolkata'])(
     'reads an offset-less date-time as UTC under TZ=%s',
     (tz) => {
       process.env.TZ = tz;
       expect(dateBoundToEpochSeconds('2024-05-05T10:00')).toBe(1714903200);
       expect(dateBoundToEpochSeconds('2024-05-05T10:00:30.250')).toBe(1714903230);
+      expect(dateBoundToEpochMs('2024-05-05T10:00:30.250')).toBe(1714903230250);
     },
   );
+
+  it('keeps the fractional second in milliseconds', () => {
+    expect(dateBoundToEpochMs('2024-05-05T10:00:00.2Z')).toBe(1714903200200);
+    expect(dateBoundToEpochMs('2024-05-05T12:00:00.7+02:00')).toBe(1714903200700);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -669,10 +840,15 @@ describe('HnService — upstream HTTP failures', () => {
   /** Body Firebase returns for a path it refuses to route. */
   const FIREBASE_400_BODY = '{\n  "error" : "Invalid path: Invalid token in path"\n}\n';
 
-  function stubStatus(status: number, body: string, statusText = 'Error') {
+  function stubStatus(
+    status: number,
+    body: string,
+    statusText = 'Error',
+    headers?: Record<string, string>,
+  ) {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(body, { status, statusText })),
+      vi.fn(async () => new Response(body, { status, statusText, ...(headers && { headers }) })),
     );
   }
 
@@ -696,6 +872,11 @@ describe('HnService — upstream HTTP failures', () => {
     );
     expect(err).toBeInstanceOf(McpError);
     return err as McpError;
+  }
+
+  /** The recovery hint a classified failure carries on the wire. */
+  function hintOf(err: McpError): string | undefined {
+    return (err.data?.recovery as { hint?: string } | undefined)?.hint;
   }
 
   afterEach(() => {
@@ -786,6 +967,74 @@ describe('HnService — upstream HTTP failures', () => {
     expect(err.data?.recovery).toMatchObject({
       hint: expect.stringContaining('Wait several seconds'),
     });
+    /** No header, no key — the generic hint stands. */
+    expect(err.data).not.toHaveProperty('retryAfter');
+  });
+
+  it('carries a delta-seconds Retry-After past the retry budget into data and the hint', async () => {
+    /** 120 s exceeds withRetry's 30 s cap, so the call fails fast on the first response. */
+    stubStatus(429, 'slow down', 'Too Many Requests', { 'Retry-After': '120' });
+
+    const err = await failure(new HnService(1).fetchFeed('top', createMockContext()));
+
+    expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(1);
+    expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(err.data).toMatchObject({ reason: 'upstream_rate_limited', retryAfter: '120' });
+    const hint = hintOf(err);
+    expect(hint).toContain('retry after 120 seconds');
+    expect(hint).not.toContain('Wait several seconds');
+  });
+
+  it('carries the last Retry-After seen once honored retries run out', async () => {
+    /** 2 s sits inside the retry budget: withRetry sleeps it out between attempts, then gives up. */
+    vi.useFakeTimers();
+    stubStatus(429, 'slow down', 'Too Many Requests', { 'Retry-After': '2' });
+
+    const pending = failure(new HnService(1).fetchItem(8863, createMockContext()));
+    await vi.advanceTimersByTimeAsync(120_000);
+    const err = await pending;
+
+    expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(4);
+    expect(err.data).toMatchObject({ reason: 'upstream_rate_limited', retryAfter: '2' });
+    expect(hintOf(err)).toContain('retry after 2 seconds');
+  });
+
+  it('carries an HTTP-date Retry-After verbatim, never as a count of seconds', async () => {
+    const date = 'Wed, 21 Oct 2099 07:28:00 GMT';
+    stubStatus(429, 'slow down', 'Too Many Requests', { 'Retry-After': date });
+
+    const err = await failure(
+      new HnService(1).search(
+        { query: 'rust', sort: 'relevance', count: 10, page: 0 },
+        createMockContext(),
+      ),
+    );
+
+    expect(err.data).toMatchObject({
+      upstream: 'Algolia',
+      reason: 'upstream_rate_limited',
+      retryAfter: date,
+    });
+    const hint = hintOf(err);
+    expect(hint).toContain(`retry after ${date}`);
+    expect(hint).not.toContain(`${date} seconds`);
+  });
+
+  it('keeps the upstream URL and body out of a Retry-After 429', async () => {
+    stubStatus(429, 'slow down, 10.0.0.1', 'Too Many Requests', { 'Retry-After': '120' });
+
+    const err = await failure(new HnService(1).fetchUser('pg', createMockContext()));
+
+    const wire = JSON.stringify({ message: err.message, data: err.data });
+    expect(wire).not.toContain('firebaseio.com');
+    expect(wire).not.toContain('10.0.0.1');
+    expect(Object.keys(err.data ?? {}).sort()).toEqual([
+      'reason',
+      'recovery',
+      'retryAfter',
+      'status',
+      'upstream',
+    ]);
   });
 
   it('classifies a 5xx as upstream_unavailable', async () => {
@@ -932,8 +1181,13 @@ describe('unicode and encoding edge cases', () => {
     expect(normalizeUrl('\t\n\r')).toBeUndefined();
   });
 
-  it('filterLiveItems handles items where dead and deleted are both false explicitly', () => {
+  it('settlePage keeps items where dead and deleted are both false explicitly', () => {
     const item: HnItem = { id: 99, type: 'job', dead: false, deleted: false };
-    expect(filterLiveItems([item])).toHaveLength(1);
+    expect(settlePage([{ kind: 'item', id: 99, item }]).items).toEqual([item]);
+  });
+
+  it('settlePage drops an item that is both dead and deleted', () => {
+    const item: HnItem = { id: 98, type: 'story', dead: true, deleted: true };
+    expect(settlePage([{ kind: 'item', id: 98, item }]).items).toEqual([]);
   });
 });

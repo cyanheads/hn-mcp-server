@@ -48,7 +48,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { getHnService, filterLiveItems, normalizeUrl, stripHtml } from '@/services/hn/hn-service.js';
+import { getHnService, settlePage, normalizeUrl, stripHtml } from '@/services/hn/hn-service.js';
 
 export const getStories = tool('hn_get_stories', {
   description: 'Fetch stories from an HN feed (top, new, best, ask, show, jobs).',
@@ -72,7 +72,9 @@ export const getStories = tool('hn_get_stories', {
     const hn = getHnService();
     const feedIds = await hn.fetchFeed(input.feed, ctx);
     const sliced = feedIds.slice(input.offset, input.offset + input.count);
-    const items = filterLiveItems(await hn.fetchItems(sliced, ctx));
+    // Live items plus the IDs whose fetch failed; throws when every item failed.
+    const { items, failedIds } = settlePage(await hn.fetchItems(sliced, ctx));
+    if (failedIds.length > 0) ctx.enrich({ failedIds });
     ctx.log.info('Fetched stories', { feed: input.feed, count: items.length });
     return { stories: items.map(/* ... */), feed: input.feed, total: feedIds.length };
   },
