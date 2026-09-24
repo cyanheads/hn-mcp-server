@@ -7,9 +7,9 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   extractDomain,
-  filterLiveItems,
   getHnService,
   normalizeUrl,
+  settlePage,
   stripHtml,
 } from '@/services/hn/hn-service.js';
 
@@ -32,7 +32,8 @@ export const getStories = tool('hn_get_stories', {
       reason: 'upstream_rate_limited',
       code: JsonRpcErrorCode.RateLimited,
       when: 'The HN API answered with HTTP 429.',
-      recovery: 'Wait several seconds before retrying, and call this tool less often.',
+      recovery:
+        'Wait the interval in retryAfter when the error carries one, otherwise several seconds, then retry and call this tool less often.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -144,20 +145,28 @@ export const getStories = tool('hn_get_stories', {
       ),
     shown: z.number().optional().describe('Number of stories returned on this page.'),
     cap: z.number().optional().describe('The count cap that was applied.'),
+    failedIds: z
+      .array(z.number())
+      .optional()
+      .describe(
+        'IDs on this page whose fetch failed after retries. They are not deleted or missing and may load on a later call: retry the page with the same offset, or pass an ID to hn_get_thread to fetch that story alone. Absent when every item on the page loaded.',
+      ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Agent guidance: the offset to pass for the next page while more stories remain, or why a page came back empty — offset past the end of the feed, an empty feed, or every item on the page deleted or flagged. Absent on the last page of a non-empty result.',
+        'Agent guidance: the offset to pass for the next page while more stories remain, the IDs that failed to load and how to retry them, or why a page came back empty — offset past the end of the feed, an empty feed, or every item on the page deleted or flagged. Absent on the last page of a non-empty result with no failed IDs.',
       ),
+  },
+  enrichmentTrailer: {
+    failedIds: { render: (ids) => `**Failed to load:** ${(ids ?? []).join(', ')}` },
   },
 
   async handler(input, ctx) {
     const hn = getHnService();
     const feedIds = await hn.fetchFeed(input.feed, ctx);
     const sliced = feedIds.slice(input.offset, input.offset + input.count);
-    const rawItems = await hn.fetchItems(sliced, ctx);
-    const items = filterLiveItems(rawItems);
+    const { items, failedIds } = settlePage(await hn.fetchItems(sliced, ctx));
 
     const stories = items.map((item) => {
       const url = normalizeUrl(item.url);
@@ -176,25 +185,39 @@ export const getStories = tool('hn_get_stories', {
       };
     });
 
-    ctx.log.info('Fetched stories', { feed: input.feed, count: stories.length });
+    ctx.log.info('Fetched stories', {
+      feed: input.feed,
+      count: stories.length,
+      failed: failedIds.length,
+    });
 
     const total = feedIds.length;
     const nextOffset = input.offset + input.count;
     const hasMore = nextOffset < total;
-    ctx.enrich({ total, offset: input.offset, hasMore });
+    ctx.enrich({
+      total,
+      offset: input.offset,
+      hasMore,
+      ...(failedIds.length > 0 && { failedIds }),
+    });
 
     const deadPageMessage = `No live stories on this page of the ${input.feed} feed (offset:${input.offset}, total:${total}). Items may have been deleted or flagged.`;
+    const failureMessage =
+      failedIds.length > 0
+        ? `Could not fetch ${failedIds.length} of ${sliced.length} items on this page (id${failedIds.length === 1 ? '' : 's'} ${failedIds.join(', ')}). Retry with offset: ${input.offset}, or pass an id as itemId to hn_get_thread to fetch that story alone.`
+        : undefined;
 
     if (hasMore) {
       const raiseCount = input.count < MAX_COUNT ? `, or raise count (max ${MAX_COUNT})` : '';
       const nextPage = `Pass offset: ${nextOffset} for the next page${raiseCount}.`;
+      const pageStatus =
+        stories.length === 0 && !failureMessage
+          ? deadPageMessage
+          : `Showing items ${input.offset + 1}–${nextOffset} of ${total} in the ${input.feed} feed.`;
       ctx.enrich.truncated({
         shown: stories.length,
         cap: input.count,
-        guidance:
-          stories.length === 0
-            ? `${deadPageMessage} ${nextPage}`
-            : `Showing items ${input.offset + 1}–${nextOffset} of ${total} in the ${input.feed} feed. ${nextPage}`,
+        guidance: [pageStatus, failureMessage, nextPage].filter(Boolean).join(' '),
       });
     } else if (stories.length === 0) {
       if (total === 0) {
@@ -204,8 +227,10 @@ export const getStories = tool('hn_get_stories', {
           `Offset ${input.offset} is past the end of the ${input.feed} feed (${total} item${total === 1 ? '' : 's'}). Reset offset below ${total}.`,
         );
       } else {
-        ctx.enrich.notice(deadPageMessage);
+        ctx.enrich.notice(failureMessage ?? deadPageMessage);
       }
+    } else if (failureMessage) {
+      ctx.enrich.notice(failureMessage);
     }
 
     return {
