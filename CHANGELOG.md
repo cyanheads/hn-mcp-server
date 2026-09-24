@@ -2,7 +2,7 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
-## [0.5.20](changelog/0.5.x/0.5.20.md) — 2026-09-23
+## [0.5.20](changelog/0.5.x/0.5.20.md) — 2026-09-23 · 🛡️ Security
 
 Upstream text is fenced in content[] so a comment or highlight body can no longer pass for server-authored lines, titles are entity-decoded instead of HTML-stripped, each HN link renders once as its full URL, and typed placeholder text survives stripping.
 
