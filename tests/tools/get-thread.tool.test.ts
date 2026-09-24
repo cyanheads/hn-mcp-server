@@ -33,7 +33,9 @@ import {
   normalizeUrl,
   stripHtml,
 } from '@/services/hn/hn-service.js';
-import { httpStatus, stubHnApi } from '../helpers/hn-api-stub.js';
+import { httpStatus, rejectUnmockedFetch, stubHnApi } from '../helpers/hn-api-stub.js';
+
+rejectUnmockedFetch();
 
 function createMockContext() {
   return createFrameworkMockContext({ errors: getThread.errors });
@@ -334,18 +336,20 @@ describe('hn_get_thread handler', () => {
     expect(result.comments[0]).not.toHaveProperty('isOp');
   });
 
-  it('calls stripHtml on item text and comment text', async () => {
+  it('calls stripHtml on item text and comment text, and keeps the title verbatim', async () => {
+    /** Titles are plain text in the HN API, so a title that reads as a tag is kept as typed. */
     const storyWithText: HnItem = { ...mockStory, text: '<p>Hello</p>', title: '<b>Title</b>' };
     const { kids: _k, ...comment1Base } = mockComment1;
     const commentWithHtml: HnItem = { ...comment1Base, text: '<i>Styled</i>' };
     hn.fetchItem.mockResolvedValue(storyWithText);
     hn.fetchItems.mockResolvedValueOnce(slotsOf([commentWithHtml]));
 
-    await getThread.handler(parse({ depth: 1 }), ctx);
+    const result = await getThread.handler(parse({ depth: 1 }), ctx);
 
     expect(stripHtml).toHaveBeenCalledWith('<p>Hello</p>');
-    expect(stripHtml).toHaveBeenCalledWith('<b>Title</b>');
     expect(stripHtml).toHaveBeenCalledWith('<i>Styled</i>');
+    expect(stripHtml).not.toHaveBeenCalledWith('<b>Title</b>');
+    expect(result.item.title).toBe('<b>Title</b>');
   });
 
   it('calls normalizeUrl on item url', async () => {
@@ -418,7 +422,7 @@ describe('hn_get_thread format', () => {
     expect(text).toContain('1 replies');
     expect(text).toContain('Top-level');
     expect(text).toContain('**carol** (id:20');
-    expect(text).toContain('  Nested reply');
+    expect(text).toContain('\n  > Nested reply');
   });
 
   it('marks OP comments with "(OP)" suffix in author line', () => {

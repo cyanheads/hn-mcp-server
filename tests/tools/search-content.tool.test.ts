@@ -16,6 +16,8 @@ import type { AlgoliaResponse } from '@/services/hn/types.js';
 vi.mock('@/services/hn/hn-service.js', async (importOriginal) => ({
   dateBoundToEpochMs: (await importOriginal<typeof import('@/services/hn/hn-service.js')>())
     .dateBoundToEpochMs,
+  decodeHtmlEntities: (await importOriginal<typeof import('@/services/hn/hn-service.js')>())
+    .decodeHtmlEntities,
   getHnService: vi.fn(),
   stripHtml: vi.fn((html: string) => html),
   stripHtmlPreservingEm: vi.fn((html: string) =>

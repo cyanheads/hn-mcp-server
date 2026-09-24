@@ -5,7 +5,9 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeInline, quoteBody } from '@/mcp-server/tools/markdown-escape.js';
 import {
+  decodeHtmlEntities,
   extractDomain,
   getHnService,
   normalizeUrl,
@@ -174,7 +176,7 @@ export const getStories = tool('hn_get_stories', {
       return {
         id: item.id,
         type: item.type,
-        ...(item.title && { title: stripHtml(item.title) }),
+        ...(item.title && { title: decodeHtmlEntities(item.title) }),
         ...(url && { url }),
         ...(domain && { domain }),
         ...(item.score != null && { score: item.score }),
@@ -261,8 +263,8 @@ export const getStories = tool('hn_get_stories', {
         .filter(Boolean)
         .join(' | ');
       const url = s.url ? `\n${s.url}` : '';
-      const text = s.text ? `\n${s.text}` : '';
-      const title = s.title ?? `[${s.type}]`;
+      const text = s.text ? `\n${quoteBody(s.text)}` : '';
+      const title = s.title ? escapeInline(s.title) : `[${s.type}]`;
       const domain = s.domain ? ` (${s.domain})` : '';
       return `[${rank}] ${title}${domain}\n${meta}${url}${text}`;
     });

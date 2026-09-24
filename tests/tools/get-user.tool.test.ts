@@ -23,7 +23,9 @@ vi.mock('@/services/hn/hn-service.js', async (importOriginal) => ({
 
 import { getUser } from '@/mcp-server/tools/definitions/get-user.tool.js';
 import { getHnService, HnService, type ItemSlot, stripHtml } from '@/services/hn/hn-service.js';
-import { httpStatus, stubHnApi } from '../helpers/hn-api-stub.js';
+import { httpStatus, rejectUnmockedFetch, stubHnApi } from '../helpers/hn-api-stub.js';
+
+rejectUnmockedFetch();
 
 const mockFetchUser = vi.fn<(username: string) => Promise<HnUser | null>>();
 const mockFetchItems = vi.fn<(ids: number[]) => Promise<ItemSlot[]>>();

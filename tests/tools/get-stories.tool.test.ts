@@ -34,7 +34,9 @@ vi.mock('@/services/hn/hn-service.js', async (importOriginal) => ({
 import { getStories } from '@/mcp-server/tools/definitions/get-stories.tool.js';
 import { getHnService, HnService, type ItemSlot } from '@/services/hn/hn-service.js';
 import type { HnItem } from '@/services/hn/types.js';
-import { httpStatus, stubHnApi } from '../helpers/hn-api-stub.js';
+import { httpStatus, rejectUnmockedFetch, stubHnApi } from '../helpers/hn-api-stub.js';
+
+rejectUnmockedFetch();
 
 function createMockContext() {
   return createFrameworkMockContext({ errors: getStories.errors });

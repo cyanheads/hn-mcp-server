@@ -5,7 +5,14 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getHnService, normalizeUrl, settlePage, stripHtml } from '@/services/hn/hn-service.js';
+import { escapeInline, quoteBody } from '@/mcp-server/tools/markdown-escape.js';
+import {
+  decodeHtmlEntities,
+  getHnService,
+  normalizeUrl,
+  settlePage,
+  stripHtml,
+} from '@/services/hn/hn-service.js';
 
 export const getUser = tool('hn_get_user', {
   description:
@@ -189,7 +196,7 @@ export const getUser = tool('hn_get_user', {
       type: item.type,
       ...(item.parent != null && { parent: item.parent }),
       ...(item.poll != null && { poll: item.poll }),
-      title: item.title ? stripHtml(item.title) : undefined,
+      title: item.title ? decodeHtmlEntities(item.title) : undefined,
       url: normalizeUrl(item.url),
       text: item.text ? stripHtml(item.text) : undefined,
       score: item.score,
@@ -249,12 +256,12 @@ export const getUser = tool('hn_get_user', {
       `**Karma:** ${user.karma} | **Joined:** ${joined} | **Total submissions:** ${user.totalSubmissions}`,
     ];
 
-    if (user.about) lines.push(`\n${user.about}`);
+    if (user.about) lines.push(`\n${quoteBody(user.about)}`);
 
     if (result.submissions?.length) {
       lines.push('\n### Submissions');
-      for (const s of result.submissions) {
-        const title = s.title || `[${s.type}]`;
+      for (const [i, s] of result.submissions.entries()) {
+        const title = s.title ? escapeInline(s.title) : `[${s.type}]`;
         const date = s.time
           ? `${new Date(s.time * 1000).toISOString().slice(0, 10)} (t:${s.time})`
           : '';
@@ -271,7 +278,11 @@ export const getUser = tool('hn_get_user', {
           .join(' | ');
         lines.push(`- **${title}** — ${meta}`);
         if (s.url) lines.push(`  ${s.url}`);
-        if (s.text) lines.push(`  ${s.text}`);
+        if (s.text) {
+          lines.push(quoteBody(s.text, '  '));
+          // A blank line ends the quote before the next submission.
+          if (i < result.submissions.length - 1) lines.push('');
+        }
       }
     }
 

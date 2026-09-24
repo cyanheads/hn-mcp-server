@@ -6,7 +6,14 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  escapeHighlight,
+  escapeInline,
+  escapeQuoted,
+  quoteBody,
+} from '@/mcp-server/tools/markdown-escape.js';
+import {
   dateBoundToEpochMs,
+  decodeHtmlEntities,
   extractDomain,
   getHnService,
   normalizeUrl,
@@ -116,10 +123,27 @@ function emptyPageNotice(
 }
 
 /**
+ * Entity-decode a title highlight between its `<em>` markers. A decoded
+ * `&lt;em&gt;` then reads as a marker, which the `highlights.title`
+ * description discloses.
+ */
+function decodeHighlightTitle(title: string): string {
+  return title
+    .split(/(<\/?em>)/)
+    .map((part, i) => (i % 2 === 1 ? part : decodeHtmlEntities(part)))
+    .join('');
+}
+
+/**
  * Project Algolia's `_highlightResult` into a flat snippet object: the title
  * snippet, the body snippet (preferring comment_text over story_text to match
  * the `text` mapping), and the deduplicated union of matched words across all
  * surfaced fields. Returns undefined when nothing matched.
+ *
+ * Titles are not HTML, though some arrive entity-encoded (`&lt;details&gt;`,
+ * `&#34;`), so the title snippet is entity-decoded between its `<em>` markers
+ * and never tag-stripped. The body snippet is stripped of its HTML with the
+ * markers kept.
  *
  * `includeBody` is false under the compact projection, which drops the body
  * snippet — the field that duplicates a hit's full comment text.
@@ -145,7 +169,7 @@ function extractHighlights(hit: AlgoliaHit, includeBody: boolean) {
   if (title == null && text == null && matchedWords.length === 0) return;
 
   return {
-    ...(title != null && { title: stripHtmlPreservingEm(title) }),
+    ...(title != null && { title: decodeHighlightTitle(title) }),
     ...(text != null && { text }),
     matchedWords,
   };
@@ -336,13 +360,13 @@ export const searchHn = tool('hn_search_content', {
                   .string()
                   .optional()
                   .describe(
-                    'Title snippet with matched terms wrapped in `<em>…</em>`. Absent when the title did not match.',
+                    'Title snippet with matched terms wrapped in `<em>…</em>`. Titles are not HTML, though some arrive entity-encoded; entities are decoded and no tags are stripped, so a literal `<em>` in the title is indistinguishable from a marker. Absent when the title did not match.',
                   ),
                 text: z
                   .string()
                   .optional()
                   .describe(
-                    'Body snippet (comment_text or story_text) with matched terms wrapped in `<em>…</em>`. Absent when the body did not match, and always absent under view "compact" — matchedWords still lists what matched.',
+                    'Body snippet (comment_text or story_text), HTML stripped, with matched terms wrapped in `<em>…</em>`. A literal `<em>` typed into the body is indistinguishable from a marker. Absent when the body did not match, and always absent under view "compact" — matchedWords still lists what matched.',
                   ),
                 matchedWords: z
                   .array(z.string())
@@ -437,14 +461,14 @@ export const searchHn = tool('hn_search_content', {
       const highlights = extractHighlights(hit, includeBody);
       return {
         id: Number(hit.objectID),
-        title: hit.title ?? undefined,
+        title: hit.title != null ? decodeHtmlEntities(hit.title) : undefined,
         url,
         domain,
         author: hit.author,
         points: hit.points ?? undefined,
         numComments: hit.num_comments ?? undefined,
         createdAt: hit.created_at,
-        storyTitle: hit.story_title ?? undefined,
+        storyTitle: hit.story_title != null ? decodeHtmlEntities(hit.story_title) : undefined,
         storyId: hit.story_id ?? undefined,
         text: rawText ? stripHtml(rawText) || undefined : undefined,
         ...(highlights && { highlights }),
@@ -486,17 +510,23 @@ export const searchHn = tool('hn_search_content', {
       ];
     }
 
-    /** Render highlight metadata as a `> match: ...` footer. Surfaces each highlights field separately so structured consumers and the LLM both see what matched. */
+    /**
+     * Render highlight metadata as a `> match — …` footer, surfacing each highlights
+     * field separately so structured consumers and the LLM both see what matched.
+     * The footer follows an unquoted blank line, which a quoted body never
+     * produces, so a body line reading `match — …` cannot pass for it. The body
+     * snippet comes last and continues on quoted lines of its own.
+     */
     const renderHighlights = (hl: {
       title?: string | undefined;
       text?: string | undefined;
       matchedWords: string[];
     }) => {
       const parts: string[] = [];
-      if (hl.title) parts.push(`title: ${hl.title}`);
-      if (hl.text) parts.push(`body: ${hl.text}`);
+      if (hl.title) parts.push(`title: ${escapeHighlight(hl.title)}`);
       if (hl.matchedWords.length) parts.push(`terms: ${hl.matchedWords.join(', ')}`);
-      return parts.length ? `\n> match — ${parts.join(' | ')}` : '';
+      if (hl.text) parts.push(`body: ${hl.text}`);
+      return parts.length ? `\n\n${quoteBody(`match — ${parts.join(' | ')}`)}` : '';
     };
 
     const lines = result.hits.map((h) => {
@@ -504,7 +534,7 @@ export const searchHn = tool('hn_search_content', {
         // Story result — Algolia returns storyId === id for stories, so suppress the parent ref unless it actually differs or a parent title is set.
         const parentRef =
           (h.storyId != null && h.storyId !== h.id) || h.storyTitle
-            ? ` | story:"${h.storyTitle ?? '?'}"#${h.storyId ?? '?'}`
+            ? ` | story:"${escapeQuoted(h.storyTitle ?? '?')}"#${h.storyId ?? '?'}`
             : '';
         const meta = [
           `id:${h.id}`,
@@ -517,9 +547,9 @@ export const searchHn = tool('hn_search_content', {
           .join(' | ');
         const domain = h.domain ? ` (${h.domain})` : '';
         const url = h.url ? `\n${h.url}` : '';
-        const text = h.text ? `\n${h.text}` : '';
+        const text = h.text ? `\n${quoteBody(h.text)}` : '';
         const hlLine = h.highlights ? renderHighlights(h.highlights) : '';
-        return `### ${h.title}${domain}\n${meta}${parentRef}${url}${text}${hlLine}`;
+        return `### ${escapeInline(h.title)}${domain}\n${meta}${parentRef}${url}${text}${hlLine}`;
       }
       // Comment result — parent context in heading.
       const meta = [
@@ -530,9 +560,9 @@ export const searchHn = tool('hn_search_content', {
       ]
         .filter(Boolean)
         .join(' | ');
-      const text = h.text ? `\n${h.text}` : '';
+      const text = h.text ? `\n${quoteBody(h.text)}` : '';
       const hlLine = h.highlights ? renderHighlights(h.highlights) : '';
-      return `### Comment on "${h.storyTitle ?? 'unknown'}" (story id:${h.storyId ?? '?'})\n${meta}${text}${hlLine}`;
+      return `### Comment on "${escapeQuoted(h.storyTitle ?? 'unknown')}" (story id:${h.storyId ?? '?'})\n${meta}${text}${hlLine}`;
     });
 
     const header =

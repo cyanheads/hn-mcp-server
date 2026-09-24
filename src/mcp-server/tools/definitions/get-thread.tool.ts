@@ -7,7 +7,9 @@
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { invalidParams, JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { decodeCursor, encodeCursor } from '@cyanheads/mcp-ts-core/utils';
+import { escapeInline, quoteBody } from '@/mcp-server/tools/markdown-escape.js';
 import {
+  decodeHtmlEntities,
   getHnService,
   type HnService,
   isRateLimited,
@@ -146,7 +148,7 @@ const byteLength = (text: string) => utf8.encode(text).byteLength;
 /** Heading that names the root's type, state, and — for a poll option — its poll. */
 function rootHeading(item: ThreadItem): string {
   const state = item.deleted ? '[deleted] ' : item.dead ? '[dead] ' : '';
-  if (item.title) return `${state}${item.title}`;
+  if (item.title) return `${state}${escapeInline(item.title)}`;
   const label = TYPE_LABELS[item.type] ?? item.type;
   const author = item.deleted ? '' : ` by ${item.by ?? 'unknown'}`;
   const poll = item.poll != null ? ` on poll ${item.poll}` : '';
@@ -162,7 +164,7 @@ function renderOption(option: ThreadOption): string {
   ]
     .filter(Boolean)
     .join(' | ');
-  return `- ${meta}${option.text ? `: ${option.text}` : ''}`;
+  return `- ${meta}${option.text ? `: ${escapeInline(option.text)}` : ''}`;
 }
 
 function renderRoot(item: ThreadItem): string {
@@ -184,12 +186,15 @@ function renderRoot(item: ThreadItem): string {
     .join(' | ');
   const lines = [`## ${rootHeading(item)}\n${meta}`];
   if (item.url) lines.push(item.url);
-  if (item.text) lines.push(item.text);
+  if (item.text) lines.push(quoteBody(item.text));
   if (item.options?.length) {
-    lines.push(`**Options:**\n${item.options.map(renderOption).join('\n')}`);
+    lines.push(`\n**Options:**\n${item.options.map(renderOption).join('\n')}`);
   }
   return lines.join('\n');
 }
+
+/** Comments are separated by a blank line, which also ends each quoted body. */
+const COMMENT_SEPARATOR = '\n\n';
 
 function renderComment(c: ThreadComment): string {
   // Cap visual indent at 10 levels — the depth value itself is rendered explicitly below.
@@ -201,12 +206,14 @@ function renderComment(c: ThreadComment): string {
   const replies = c.childCount > 0 ? ` | ${c.childCount} replies` : '';
   const opTag = c.isOp ? ' | isOp:true' : '';
   const header = `${indent}**${author}** (id:${c.id} | depth:${c.depth} | parent:${c.parentId}${opTag}${replies} | ${date})`;
-  return c.text ? `${header}\n${indent}${c.text.replace(/\n/g, `\n${indent}`)}` : header;
+  return c.text ? `${header}\n${quoteBody(c.text, indent)}` : header;
 }
 
 function renderThread(item: ThreadItem, comments: readonly ThreadComment[]): string {
   const parts = [renderRoot(item)];
-  if (comments.length > 0) parts.push(COMMENTS_DIVIDER, ...comments.map(renderComment));
+  if (comments.length > 0) {
+    parts.push(COMMENTS_DIVIDER, comments.map(renderComment).join(COMMENT_SEPARATOR));
+  }
   return parts.join('\n');
 }
 
@@ -390,8 +397,9 @@ async function walkThread(
           };
           const bytes =
             byteLength(renderComment(comment)) +
-            1 +
-            (comments.length === 0 ? byteLength(COMMENTS_DIVIDER) + 1 : 0);
+            (comments.length === 0
+              ? byteLength(`\n${COMMENTS_DIVIDER}\n`)
+              : byteLength(COMMENT_SEPARATOR));
           if (comments.length > 0 && usedBytes + bytes > RESPONSE_BUDGET_BYTES) {
             stop = 'size';
             break;
@@ -643,7 +651,7 @@ export const getThread = tool('hn_get_thread', {
       type: root.type,
       by: root.by,
       time: root.time,
-      title: root.title ? stripHtml(root.title) : undefined,
+      title: root.title ? decodeHtmlEntities(root.title) : undefined,
       url: normalizeUrl(root.url),
       text: root.text ? stripHtml(root.text) : undefined,
       score: root.score,
