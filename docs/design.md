@@ -204,7 +204,7 @@ Wraps Algolia's HN Search API. Supports relevance-sorted and date-sorted search 
 | `hits[].storyTitle` | string? | Parent story title for comment hits. |
 | `hits[].storyId` | number? | Equals `id` for story hits. |
 | `hits[].text` | string? | Body text, HTML stripped. Always absent under `view: "compact"`. |
-| `hits[].highlights` | object? | `title`, `text` (both `<em>`-marked snippets), and `matchedWords`. `text` is always absent under `view: "compact"`. |
+| `hits[].highlights` | object? | `title`, `text` (both `<em>`-marked snippets; a literal `<em>` typed by the author is indistinguishable from a marker), and `matchedWords`. `text` is always absent under `view: "compact"`. |
 | `query` | string? | The query that was searched. Absent for a filter-only search. |
 
 **Enrichment**: `totalHits`, `page`, `totalPages`, plus `truncated` / `shown` / `cap` only while more pages remain (`page + 1 < totalPages`), with a `notice` naming the next `page` and, below the 50 maximum, suggesting a larger `count`. The last page Algolia serves carries none of them. An empty page gets a `notice`: past the end it names the last valid page (`totalPages - 1`), or `page: 0` when that is unknown; an empty first page names the filters to relax, and the `storyId` source when one was set.
@@ -250,17 +250,19 @@ This is the performance-critical path. `hn_get_stories` fetching 30 items and `h
 
 ### HTML Handling
 
-The HN API returns HTML in `title`, `text`, and `about` fields. Raw HTML is noisy for LLM consumption. The service layer strips HTML to plain text before returning data:
+The HN API returns HTML in body fields: `text` and `about`, and Algolia's `comment_text` / `story_text`. Raw HTML is noisy for LLM consumption, so `stripHtml` turns each body into plain text before it reaches either output surface:
 
-- `<p>` tags → double newline
-- `<a href="...">` → preserve URL in parentheses
-- `<pre><code>` → preserve as-is (code blocks)
-- All other tags → strip, keep content
-- Named and numeric HTML entities → decoded
+- `<p>` tags → a blank line
+- `<pre><code>` → kept verbatim, leading indent included, with entities decoded
+- `<a href="...">` → the href alone when the link text is the href or a `...`-truncated prefix of it; otherwise `text (href)`. HN cuts long link text short and older items encode `/` in the text but not the href, so the two are compared after decoding, with highlight markers set aside and any entity the cut left partial (the `&#3` of `&#38;`) dropped
+- All other tags → stripped, content kept, repeating until a pass removes nothing
+- Named and numeric HTML entities → decoded exactly once; a reference to U+0000, U+0001, a surrogate, or a value past U+10FFFF decodes to U+FFFD, and a name outside the declared set (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`, `&nbsp;`) stays as typed
 
-This applies uniformly across all tools. No raw HTML reaches tool output.
+Titles are not HTML, though some carry entities: `The <Dialog> Element` and `AT&T` arrive as typed, while items 1031 (`&#34;Remember Me&#34; …`) and 3409539 (`Apple&#8217;s …`) arrive encoded on both APIs, and Algolia encodes 26915706 as `Using &lt;details&gt; …` where Firebase sends it raw. Every title projection therefore takes `decodeHtmlEntities` alone and never `stripHtml`, so a title that looks like a tag survives. No raw HTML from a body reaches tool output.
 
-Algolia highlight snippets are the one exception: `stripHtmlPreservingEm` runs the same strip but keeps the `<em>…</em>` markers that carry which terms matched.
+While the strip rewrites the rest, code blocks and highlight markers are held by masks that open with U+0000 and close with U+0001. Distinct delimiters keep typed text between two adjacent masks from borrowing the close of one and the open of the next to spell a third. `stripHtml` removes both characters from its input first and decoding never produces either, so no upstream text can spell a mask: a typed `@@CODE_0@@` or `CODE_0` passes through unchanged. Each scan runs forward once — an opener with no closer ends the scan instead of rescanning the rest — so the strip stays linear on adversarial input.
+
+Algolia highlight snippets keep their `<em>…</em>` markers. `stripHtmlPreservingEm` runs the same strip over a body snippet and carries the markers through, including into a collapsed link, where they stay on the matched characters of the href. A title snippet is entity-decoded between its markers and never tag-stripped, so a decoded `&lt;em&gt;` joins the markers it cannot be told from. `<em>` is the only marker on both surfaces: `format()` sees only the validated output, so a literal `<em>` typed inside a snippet is indistinguishable from a marker, and the `highlights` descriptions say so.
 
 ### Dead and Deleted Items
 
@@ -304,9 +306,16 @@ Each tool provides a `format` function that shapes output for LLM readability:
 - `hn_get_stories` — ranked list: rank, title, domain, id/type/score/author/comment count/date, URL, body text
 - `hn_get_thread` — a type-aware heading (the title for story, job, and poll roots; `Comment by <author>`; `Poll option by <author> on poll <id>`; a `[deleted]` / `[dead]` marker), a meta line with id/type/`parent:`/`poll:`/`parts:`/score/author/comment count/date, a poll's options, then the comment list indented by depth, with author, id/depth/parent/reply count/date, and an OP marker
 - `hn_get_user` — profile summary, then a submission list with id, `parent:` / `poll:`, type, score, comment count, date, URL, and body text
-- `hn_search_content` — a heading quoting the query (or marking a filter-only search), then per-hit heading (story title + domain, or the parent story for comment hits), metadata line, URL, body text, and a `> match —` footer carrying the highlight snippets and matched terms
+- `hn_search_content` — a heading quoting the query (or marking a filter-only search), then per-hit heading (story title + domain, or the parent story for comment hits), metadata line, URL, body text, and a `> match —` footer carrying the title snippet, matched terms, and body snippet
 
 Format functions produce `text` content blocks. They must render everything the LLM needs: different clients forward different surfaces, so `content[]` and `structuredContent` have to carry the same data.
+
+Upstream text is interpolated into Markdown, so `format()` fences it at the render boundary (`src/mcp-server/tools/markdown-escape.ts`). `structuredContent` keeps the provider text:
+
+- **Bodies** — item and comment text, `about`, hit text, and the highlight body. Every line gets `> ` after any indent, and an empty line a bare `>`, so no body line can pass for a comment header, heading, or rule. The one escape inside a body is the leading `[` of a line that could open a link reference definition: after any spaces, tabs, and quote or list markers, a `[` whose label closes into `]:` on that line, or one with no `]` after it, whose label may close on a later line. CommonMark applies definitions document-wide, even from inside a quote, so a live one would turn `[1]`, `[deleted]`, or `[pdf]` in server text into a link. It renders `> \[1]: url`. Indentation is no exemption: four or more spaces make a line code at the top level but continuation text after a list item, so a code line shaped `[x]: y` takes the `\` too. `[1] see`, `x [1]: y`, and a `[1] https://…` footnote line are unchanged. Nothing else is escaped, which keeps code intact; escaping would mangle `Vec<T>` and `*` in code that `format()` cannot tell from prose. A blank line follows each body before any server line, since a quote absorbs the next non-blank line through lazy continuation — `hn_get_thread` separates comments with one, and its byte budget counts it.
+- **Single-line fields** — titles, title highlights, and poll-option text. Only `\`, `*`, backtick, the `]` of `](`, and `<` before a letter, `/`, `!`, or `?` are escaped, plus `"` where the field sits in `story:"…"` or `Comment on "…"`, and `|` in the title highlight inside the search footer, whose segments ` | ` separates. Any line break becomes a space. What this guarantees: the field cannot close or open the server's markup around it — the `**…**` in `hn_get_user`, a quote, a footer segment, a new line — and it reads as typed in raw text. It is not a full Markdown escape: `_under_` can still render as emphasis in a renderer, and a typed `&copy;` as ©. `a < b`, `[pdf]`, `snake_case`, and `a | b` outside the footer are unchanged. Highlight markers pass through as `<em>…</em>`.
+- **Verbatim** — usernames, URLs, IDs, and server tokens (`Comment by <author>`, `[deleted]`, `parent:` / `poll:`).
+- **Search footer** — `> match — title: … | terms: … | body: …`, after an unquoted blank line, which a quoted body never produces, so a body line reading `match — terms: x` cannot pass for the footer. The body snippet comes last and continues on quoted lines of its own, so no body text precedes a server-authored part.
 
 ## Config
 

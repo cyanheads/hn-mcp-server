@@ -219,6 +219,7 @@ src/
       hn-service.ts                     # HN Firebase + Algolia API client
       types.ts                          # HN domain types
   mcp-server/
+    tools/markdown-escape.ts           # format() boundary: escape titles, quote bodies
     tools/definitions/
       get-stories.tool.ts              # hn_get_stories — Fetch stories from an HN feed
       get-thread.tool.ts               # hn_get_thread — Get item + comment tree

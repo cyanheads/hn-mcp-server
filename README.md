@@ -91,7 +91,7 @@ HN-specific:
 
 - Two upstream APIs: HN's Firebase API for feeds, items, and users; Algolia's HN Search API for full-text search
 - Concurrent batch fetching with configurable parallelism for item resolution (`HN_CONCURRENCY_LIMIT`)
-- HTML entity decoding and tag stripping, preserving code blocks and links
+- HTML bodies stripped to plain text — entities decoded once, code blocks kept verbatim, each link rendered once as its full URL — while titles, which are not HTML though some carry entities, are entity-decoded and never tag-stripped
 - Server-level `instructions` forwarded to LLM clients on `initialize` — item types, ID reuse across tools, case-sensitive usernames, field sparsity
 - No API keys required — both upstream APIs are public
 
@@ -101,6 +101,7 @@ Agent-friendly output:
 - Discriminated output contracts — typed error reasons (`item_not_found`, `upstream_rate_limited`, `upstream_html`, …) with per-reason recovery text (a rate limit passes on the upstream's `Retry-After` as `retryAfter`), and a `depth`/`parentId` pair on every comment so callers reconstruct the tree without guessing nesting
 - Pagination provenance — every paged listing echoes the offset it used (`offset`, `submissionOffset`, `page`) plus the exact next-offset value in `notice`, and `hn_get_thread` returns a self-contained `nextCursor`, so an agent can resume without recomputing state
 - Response shaping — HTML stripping, URL normalization, and domain extraction remove upstream markup noise; `hn_search_content`'s `view: "compact"` drops the two body-text fields that otherwise duplicate a hit's full text
+- Fenced upstream text — in `content[]`, every line of a body is block-quoted and titles are escaped only where they could break the surrounding Markdown, so a comment cannot pass for a server-authored line
 
 ## Getting started
 
