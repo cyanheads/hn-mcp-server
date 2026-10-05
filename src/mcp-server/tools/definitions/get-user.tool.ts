@@ -170,7 +170,6 @@ export const getUser = tool('hn_get_user', {
     if (!user) {
       throw ctx.fail('user_not_found', `User ${input.username} not found`, {
         username: input.username,
-        ...ctx.recoveryFor('user_not_found'),
       });
     }
 

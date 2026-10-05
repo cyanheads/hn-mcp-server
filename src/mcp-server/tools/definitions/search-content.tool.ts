@@ -417,17 +417,12 @@ export const searchHn = tool('hn_search_content', {
     if (dateRange) {
       const { start, end } = dateRange;
       if (!start && !end) {
-        throw ctx.fail(
-          'invalid_date_range',
-          'dateRange has neither a start nor an end bound.',
-          ctx.recoveryFor('invalid_date_range'),
-        );
+        throw ctx.fail('invalid_date_range', 'dateRange has neither a start nor an end bound.');
       }
       if (start && end && dateBoundToEpochMs(start) >= dateBoundToEpochMs(end)) {
         throw ctx.fail(
           'invalid_date_range',
           `dateRange.start (${start}) is not before dateRange.end (${end}); both bounds are exclusive, so the window holds nothing.`,
-          ctx.recoveryFor('invalid_date_range'),
         );
       }
     }
@@ -436,7 +431,6 @@ export const searchHn = tool('hn_search_content', {
       throw ctx.fail(
         'min_points_unscored_type',
         `minPoints cannot match tags "${input.tags}": ${input.tags} records carry no points, so any minPoints excludes every one.`,
-        ctx.recoveryFor('min_points_unscored_type'),
       );
     }
 
@@ -445,7 +439,6 @@ export const searchHn = tool('hn_search_content', {
       throw ctx.fail(
         'missing_query_or_filter',
         'No query and no filter were supplied, so there is nothing to search by.',
-        ctx.recoveryFor('missing_query_or_filter'),
       );
     }
 

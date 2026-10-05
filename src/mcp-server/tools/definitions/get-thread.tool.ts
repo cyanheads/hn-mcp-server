@@ -616,17 +616,14 @@ export const getThread = tool('hn_get_thread', {
       throw ctx.fail(
         'invalid_cursor',
         `This cursor continues item ${resume.itemId}, not item ${input.itemId}.`,
-        { itemId: input.itemId, ...ctx.recoveryFor('invalid_cursor') },
+        { itemId: input.itemId },
       );
     }
 
     const hn = getHnService();
     const root = await hn.fetchItem(input.itemId, ctx);
     if (!root) {
-      throw ctx.fail('item_not_found', `Item ${input.itemId} not found`, {
-        itemId: input.itemId,
-        ...ctx.recoveryFor('item_not_found'),
-      });
+      throw ctx.fail('item_not_found', `Item ${input.itemId} not found`, { itemId: input.itemId });
     }
 
     const options: ThreadOption[] = [];
