@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.21](changelog/0.5.x/0.5.21.md) — 2026-10-05
+
+Framework ^0.13.6 → ^0.13.12: tool error results now end with a request ID, the Docker image installs dependencies in a build-platform deps stage, and server.json launches with npx.
+
 ## [0.5.20](changelog/0.5.x/0.5.20.md) — 2026-09-23 · 🛡️ Security
 
 Upstream text is fenced in content[] so a comment or highlight body can no longer pass for server-authored lines, titles are entity-decoded instead of HTML-stripped, each HN link renders once as its full URL, and typed placeholder text survives stripping.

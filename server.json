@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/hn-mcp-server",
     "source": "github"
   },
-  "version": "0.5.20",
+  "version": "0.5.21",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/hn-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.5.20",
+      "version": "0.5.21",
       "environmentVariables": [
         {
           "name": "HN_CONCURRENCY_LIMIT",
@@ -45,7 +45,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/hn-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.5.20",
+      "version": "0.5.21",
       "environmentVariables": [
         {
           "name": "MCP_TRANSPORT_TYPE",
