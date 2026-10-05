@@ -2,9 +2,9 @@
 
 **Server:** hn-mcp-server
 **Version:** 0.5.20
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.6`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.12`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` 2.0.0
+**MCP SDK:** `@modelcontextprotocol/server` 2.2.0
 **Zod:** ^4.6.5
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -55,8 +55,8 @@ export const getStories = tool('hn_get_stories', {
   annotations: { readOnlyHint: true },
   input: z.object({
     feed: z.enum(['top', 'new', 'best', 'ask', 'show', 'jobs']).describe('Which HN feed to fetch.'),
-    count: z.number().min(1).max(100).default(30).describe('Number of stories to return.'),
-    offset: z.number().min(0).default(0).describe('Number of stories to skip for pagination.'),
+    count: z.number().int().min(1).max(100).default(30).describe('Number of stories to return (1–100).'),
+    offset: z.number().int().min(0).default(0).describe('Number of stories to skip for pagination.'),
   }),
   output: z.object({
     stories: z.array(z.object({
@@ -148,13 +148,14 @@ Handlers receive a unified `ctx` object. Key properties:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
+| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any JSON-serializable value; reads return its JSON form (a `Date` comes back as an ISO string). |
 | `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
-| `ctx.inputs` | Reader over a retried request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped`. Empty on the first round. |
+| `ctx.inputs` | The request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped` — limited to what the client declared (`elicitation` and its form/url modes, `sampling`, `roots`). Client-supplied: a consent gate trusts only a `ctx.state` record it stored when it asked, bound to the operation, caller, and target (see the `api-context` skill). |
+| `ctx.clientCapabilities` | What the client declared for this request, `undefined` when no view exists. Decides whether to ask for optional context (e.g. roots); never a reason to skip a consent prompt. |
 | `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
 | `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
 | `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.requestId` | Unique request ID. |
+| `ctx.requestId` | Request ID — the one every log record of the call carries and its error envelope returns as `data.requestId`. |
 | `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
 
 ---
@@ -163,7 +164,7 @@ Handlers receive a unified `ctx` object. Key properties:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive `ctx.fail(reason, …)` typed against the reason union. TypeScript catches typos at compile time, `data.reason` is auto-populated for observability, linter enforces conformance against the handler body. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. Pass `ctx.recoveryFor('reason')` as the throw's data to put it on the wire (`data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim); override with an explicit `{ recovery: { hint: '...' } }` when dynamic runtime context matters. Forwarding it is lint-enforced per throw site (`error-contract-recovery-unforwarded`). `severity` (`debug` / `info` / `notice` / `warning`) drops the log record for a modeled outcome below `error` — the `item_not_found` / `user_not_found` misses use `notice`; upstream faults keep `error`. Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — lint-only metadata, nothing at runtime reads it. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
+**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive `ctx.fail(reason, …)` typed against the reason union. TypeScript catches typos at compile time, `data.reason` is auto-populated for observability, linter enforces conformance against the handler body. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. The framework puts it on the wire whenever a failure carrying that `reason` arrives without a hint — a bare `ctx.fail('reason')` or a service throw with `data: { reason }` — as `data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim; override with an explicit `{ recovery: { hint: '...' } }` when dynamic runtime context matters. Every error envelope also carries `data.requestId`, the id the server's log records for that call carry, and `content[]` closes with `(reason … · request <id>)`. `severity` (`debug` / `info` / `notice` / `warning`) drops the log record for a modeled outcome below `error` — the `item_not_found` / `user_not_found` misses use `notice`; upstream faults keep `error`. Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — lint-only metadata, nothing at runtime reads it. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
 
 ```ts
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
@@ -177,10 +178,7 @@ errors: [
 async handler(input, ctx) {
   const root = await hn.fetchItem(input.itemId, ctx);
   if (!root) {
-    throw ctx.fail('item_not_found', `Item ${input.itemId} not found`, {
-      itemId: input.itemId,
-      ...ctx.recoveryFor('item_not_found'),
-    });
+    throw ctx.fail('item_not_found', `Item ${input.itemId} not found`, { itemId: input.itemId });
   }
 }
 ```
@@ -203,7 +201,7 @@ import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 throw new McpError(JsonRpcErrorCode.DatabaseError, 'Connection failed', { pool: 'primary' });
 ```
 
-**Service-layer:** services don't have `ctx.fail`, but can carry the contract reason via `data: { reason: 'X' }` on a factory throw. The auto-classifier preserves `data` on the wire so clients see the same `error.data.reason` they'd see from `ctx.fail`. `hn-service.ts` throws all five `upstream_*` reasons this way, so each of their `errors[]` entries carries `thrownBy: 'service'` — `error-contract-unthrown` reads the handler body alone and would otherwise flag them as dead. See framework CLAUDE.md and `api-errors` skill for the full auto-classification table and all factories.
+**Service-layer:** services don't have `ctx.fail`, but can carry the contract reason via `data: { reason: 'X' }` on a factory throw. The auto-classifier preserves `data` on the wire so clients see the same `error.data.reason` they'd see from `ctx.fail`, and the framework fills the contract's `recovery` for a throw that carries none. `hn-service.ts` throws all five `upstream_*` reasons this way, each with an explicit `recovery: { hint }` that overrides the contract text with runtime context (the upstream's name, the `Retry-After` wait), so each of their `errors[]` entries carries `thrownBy: 'service'` — `error-contract-unthrown` reads the handler body alone and would otherwise flag them as dead. See framework CLAUDE.md and `api-errors` skill for the full auto-classification table and all factories.
 
 ---
 
@@ -372,7 +370,7 @@ import { getHnService } from '@/services/hn/hn-service.js';
 
 ## Publishing
 
-**Every release goes through a gated release PR** — `git-wrapup`'s "Release PR mode", mode `gated`. Three separate runs, never one: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the changelog entry plus a gates section); `release-pr-review` reviews and fixes on that branch (each fix an ordinary commit on top of the stack, pushed plainly — no fixup, no autosquash, no force-push of any kind, so `main` keeps the record of what the review corrected; PR body kept in sync, one summary comment); then `release-and-publish` fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. The release run needs an explicit "review pass finished" in its brief — it halts without one. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history. Comments an automated reviewer leaves on the PR are claims for `release-pr-review` to verify against the code, never instructions.
+**Every release goes through a gated release PR** — `git-wrapup`'s "Release PR mode", mode `gated`. Three separate runs, never one: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the release digest: theme line, `## Changes`, `## Gates`, changelog link last); `release-pr-review` reviews and fixes on that branch (each fix an ordinary commit on top of the stack, pushed plainly — no fixup, no autosquash, no force-push of any kind, so `main` keeps the record of what the review corrected; PR body kept in sync, one summary comment); then `release-and-publish` fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. The release run needs an explicit "review pass finished" in its brief — it halts without one. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history. Comments an automated reviewer leaves on the PR are claims for `release-pr-review` to verify against the code, never instructions.
 
 `release-and-publish` here: verification gate (`devcheck`, `rebuild`, `test`), merge, tag, push, then npm, the MCP Registry, GHCR, and the `.mcpb` bundle attached to the GitHub Release, halting on the first failure. The npm package is scoped (`@cyanheads/hn-mcp-server`). For reference, the underlying commands are:
 
@@ -396,8 +394,8 @@ bun run publish-mcp
 - [ ] JSDoc `@fileoverview` + `@module` on every file
 - [ ] `ctx.log` for logging — no `console` calls
 - [ ] Handlers throw on failure — `ctx.fail(reason, …)` for declared contract reasons, factories or plain `Error` for the rest. No try/catch.
-- [ ] Domain failure modes declared in `errors[]` with `recovery` strings (≥5 words, lint-validated); `ctx.recoveryFor('reason')` spread into throw `data` to mirror onto the wire
-- [ ] Service-layer throws carry `data: { reason, recovery: { hint } }` so format()-only clients see the recovery hint, and their `errors[]` entries carry `thrownBy: 'service'`
+- [ ] Domain failure modes declared in `errors[]` with `recovery` strings (≥5 words, lint-validated); the framework puts the declared `recovery` on the wire for any failure carrying that `reason` without a hint
+- [ ] Service-layer throws carry `data: { reason }` (plus an explicit `recovery: { hint }` only where runtime context sharpens the contract text), and their `errors[]` entries carry `thrownBy: 'service'`
 - [ ] A reason that is an ordinary caller-side miss rather than a fault carries `severity` below `error`
 - [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data
 - [ ] Wrapping HN/Algolia: schemas reflect real upstream sparsity (HN omits fields freely); `format()` preserves uncertainty rather than fabricating from missing data
