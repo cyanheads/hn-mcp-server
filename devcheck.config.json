@@ -5,8 +5,8 @@
       "pino-pretty",
       "typescript",
       "tsc-alias",
-      "@cyanheads/mcp-ts-core",
       "depcheck",
+      "@cyanheads/mcp-ts-core",
       "@socketsecurity/bun-security-scanner"
     ],
     "ignorePatterns": []
