@@ -4,7 +4,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
   createMockContext as createFrameworkMockContext,
   getEnrichment,
@@ -12,10 +12,13 @@ import {
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AlgoliaResponse } from '@/services/hn/types.js';
+import { expectLinearCpu } from '../helpers/cpu-time.js';
 
 vi.mock('@/services/hn/hn-service.js', async (importOriginal) => ({
   dateBoundToEpochMs: (await importOriginal<typeof import('@/services/hn/hn-service.js')>())
     .dateBoundToEpochMs,
+  dateRangeToEpochSeconds: (await importOriginal<typeof import('@/services/hn/hn-service.js')>())
+    .dateRangeToEpochSeconds,
   decodeHtmlEntities: (await importOriginal<typeof import('@/services/hn/hn-service.js')>())
     .decodeHtmlEntities,
   getHnService: vi.fn(),
@@ -39,7 +42,11 @@ vi.mock('@/services/hn/hn-service.js', async (importOriginal) => ({
   }),
 }));
 
-import { searchHn } from '@/mcp-server/tools/definitions/search-content.tool.js';
+import {
+  composeSearchNotice,
+  searchHn,
+  stripUrlPrefix,
+} from '@/mcp-server/tools/definitions/search-content.tool.js';
 import { getHnService, stripHtml } from '@/services/hn/hn-service.js';
 
 function createMockContext() {
@@ -119,7 +126,10 @@ describe('hn_search_content handler', () => {
      */
     mockSearch.mockResolvedValue(
       algoliaResponse({
-        hits: [storyHit, commentHit],
+        hits: [
+          { ...storyHit, _tags: ['story', 'author_alice', 'story_123'] },
+          { ...commentHit, _tags: ['comment', 'author_bob', 'story_123'] },
+        ],
         nbHits: 100_000,
         nbPages: 34,
         page: 0,
@@ -129,10 +139,11 @@ describe('hn_search_content handler', () => {
     const freshCtx = createMockContext();
     const result = await searchHn.handler(searchHn.input.parse({ query: 'test' }), freshCtx);
 
-    expect(result).toEqual({
+    expect(result).toStrictEqual({
       hits: [
         {
           id: 123,
+          type: 'story',
           title: 'Test Story',
           url: 'https://example.com',
           domain: 'example.com',
@@ -146,6 +157,7 @@ describe('hn_search_content handler', () => {
         },
         {
           id: 456,
+          type: 'comment',
           title: undefined,
           url: undefined,
           domain: undefined,
@@ -272,7 +284,7 @@ describe('hn_search_content handler', () => {
     );
 
     expect(getEnrichment(freshCtx).notice).toBe(
-      'Try broader keywords, or relax these filters: tags, author, minPoints, dateRange.',
+      "Try broader keywords, or relax these filters: tags, author, minPoints, dateRange. author must match the username's exact HN casing; hn_get_user answers user_not_found for a mis-cased name.",
     );
   });
 
@@ -798,11 +810,13 @@ describe('hn_search_content input validation', () => {
     expect(searchHn.input.parse({ query: 'test', tags: 'front_page' }).tags).toBe('front_page');
   });
 
-  it('constrains count to 1-50', () => {
+  it('constrains count to 1-1,000', () => {
     expect(() => searchHn.input.parse({ query: 'test', count: 0 })).toThrow();
-    expect(() => searchHn.input.parse({ query: 'test', count: 51 })).toThrow();
+    expect(() => searchHn.input.parse({ query: 'test', count: 1001 })).toThrow();
     expect(searchHn.input.parse({ query: 'test', count: 1 }).count).toBe(1);
     expect(searchHn.input.parse({ query: 'test', count: 50 }).count).toBe(50);
+    expect(searchHn.input.parse({ query: 'test', count: 51 }).count).toBe(51);
+    expect(searchHn.input.parse({ query: 'test', count: 1000 }).count).toBe(1000);
   });
 
   it('accepts optional dateRange with optional start/end', () => {
@@ -915,13 +929,10 @@ describe('hn_search_content — security and edge cases', () => {
     ).resolves.not.toThrow();
   });
 
-  it('format() escapes query in no-results message without injecting HTML', () => {
+  it('format() escapes query in no-results message so a tag cannot open', () => {
     const result = searchHn.format!({ hits: [], query: '<script>alert(1)</script>' });
-    const text = firstText(result);
-    // The query is embedded in the message — verify it doesn't create executable tags
-    expect(text).toContain('<script>alert(1)</script>');
-    // The embedding is just text — no DOM execution risk in MCP text content
-    expect(text).toMatch(/"<script>alert\(1\)<\/script>" — no results\./);
+
+    expect(firstText(result)).toBe('"\\<script>alert(1)\\</script>" — no results.');
   });
 
   it('handles story result where storyId equals id (common for story hits)', async () => {
@@ -1494,7 +1505,7 @@ describe('hn_search_content pagination notices', () => {
     expect(notice).toBe('Showing 50 of 1000 hits (page 3 of 20). Pass page: 4 for more.');
   });
 
-  it('reports the last page Algolia serves as terminal — no truncated, shown, cap, or notice', async () => {
+  it('reports the last page Algolia serves as terminal — no truncated, shown, or cap; the notice names the ceiling', async () => {
     const fifty = Array.from({ length: 50 }, (_, i) => ({ ...storyHit, objectID: String(i + 1) }));
     mockSearch.mockResolvedValue(
       algoliaResponse({ hits: fifty, nbHits: 2_261_745, nbPages: 20, page: 19, hitsPerPage: 50 }),
@@ -1506,7 +1517,10 @@ describe('hn_search_content pagination notices', () => {
     expect(sc).not.toHaveProperty('truncated');
     expect(sc).not.toHaveProperty('shown');
     expect(sc).not.toHaveProperty('cap');
-    expect(sc).not.toHaveProperty('notice');
+    expect(sc.notice).toBe(
+      'Page 19 is the last page Algolia serves: a search returns at most 1,000 of its matches, and this one matches 2261745. Split it into narrower dateRange windows to reach the rest.',
+    );
+    expect(contentText(result)).toContain(sc.notice as string);
     expect(contentText(result)).not.toContain('capped');
   });
 
@@ -1572,5 +1586,1471 @@ describe('hn_search_content pagination notices', () => {
     const enrichment = searchHn.enrichment as Record<string, z.ZodType>;
     expect(enrichment.truncated!.description).toMatch(/more pages/i);
     expect(enrichment.notice!.description).not.toMatch(/Absent on non-empty result pages/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Notice sentences in full, so a notice is asserted as exactly the sentences it joins
+// ---------------------------------------------------------------------------
+
+const droppedSentence = (prefix: string) =>
+  `The leading \`${prefix}\` was dropped from the query, so the URL matches submissions under either scheme, with or without www.`;
+const FRAGMENTS_SENTENCE =
+  'Submissions often omit #fragments and tracking parameters such as utm_source; search the URL without them.';
+const FRONT_PAGE_SENTENCE =
+  'front_page matches only the stories on the HN front page right now (about 30), never past front pages; for an earlier window, search tags "story" with dateRange and minPoints instead.';
+const AUTHOR_CASE_SENTENCE =
+  "author must match the username's exact HN casing; hn_get_user answers user_not_found for a mis-cased name.";
+const STORY_ID_SENTENCE =
+  "storyId must be a story or poll root id — take it from hits[].storyId, a poll hit's own id (poll hits carry no storyId), or hn_get_thread: the root item's id, or its item.storyId when the root is a comment. A comment id matches nothing.";
+const cappedSentence = (page: number, total: string) =>
+  `Page ${page} is the last page Algolia serves: a search returns at most 1,000 of its matches, and this one matches ${total}. Split it into narrower dateRange windows to reach the rest.`;
+const joined = (...sentences: string[]) => sentences.join(' ');
+
+// ---------------------------------------------------------------------------
+// The one notice: page state first, then cause sentences in input order
+// ---------------------------------------------------------------------------
+
+describe('composeSearchNotice', () => {
+  /** Every input that can call for a sentence, set at once. */
+  const everyCause = {
+    query: 'example.com/a',
+    droppedPrefix: 'https://www.',
+    tags: 'front_page',
+    author: 'someone',
+    storyId: 8863,
+    dateRange: { start: '2026-10-01' },
+    count: 5,
+  };
+
+  it('opens an empty first page with the relax text, then every cause in input order', () => {
+    const notice = composeSearchNotice({
+      ...everyCause,
+      shown: 0,
+      page: 0,
+      totalHits: 0,
+      totalPages: 0,
+    });
+
+    expect(notice).toBe(
+      joined(
+        'Try broader keywords, or relax these filters: tags, author, storyId, dateRange.',
+        droppedSentence('https://www.'),
+        FRAGMENTS_SENTENCE,
+        FRONT_PAGE_SENTENCE,
+        AUTHOR_CASE_SENTENCE,
+        STORY_ID_SENTENCE,
+      ),
+    );
+  });
+
+  it('opens a page with more behind it with the next-page guidance', () => {
+    const notice = composeSearchNotice({
+      ...everyCause,
+      shown: 5,
+      page: 0,
+      totalHits: 12,
+      totalPages: 3,
+    });
+
+    expect(notice).toBe(
+      joined(
+        'Showing 5 of 12 hits (page 0 of 3). Pass page: 1 for more, or raise count (max 50).',
+        droppedSentence('https://www.'),
+        FRONT_PAGE_SENTENCE,
+      ),
+    );
+  });
+
+  it('opens the last page of a capped search with the ceiling', () => {
+    const notice = composeSearchNotice({
+      ...everyCause,
+      shown: 5,
+      page: 199,
+      totalHits: 1142,
+      totalHitsExact: true,
+      totalPages: 200,
+    });
+
+    expect(notice).toBe(
+      joined(cappedSentence(199, '1142'), droppedSentence('https://www.'), FRONT_PAGE_SENTENCE),
+    );
+  });
+
+  it('opens a page past the end with the last valid page', () => {
+    const notice = composeSearchNotice({
+      ...everyCause,
+      shown: 0,
+      page: 4,
+      totalHits: 12,
+      totalPages: 3,
+    });
+
+    expect(notice).toBe(
+      joined(
+        'Page 4 is past the last page of results (12 hits across 3 pages). Pass page: 2 for the last page, or page: 0 to start over.',
+        droppedSentence('https://www.'),
+        FRONT_PAGE_SENTENCE,
+      ),
+    );
+  });
+
+  it('names one lever for a page past the end of a one-page search, where the last page is page 0', () => {
+    const notice = composeSearchNotice({
+      query: 'rust',
+      count: 5,
+      shown: 0,
+      page: 2,
+      totalHits: 4,
+      totalPages: 1,
+    });
+
+    expect(notice).toBe(
+      'Page 2 is past the last page of results (4 hits across 1 page). Pass page: 0 for that page.',
+    );
+  });
+
+  it('carries cause sentences alone on an uncapped last page', () => {
+    const notice = composeSearchNotice({
+      ...everyCause,
+      shown: 3,
+      page: 0,
+      totalHits: 3,
+      totalPages: 1,
+    });
+
+    expect(notice).toBe(joined(droppedSentence('https://www.'), FRONT_PAGE_SENTENCE));
+  });
+
+  it('returns undefined when nothing applies', () => {
+    expect(
+      composeSearchNotice({
+        query: 'rust',
+        count: 5,
+        shown: 3,
+        page: 0,
+        totalHits: 3,
+        totalPages: 1,
+      }),
+    ).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #34 — estimated totals and capped coverage
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content totals and capped coverage', () => {
+  const pageOf = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ ...storyHit, objectID: String(i + 1) }));
+
+  /** The two exactness flags as Algolia sends them on one response. */
+  const exactCount = { exhaustiveNbHits: true, exhaustive: { nbHits: true, typo: true } };
+  const estimatedCount = { exhaustiveNbHits: false, exhaustive: { nbHits: false, typo: true } };
+
+  /**
+   * Response metadata captured live: a one-day `tags=story` window counts 1,142
+   * hits exactly, and 50 per page reaches 20 pages, the last of them full.
+   */
+  const oneDayStories = { nbHits: 1142, nbPages: 20, hitsPerPage: 50, ...exactCount };
+
+  it.each([
+    ['exhaustive.nbHits true', { exhaustive: { nbHits: true } }, true],
+    ['exhaustive.nbHits false', { exhaustive: { nbHits: false } }, false],
+    ['exhaustiveNbHits alone, true', { exhaustiveNbHits: true }, true],
+    ['exhaustiveNbHits alone, false', { exhaustiveNbHits: false }, false],
+    [
+      'exhaustive.nbHits over a disagreeing exhaustiveNbHits',
+      { exhaustive: { nbHits: false }, exhaustiveNbHits: true },
+      false,
+    ],
+  ])('reports totalHitsExact from %s on both surfaces', async (_label, flags, expected) => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: pageOf(5), nbHits: 5, nbPages: 1, ...flags }),
+    );
+
+    const result = await callSearch({ query: 'rust' });
+
+    expect(structured(result).totalHitsExact).toBe(expected);
+    expect(contentText(result)).toContain(`**totalHitsExact:** ${expected}`);
+  });
+
+  it('omits totalHitsExact when Algolia sends neither flag', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: pageOf(5), nbHits: 5, nbPages: 1 }));
+
+    const result = await callSearch({ query: 'rust' });
+
+    expect(structured(result)).not.toHaveProperty('totalHitsExact');
+    expect(contentText(result)).not.toContain('totalHitsExact');
+  });
+
+  it('omits totalHitsExact and reachableHits past the ceiling, where Algolia reports an exact 0', async () => {
+    /** Captured live: page 20 at 50 per page of `tags=story`. */
+    mockSearch.mockResolvedValue(
+      algoliaResponse({
+        hits: [],
+        nbHits: 0,
+        nbPages: 0,
+        page: 20,
+        hitsPerPage: 50,
+        ...exactCount,
+      }),
+    );
+
+    const result = await callSearch({ tags: 'story', count: 50, page: 20 });
+    const sc = structured(result);
+
+    expect(sc).not.toHaveProperty('totalHitsExact');
+    expect(sc).not.toHaveProperty('reachableHits');
+    expect(sc.notice).toBe(
+      'Page 20 is past the last page Algolia serves for this search (at most 1,000 hits per search), where totalHits and totalPages read 0. Pass page: 0 to start over; if that also returns nothing, the search itself matches nothing.',
+    );
+    expect(contentText(result)).not.toContain('totalHitsExact');
+  });
+
+  it('keeps totalHitsExact on an exact zero-match first page', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ ...exactCount }));
+
+    const sc = structured(await callSearch({ tags: 'poll', author: 'nobody' }));
+
+    expect(sc.totalHitsExact).toBe(true);
+  });
+
+  it.each([
+    ['the first page', 0, 50],
+    ['a middle page', 7, 50],
+    ['the last page', 19, 50],
+  ])('reports reachableHits 1000 on %s of a search past the ceiling', async (_label, page, n) => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: pageOf(n), page, ...oneDayStories }));
+
+    const result = await callSearch({
+      tags: 'story',
+      dateRange: { start: '2026-10-01', end: '2026-10-02' },
+      count: 50,
+      page,
+    });
+
+    expect(structured(result).reachableHits).toBe(1000);
+    expect(contentText(result)).toContain('**reachableHits:** 1000');
+  });
+
+  it.each([
+    ['exactly 1,000 hits', 1000, 20, 19, 50],
+    ['327 hits', 327, 7, 6, 27],
+  ])(
+    'omits reachableHits when every hit is reachable (%s)',
+    async (_label, nbHits, nbPages, page, n) => {
+      mockSearch.mockResolvedValue(
+        algoliaResponse({ hits: pageOf(n), nbHits, nbPages, page, hitsPerPage: 50, ...exactCount }),
+      );
+
+      const result = await callSearch({ query: 'lisp', count: 50, page });
+
+      expect(structured(result)).not.toHaveProperty('reachableHits');
+      expect(contentText(result)).not.toContain('reachableHits');
+    },
+  );
+
+  it('gives the last page of a capped search a ceiling notice, and no truncated, shown, or cap', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: pageOf(50), page: 19, ...oneDayStories }));
+
+    const result = await callSearch({
+      tags: 'story',
+      dateRange: { start: '2026-10-01', end: '2026-10-02' },
+      count: 50,
+      page: 19,
+    });
+    const sc = structured(result);
+    const notice = sc.notice as string;
+
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc).not.toHaveProperty('shown');
+    expect(sc).not.toHaveProperty('cap');
+    expect(notice).toBe(cappedSentence(19, '1142'));
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('reads the capped total as "about N" when it is an estimate', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({
+        hits: pageOf(50),
+        nbHits: 45_558_372,
+        nbPages: 20,
+        page: 19,
+        hitsPerPage: 50,
+        ...estimatedCount,
+      }),
+    );
+
+    const notice = structured(await callSearch({ tags: 'story', count: 50, page: 19 }))
+      .notice as string;
+
+    expect(notice).toBe(cappedSentence(19, 'about 45558372'));
+  });
+
+  it('treats a page straddling the ceiling as the last page of a capped search', async () => {
+    /** Captured live: page 333 at 3 per page returns only the 1,000th hit. */
+    mockSearch.mockResolvedValue(
+      algoliaResponse({
+        hits: pageOf(1),
+        nbHits: 45_559_886,
+        nbPages: 334,
+        page: 333,
+        hitsPerPage: 3,
+        ...estimatedCount,
+      }),
+    );
+
+    const sc = structured(await callSearch({ tags: 'story', count: 3, page: 333 }));
+
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc.reachableHits).toBe(1000);
+    expect(sc.notice).toBe(cappedSentence(333, 'about 45559886'));
+  });
+
+  it('reads next-page guidance as "of about N" when totalHits is an estimate', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({
+        hits: pageOf(50),
+        nbHits: 45_558_373,
+        nbPages: 20,
+        page: 0,
+        hitsPerPage: 50,
+        ...estimatedCount,
+      }),
+    );
+
+    const result = await callSearch({ tags: 'story', count: 50 });
+    const sc = structured(result);
+
+    expect(sc).toMatchObject({ truncated: true, shown: 50, cap: 50 });
+    expect(sc.notice).toBe(
+      'Showing 50 of about 45558373 hits (page 0 of 20). Pass page: 1 for more.',
+    );
+    expect(contentText(result)).toContain(sc.notice as string);
+  });
+
+  it.each([
+    ['exact', exactCount],
+    ['unreported', {}],
+  ])('keeps next-page guidance as "of N" when exactness is %s', async (_label, flags) => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: pageOf(5), nbHits: 76, nbPages: 16, hitsPerPage: 5, ...flags }),
+    );
+
+    const sc = structured(await callSearch({ query: 'rust', count: 5 }));
+
+    expect(sc.notice).toBe(
+      'Showing 5 of 76 hits (page 0 of 16). Pass page: 1 for more, or raise count (max 50).',
+    );
+  });
+
+  it('leaves an uncapped last page with no notice and no reachableHits', async () => {
+    /** Captured live: `lisp` by `pg`, page 6 at 50 per page, counted as an estimate. */
+    mockSearch.mockResolvedValue(
+      algoliaResponse({
+        hits: pageOf(27),
+        nbHits: 327,
+        nbPages: 7,
+        page: 6,
+        hitsPerPage: 50,
+        ...estimatedCount,
+      }),
+    );
+
+    const result = await callSearch({ query: 'lisp', author: 'pg', count: 50, page: 6 });
+    const sc = structured(result);
+
+    expect(sc).not.toHaveProperty('notice');
+    expect(sc).not.toHaveProperty('reachableHits');
+    expect(sc.totalHitsExact).toBe(false);
+  });
+
+  it('describes totalHits as possibly estimated and the 1,000-hit reach', () => {
+    const enrichment = searchHn.enrichment as Record<string, z.ZodType>;
+    expect(enrichment.totalHits!.description).toMatch(/estimate/i);
+    expect(enrichment.totalHits!.description).toContain('totalHitsExact');
+    expect(enrichment.totalHitsExact!.description).toMatch(/estimate/i);
+    expect(enrichment.reachableHits!.description).toContain('1,000');
+    expect(enrichment.totalPages!.description).toContain('1,000');
+    expect(enrichment.notice!.description).not.toMatch(
+      /Absent on the last page of a non-empty result/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #38 — URL queries searched without their scheme and www.
+// ---------------------------------------------------------------------------
+
+describe('stripUrlPrefix', () => {
+  it.each([
+    ['https://www.paulgraham.com/greatwork.html', 'paulgraham.com/greatwork.html', 'https://www.'],
+    ['http://www.paulgraham.com/greatwork.html', 'paulgraham.com/greatwork.html', 'http://www.'],
+    ['https://paulgraham.com/greatwork.html', 'paulgraham.com/greatwork.html', 'https://'],
+    ['www.paulgraham.com/greatwork.html', 'paulgraham.com/greatwork.html', 'www.'],
+    ['HTTPS://WWW.PaulGraham.com/greatwork.html', 'PaulGraham.com/greatwork.html', 'HTTPS://WWW.'],
+    [
+      'https://www.youtube.com/watch?v=4e0fRKHG7Hk',
+      'youtube.com/watch?v=4e0fRKHG7Hk',
+      'https://www.',
+    ],
+    ['https://www.example.com/', 'example.com/', 'https://www.'],
+  ])('searches %j as %j, dropping %j', (query, searched, dropped) => {
+    expect(stripUrlPrefix(query)).toEqual({ query: searched, droppedPrefix: dropped });
+  });
+
+  it.each([
+    'https://x.com is down',
+    'http server rust',
+    'HTTP/2',
+    'https://',
+    'www.',
+    'https://www.',
+    'paulgraham.com/greatwork.html',
+    'ftp://example.com/file',
+    'httpx://example.com',
+    'wwwexample.com',
+    'see https://example.com',
+  ])('searches %j as typed', (query) => {
+    expect(stripUrlPrefix(query)).toEqual({ query });
+  });
+
+  describe('worst-case timing', () => {
+    const repeat = (unit: string) => (n: number) =>
+      unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
+
+    /** One call's CPU ceiling: 10 ms plus 1 ms per 1,000 characters. */
+    const maxMs = (chars: number) => 10 + chars / 1_000;
+
+    it.each([
+      ['a long digit run behind a prefix', (n: number) => `https://www.${'7'.repeat(n)}`],
+      ['repeated prefixes', repeat('https://www.')],
+      ['repeated schemes with no host', repeat('http://')],
+      ['one long line ending in a break', (n: number) => `${repeat('§1 x')(n)}\ny`],
+      ['breaks throughout', repeat('  \r\n')],
+      ['a prefix then a long line ending in a break', (n: number) => `www.${'a'.repeat(n)}\ny`],
+    ])(
+      'stays linear on %s',
+      (_label, make) => {
+        expectLinearCpu({ make, run: stripUrlPrefix, maxMs });
+      },
+      120_000,
+    );
+  });
+});
+
+describe('hn_search_content URL queries', () => {
+  /** The 11 stories the scheme-less form matched live, led by the 1,008-point 36550615. */
+  const greatWorkIds = [
+    36550615, 49132289, 36550665, 36823638, 36569962, 45095262, 36733189, 43125047, 36759822,
+    46780410, 46497378,
+  ];
+  const greatWorkHits = greatWorkIds.map((id) => ({
+    ...storyHit,
+    objectID: String(id),
+    title: 'How to Do Great Work',
+    url: 'http://paulgraham.com/greatwork.html',
+  }));
+
+  it.each([
+    'https://www.paulgraham.com/greatwork.html',
+    'http://www.paulgraham.com/greatwork.html',
+  ])('searches %j without its scheme and www., and says so on both surfaces', async (query) => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: greatWorkHits, nbHits: 11, nbPages: 1, page: 0 }),
+    );
+
+    const result = await callSearch({ query, tags: 'story' });
+    const sc = structured(result);
+    const notice = sc.notice as string;
+
+    expect(mockSearch).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'paulgraham.com/greatwork.html', tags: 'story' }),
+      expect.anything(),
+    );
+    expect(sc.query).toBe('paulgraham.com/greatwork.html');
+    expect((sc.hits as { id: number }[]).map((h) => h.id)).toEqual(greatWorkIds);
+    expect(contentText(result)).toContain('## "paulgraham.com/greatwork.html" — search results');
+    expect(notice).toBe(droppedSentence(query.slice(0, query.indexOf('paulgraham'))));
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('keeps the path and query string of a rewritten URL', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    await callSearch({ query: 'https://www.youtube.com/watch?v=4e0fRKHG7Hk' });
+
+    expect(mockSearch).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'youtube.com/watch?v=4e0fRKHG7Hk' }),
+      expect.anything(),
+    );
+  });
+
+  it.each(['https://x.com is down', 'http server rust', 'HTTP/2', 'https://', 'www.'])(
+    'searches %j as typed, with no rewrite notice',
+    async (query) => {
+      mockSearch.mockResolvedValue(algoliaResponse({ hits: [storyHit], nbHits: 1, nbPages: 1 }));
+
+      const result = await callSearch({ query });
+      const sc = structured(result);
+
+      expect(mockSearch).toHaveBeenCalledWith(
+        expect.objectContaining({ query }),
+        expect.anything(),
+      );
+      expect(sc.query).toBe(query);
+      expect(sc).not.toHaveProperty('notice');
+    },
+  );
+
+  it('adds the fragment and tracking-parameter hint to a zero-hit first page, after the page state', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await callSearch({
+      query: 'https://paulgraham.com/greatwork.html#notes',
+      tags: 'story',
+    });
+    const notice = structured(result).notice as string;
+
+    expect(notice).toBe(
+      joined(
+        'Try broader keywords, or relax these filters: tags.',
+        droppedSentence('https://'),
+        FRAGMENTS_SENTENCE,
+      ),
+    );
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('leaves the fragment hint off a zero-hit first page of a query searched as typed', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const notice = structured(await callSearch({ query: 'paulgraham.com/greatwork.html#notes' }))
+      .notice as string;
+
+    expect(notice).toBe('Try broader keywords or different terms.');
+  });
+
+  it('puts next-page guidance before the rewrite disclosure', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: greatWorkHits.slice(0, 3), nbHits: 11, nbPages: 4, page: 0 }),
+    );
+
+    const sc = structured(
+      await callSearch({ query: 'https://www.paulgraham.com/greatwork.html', count: 3 }),
+    );
+    const notice = sc.notice as string;
+
+    expect(sc).toMatchObject({ truncated: true, shown: 3, cap: 3 });
+    expect(notice).toBe(
+      joined(
+        'Showing 3 of 11 hits (page 0 of 4). Pass page: 1 for more, or raise count (max 50).',
+        droppedSentence('https://www.'),
+      ),
+    );
+  });
+
+  it('discloses the rewrite on a page past the end, after the page state', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ nbHits: 11, nbPages: 1, page: 3 }));
+
+    const notice = structured(
+      await callSearch({ query: 'www.paulgraham.com/greatwork.html', page: 3 }),
+    ).notice as string;
+
+    expect(notice).toBe(
+      joined(
+        'Page 3 is past the last page of results (11 hits across 1 page). Pass page: 0 for that page.',
+        droppedSentence('www.'),
+      ),
+    );
+  });
+
+  it('describes the URL rewrite on the query input and output', () => {
+    const description = inputProperty('query').description!;
+    expect(description).toMatch(/URL alone/);
+    expect(description).toMatch(/http:\/\/, https:\/\/, or www\./);
+    const output = (searchHn.output.shape.query as z.ZodType).description!;
+    expect(output).toMatch(/scheme/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #39 — author matches HN's exact casing
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content author casing', () => {
+  const CASE_CLAUSE = /author must match the username's exact HN casing/;
+
+  it.each([
+    [
+      'a keyword search',
+      { author: 'animats', query: 'rust' },
+      'Try broader keywords, or relax these filters: author.',
+    ],
+    [
+      'a filter-only search',
+      { author: 'animats', tags: 'story' },
+      'No items matched these filters: tags, author. Relax or change them.',
+    ],
+  ])(
+    'adds the case clause after the relax text on an empty first page of %s',
+    async (_label, input, relax) => {
+      mockSearch.mockResolvedValue(algoliaResponse());
+
+      const result = await callSearch(input);
+      const notice = structured(result).notice as string;
+
+      expect(notice).toBe(joined(relax, AUTHOR_CASE_SENTENCE));
+      expect(contentText(result)).toContain(notice);
+    },
+  );
+
+  it('sends author as typed, with no case folding and one upstream call', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    await callSearch({ author: 'animats', query: 'rust' });
+
+    expect(mockSearch).toHaveBeenCalledTimes(1);
+    expect(mockSearch).toHaveBeenCalledWith(
+      expect.objectContaining({ author: 'animats' }),
+      expect.anything(),
+    );
+  });
+
+  it('leaves the clause off a zero-hit search without author', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const notice = structured(await callSearch({ query: 'rust', tags: 'story' })).notice as string;
+
+    expect(notice).not.toMatch(CASE_CLAUSE);
+  });
+
+  it('leaves the clause off a page past the end', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ nbHits: 9, nbPages: 2, page: 2 }));
+
+    const notice = structured(await callSearch({ author: 'animats', query: 'rust', page: 2 }))
+      .notice as string;
+
+    expect(notice.startsWith('Page 2 is past the last page of results')).toBe(true);
+    expect(notice).not.toMatch(CASE_CLAUSE);
+  });
+
+  it('leaves the clause off a non-empty page', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: [{ ...storyHit, author: 'Animats' }], nbHits: 1, nbPages: 1 }),
+    );
+
+    const sc = structured(await callSearch({ author: 'Animats', query: 'rust' }));
+
+    expect(sc).not.toHaveProperty('notice');
+  });
+
+  it('describes author matching as exact and case-sensitive, without the stale hn_get_user aside', () => {
+    const description = inputProperty('author').description!;
+    expect(description).toMatch(/case-sensitive/i);
+    expect(description).toMatch(/exact/i);
+    expect(description).not.toMatch(/only shows recent submissions/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #40 — front_page is the current front page only
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content front_page scope', () => {
+  const pageOf = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ ...storyHit, objectID: String(50_124_730 + i) }));
+
+  it('describes front_page as the current front page, with the story proxy', () => {
+    const description = inputProperty('tags').description!;
+    expect(description).toMatch(/front page right now/);
+    expect(description).toMatch(/about 30/);
+    expect(description).toMatch(/no filter selects/i);
+    expect(description).toContain('"story" with dateRange and minPoints');
+  });
+
+  it.each([
+    [
+      'a filter-only search with dateRange',
+      { tags: 'front_page', dateRange: { start: '2020-01-01', end: '2020-01-02' } },
+      'No items matched these filters: tags, dateRange. Relax or change them.',
+    ],
+    [
+      'a keyword search',
+      { query: 'paulgraham.com/greatwork.html', tags: 'front_page' },
+      'Try broader keywords, or relax these filters: tags.',
+    ],
+  ])(
+    'adds the front_page sentence after the relax text on an empty first page of %s',
+    async (_label, input, relax) => {
+      mockSearch.mockResolvedValue(algoliaResponse());
+
+      const result = await callSearch(input);
+      const notice = structured(result).notice as string;
+
+      expect(notice).toBe(joined(relax, FRONT_PAGE_SENTENCE));
+      expect(contentText(result)).toContain(notice);
+    },
+  );
+
+  it('adds the front_page sentence to a non-empty last page when dateRange is set', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: pageOf(3), nbHits: 3, nbPages: 1 }));
+
+    const result = await callSearch({
+      tags: 'front_page',
+      dateRange: { start: '2026-10-15', end: '2026-10-17' },
+      count: 50,
+    });
+    const notice = structured(result).notice as string;
+
+    expect(notice).toBe(FRONT_PAGE_SENTENCE);
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it('puts next-page guidance before the front_page sentence', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: pageOf(5), nbHits: 12, nbPages: 3 }));
+
+    const sc = structured(
+      await callSearch({ tags: 'front_page', dateRange: { start: '2026-10-01' }, count: 5 }),
+    );
+    const notice = sc.notice as string;
+
+    expect(sc).toMatchObject({ truncated: true, shown: 5, cap: 5 });
+    expect(notice).toBe(
+      joined(
+        'Showing 5 of 12 hits (page 0 of 3). Pass page: 1 for more, or raise count (max 50).',
+        FRONT_PAGE_SENTENCE,
+      ),
+    );
+  });
+
+  it.each([
+    ['bare front_page', { tags: 'front_page', count: 50 }],
+    ['front_page with minPoints', { tags: 'front_page', minPoints: 300, count: 50 }],
+  ])('leaves %s with no notice', async (_label, input) => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: pageOf(30), nbHits: 30, nbPages: 1 }));
+
+    const sc = structured(await callSearch(input));
+
+    expect(sc).not.toHaveProperty('notice');
+  });
+
+  it('keeps the zero-hit notice of other tags unchanged', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const notice = structured(
+      await callSearch({ tags: 'story', dateRange: { start: '2020-01-01', end: '2020-01-02' } }),
+    ).notice;
+
+    expect(notice).toBe('No items matched these filters: tags, dateRange. Relax or change them.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #35 — applied search criteria
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content applied criteria', () => {
+  const criteriaOf = (result: ToolResult) =>
+    structured(result).criteria as Record<string, unknown> & {
+      dateRange?: { start?: string; end?: string };
+    };
+
+  /** The params object the handler handed to hn.search on its one call. */
+  const sentParams = () => mockSearch.mock.calls[0]![0] as Record<string, unknown>;
+
+  it('echoes the filters, sort, count, and view sent, on both surfaces', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: [commentHit, commentHit], nbHits: 299, nbPages: 150 }),
+    );
+
+    const result = await callSearch({
+      author: 'dang',
+      tags: 'comment',
+      sort: 'date',
+      dateRange: { start: '2026-09-01', end: '2026-10-01' },
+      count: 2,
+    });
+
+    expect(criteriaOf(result)).toStrictEqual({
+      tags: 'comment',
+      author: 'dang',
+      dateRange: { start: '2026-09-01T00:00:00Z', end: '2026-10-01T00:00:00Z' },
+      sort: 'date',
+      count: 2,
+      view: 'full',
+    });
+    expect(contentText(result)).toContain(
+      '**criteria:** tags: comment | author: "dang" | dateRange: after 2026-09-01T00:00:00Z, before 2026-10-01T00:00:00Z | sort: date | count: 2 | view: full',
+    );
+  });
+
+  it('echoes the defaults of omitted inputs and leaves unset filters out', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [storyHit], nbHits: 1, nbPages: 1 }));
+
+    const result = await callSearch({ query: 'rust' });
+    const criteria = criteriaOf(result);
+
+    expect(Object.keys(criteria)).toEqual(['sort', 'count', 'view']);
+    expect(criteria).toStrictEqual({ sort: 'relevance', count: 30, view: 'full' });
+    expect(contentText(result)).toContain('**criteria:** sort: relevance | count: 30 | view: full');
+  });
+
+  it('echoes storyId and minPoints, and every value matches the params sent', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [storyHit], nbHits: 1, nbPages: 1 }));
+
+    const result = await callSearch({
+      query: 'rust',
+      tags: 'poll',
+      author: 'pg',
+      storyId: 8863,
+      minPoints: 10,
+      sort: 'relevance',
+      count: 7,
+      view: 'compact',
+    });
+    const criteria = criteriaOf(result);
+    const sent = sentParams();
+
+    expect(criteria).toStrictEqual({
+      tags: 'poll',
+      author: 'pg',
+      storyId: 8863,
+      minPoints: 10,
+      sort: 'relevance',
+      count: 7,
+      view: 'compact',
+    });
+    for (const key of ['tags', 'author', 'storyId', 'minPoints', 'sort', 'count', 'view']) {
+      expect(criteria[key]).toBe(sent[key]);
+    }
+    expect(contentText(result)).toContain(
+      '**criteria:** tags: poll | author: "pg" | storyId: 8863 | minPoints: 10 | sort: relevance | count: 7 | view: compact',
+    );
+  });
+
+  const defaults = { sort: 'relevance', count: 30, view: 'full' };
+  const defaultsLine = 'sort: relevance | count: 30 | view: full';
+
+  it.each([
+    [
+      'a non-empty page',
+      { query: 'rust' },
+      { hits: [storyHit], nbHits: 1, nbPages: 1 },
+      defaults,
+      defaultsLine,
+    ],
+    ['an empty first page', { query: 'zzz' }, {}, defaults, defaultsLine],
+    [
+      'a page past the end',
+      { query: 'rust', page: 4 },
+      { nbHits: 3, nbPages: 1, page: 4 },
+      defaults,
+      defaultsLine,
+    ],
+    [
+      'a page past the 1,000-hit ceiling',
+      { tags: 'story', page: 40 },
+      { nbHits: 0, nbPages: 0, page: 40 },
+      { tags: 'story', ...defaults },
+      `tags: story | ${defaultsLine}`,
+    ],
+  ])('sets criteria on %s', async (_label, input, response, criteria, line) => {
+    mockSearch.mockResolvedValue(algoliaResponse(response));
+
+    const result = await callSearch(input);
+
+    expect(criteriaOf(result)).toStrictEqual(criteria);
+    expect(contentText(result).split('\n')).toContain(`**criteria:** ${line}`);
+  });
+
+  it('leaves criteria off a call the handler rejects', async () => {
+    const result = await callSearch({ tags: 'comment', minPoints: 5 });
+
+    expect(wireError(result).data?.reason).toBe('min_points_unscored_type');
+    expect(result.structuredContent).not.toHaveProperty('criteria');
+    expect(contentText(result)).not.toContain('criteria');
+  });
+
+  it('leaves criteria off a call the upstream fails', async () => {
+    mockSearch.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Algolia answered 503.', {
+        reason: 'upstream_unavailable',
+      }),
+    );
+
+    const result = await callSearch({ query: 'rust', author: 'dang' });
+
+    expect(wireError(result).data?.reason).toBe('upstream_unavailable');
+    expect(result.structuredContent).not.toHaveProperty('criteria');
+    expect(contentText(result)).not.toContain('criteria');
+  });
+
+  it('echoes author trimmed, as matched', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await callSearch({ author: ' dang ' });
+
+    expect(criteriaOf(result).author).toBe('dang');
+    expect(sentParams().author).toBe('dang');
+  });
+
+  it.each([
+    [{ start: '2024-05-05T10:00:00+02:00' }, { start: '2024-05-05T08:00:00Z' }],
+    [{ end: '2024-05-05T10:00:00.5Z' }, { end: '2024-05-05T10:00:01Z' }],
+    [{ start: '2024' }, { start: '2024-01-01T00:00:00Z' }],
+    [{ start: '2024-05-05T10:00' }, { start: '2024-05-05T10:00:00Z' }],
+    [
+      { start: '2024-05-05T10:00:00.5Z', end: '2024-05-06' },
+      { start: '2024-05-05T10:00:00Z', end: '2024-05-06T00:00:00Z' },
+    ],
+  ])('echoes dateRange %j as the whole-second UTC bounds sent', async (dateRange, expected) => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await callSearch({ dateRange });
+
+    expect(criteriaOf(result).dateRange).toStrictEqual(expected);
+  });
+
+  it('renders a one-sided dateRange with only its own bound', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const text = contentText(await callSearch({ dateRange: { end: '2024-05-06' } }));
+
+    expect(text).toContain(
+      '**criteria:** dateRange: before 2024-05-06T00:00:00Z | sort: relevance',
+    );
+    expect(text).not.toContain('dateRange: after');
+  });
+
+  it('keeps the rewritten URL query in query, out of criteria', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [storyHit], nbHits: 1, nbPages: 1 }));
+
+    const sc = structured(await callSearch({ query: 'https://www.example.com/a' }));
+
+    expect(sc.query).toBe('example.com/a');
+    expect(sc.criteria).not.toHaveProperty('query');
+  });
+
+  it('escapes author in content[] and keeps it raw in structuredContent', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+    const author = 'mallory"\n## Injected **bold** `x`';
+
+    const result = await callSearch({ author });
+    const text = contentText(result);
+
+    expect(criteriaOf(result).author).toBe(author);
+    expect(text).toContain(
+      '**criteria:** author: "mallory\\" ## Injected \\*\\*bold\\*\\* \\`x\\`" | sort: relevance',
+    );
+    expect(text).not.toMatch(/^## Injected/m);
+  });
+
+  it.each([
+    ['with hits', { hits: [storyHit], nbHits: 1, nbPages: 1 }, '## "x\\" ## y" — search results'],
+    ['without hits', {}, '"x\\" ## y" — no results.'],
+  ])(
+    'escapes the query heading %s so a line break cannot open a heading',
+    async (_l, response, heading) => {
+      mockSearch.mockResolvedValue(algoliaResponse(response));
+
+      const result = await callSearch({ query: 'x"\n## y' });
+      const text = contentText(result);
+
+      expect(structured(result).query).toBe('x"\n## y');
+      expect(text.startsWith(heading)).toBe(true);
+      expect(text).not.toMatch(/^## y/m);
+    },
+  );
+
+  it('describes criteria as the values sent, defaults included', () => {
+    const description = searchHn.enrichment!.criteria!.description!;
+
+    expect(description).toMatch(/sent/);
+    expect(description).toMatch(/default/i);
+  });
+
+  it('describes cap as the count served, not the per-call cap', () => {
+    expect(searchHn.enrichment!.cap!.description).toBe(
+      'The count value served: as passed, or 50 when count was above that cap.',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #41 — hit types, poll options, and job bodies
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content hit types', () => {
+  /** Algolia records captured live: an Ask HN story and an option of poll 3746692, both by GreekOphion. */
+  const askHnHit = {
+    _tags: ['story', 'author_GreekOphion', 'story_3747180', 'ask_hn'],
+    author: 'GreekOphion',
+    created_at: '2012-03-23T20:42:49Z',
+    created_at_i: 1332535369,
+    num_comments: 0,
+    objectID: '3747180',
+    points: 2,
+    story_id: 3747180,
+    story_text: 'When I click on my name it tells me how much karma I have but not my average.',
+    title: "Ask HN: Why Isn't My Average Calculated?",
+    url: '',
+  };
+  const pollOptionHit = {
+    _tags: ['pollopt', 'author_GreekOphion'],
+    author: 'GreekOphion',
+    created_at: '2012-03-23T19:19:37Z',
+    created_at_i: 1332530377,
+    objectID: '3746728',
+    points: 193,
+  };
+  /** An older poll option whose `story_` tag names the option itself, not its poll 2595605. */
+  const selfTaggedOptionHit = {
+    _tags: ['pollopt', 'author_pg', 'story_2595606'],
+    author: 'pg',
+    created_at: '2011-05-29T01:13:53Z',
+    created_at_i: 1306631633,
+    objectID: '2595606',
+    points: 2743,
+  };
+  const pollHit = {
+    _tags: ['poll', 'author_jv22222'],
+    author: 'jv22222',
+    created_at: '2026-10-07T01:20:57Z',
+    created_at_i: 1791336057,
+    num_comments: 8,
+    objectID: '49986710',
+    points: 6,
+    title: 'Poll HN: Is there a skill to coding with AI?',
+  };
+  const JOB_TEXT =
+    'Quill | Fullstack SWE | Full-time | Remote<p>A fullstack SDK for customer-facing analytics.';
+  /** A job record: its body arrives as job_text, and only the title is searched and highlighted. */
+  const jobHit = {
+    _tags: ['job', 'author_R_R'],
+    author: 'R_R',
+    created_at: '2026-09-01T17:00:14Z',
+    created_at_i: 1788282014,
+    job_text: JOB_TEXT,
+    objectID: '49524704',
+    title: 'Quill (YC W20) Is Hiring a Fullstack SWE',
+    _highlightResult: {
+      author: { matchLevel: 'none' as const, matchedWords: [], value: 'R_R' },
+      title: {
+        matchLevel: 'full' as const,
+        matchedWords: ['quill', 'fullstack'],
+        value: '<em>Quill</em> (YC W20) Is Hiring a <em>Fullstack</em> SWE',
+      },
+    },
+  };
+  const taggedComment = { ...commentHit, _tags: ['comment', 'author_bob', 'story_123'] };
+
+  const hitsOf = async (hits: unknown[], input: Record<string, unknown> = { tags: 'story' }) => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: hits as never, nbHits: hits.length, nbPages: 1 }),
+    );
+    const result = await callSearch(input);
+    return {
+      hits: structured(result).hits as Array<Record<string, unknown>>,
+      text: contentText(result),
+    };
+  };
+
+  it.each([
+    ['story', ['story', 'author_a', 'story_1'], 'story'],
+    ['ask_hn', ['story', 'author_a', 'story_1', 'ask_hn'], 'story'],
+    ['show_hn ahead of story', ['show_hn', 'story', 'author_a', 'story_1'], 'story'],
+    ['front_page ahead of story', ['front_page', 'author_a', 'story', 'story_1'], 'story'],
+    ['comment', ['comment', 'author_a', 'story_9'], 'comment'],
+    ['poll', ['poll', 'author_a'], 'poll'],
+    ['pollopt', ['pollopt', 'author_a'], 'pollopt'],
+    ['pollopt with a story_ tag', ['pollopt', 'author_pg', 'story_2595606'], 'pollopt'],
+    ['job', ['job', 'author_a'], 'job'],
+  ])('reads type from the first type tag: %s', async (_label, _tags, type) => {
+    const { hits } = await hitsOf([{ ...storyHit, _tags }]);
+
+    expect(hits[0]!.type).toBe(type);
+  });
+
+  it.each([
+    ['no _tags', {}],
+    ['empty _tags', { _tags: [] }],
+    ['_tags without a type tag', { _tags: ['author_a', 'story_5', 'ask_hn'] }],
+  ])('leaves type absent for %s, and renders as before', async (_label, tags) => {
+    const { hits, text } = await hitsOf([{ ...commentHit, ...tags }]);
+
+    expect(hits[0]).not.toHaveProperty('type');
+    expect(text).toContain('### Comment on "Test Story" (story id:123)\nid:456 | bob | 5 pts |');
+    expect(text).not.toContain('type:');
+  });
+
+  it('types an untagged search of GreekOphion as a story and a poll option, with no storyId on the option', async () => {
+    const { hits } = await hitsOf([askHnHit, pollOptionHit], {
+      author: 'GreekOphion',
+      dateRange: { start: '2012-03-23', end: '2012-03-24' },
+      sort: 'date',
+    });
+
+    expect(hits[0]).toMatchObject({ id: 3747180, type: 'story', storyId: 3747180 });
+    expect(hits[1]).toMatchObject({ id: 3746728, type: 'pollopt', points: 193 });
+    expect(hits[1]!.storyId).toBeUndefined();
+  });
+
+  it('keeps a poll option whose story_ tag is its own id a parentless poll option', async () => {
+    const { hits, text } = await hitsOf([selfTaggedOptionHit], { author: 'pg' });
+
+    expect(hits[0]!.type).toBe('pollopt');
+    expect(hits[0]!.storyId).toBeUndefined();
+    expect(text).not.toContain('story id:2595606');
+  });
+
+  it('gives a poll option its own heading that points to hn_get_thread', async () => {
+    const { text } = await hitsOf([pollOptionHit], { author: 'GreekOphion' });
+
+    expect(text).toContain(
+      [
+        '### Poll option by GreekOphion',
+        'id:3746728 | type:pollopt | GreekOphion | 193 pts | 2012-03-23T19:19:37Z',
+        'Option text and its poll: hn_get_thread with itemId 3746728',
+      ].join('\n'),
+    );
+    expect(text).not.toContain('Comment on');
+  });
+
+  it('puts type:<type> after the id in the meta line of every typed hit', async () => {
+    const { text } = await hitsOf([askHnHit, taggedComment, pollHit, jobHit, pollOptionHit], {
+      author: 'x',
+    });
+
+    expect(text).toContain(
+      "### Ask HN: Why Isn't My Average Calculated?\nid:3747180 | type:story | GreekOphion | 2 pts | 0 comments | 2012-03-23T20:42:49Z",
+    );
+    expect(text).toContain(
+      '### Comment on "Test Story" (story id:123)\nid:456 | type:comment | bob | 5 pts | 2024-01-02T00:00:00Z',
+    );
+    expect(text).toContain(
+      '### Poll HN: Is there a skill to coding with AI?\nid:49986710 | type:poll | jv22222 | 6 pts | 8 comments | 2026-10-07T01:20:57Z',
+    );
+    expect(text).toContain(
+      '### Quill (YC W20) Is Hiring a Fullstack SWE\nid:49524704 | type:job | R_R | 2026-09-01T17:00:14Z',
+    );
+    expect(text).toContain('### Poll option by GreekOphion\nid:3746728 | type:pollopt |');
+  });
+
+  it('falls back to job_text for a job body, after comment_text and story_text', async () => {
+    const { hits, text } = await hitsOf([jobHit], { query: 'Quill Fullstack', tags: 'job' });
+
+    expect(vi.mocked(stripHtml)).toHaveBeenCalledWith(JOB_TEXT);
+    expect(hits[0]!.text).toBe(JOB_TEXT);
+    expect(text).toContain(`\n> ${JOB_TEXT}`);
+  });
+
+  it('prefers comment_text, then story_text, over job_text', async () => {
+    const { hits } = await hitsOf([
+      { ...jobHit, comment_text: 'comment body', story_text: 'story body' },
+      { ...jobHit, objectID: '2', story_text: 'story body' },
+    ]);
+
+    expect(hits.map((h) => h.text)).toEqual(['comment body', 'story body']);
+  });
+
+  it('leaves highlights.text to comment_text and story_text — Algolia does not highlight job_text', async () => {
+    const { hits } = await hitsOf([jobHit], { query: 'Quill Fullstack', tags: 'job' });
+
+    expect(hits[0]!.highlights).toStrictEqual({
+      title: '<em>Quill</em> (YC W20) Is Hiring a <em>Fullstack</em> SWE',
+      matchedWords: ['quill', 'fullstack'],
+    });
+  });
+
+  it('omits the job body from both surfaces under view "compact"', async () => {
+    const { hits, text } = await hitsOf([jobHit], {
+      query: 'Quill Fullstack',
+      tags: 'job',
+      view: 'compact',
+    });
+
+    expect(hits[0]!.text).toBeUndefined();
+    expect(hits[0]!.type).toBe('job');
+    expect(text).not.toContain('analytics');
+  });
+
+  it('declares type as an optional enum of the five item types, and describes job bodies as not searched', () => {
+    interface HitSchema {
+      properties: Record<string, SchemaNode & { enum?: string[] }>;
+      required: string[];
+    }
+    const output = z.toJSONSchema(searchHn.output) as unknown as {
+      properties: { hits: { items: HitSchema } };
+    };
+    const hit = output.properties.hits.items;
+
+    expect(hit.properties.type?.enum).toEqual(['story', 'comment', 'poll', 'pollopt', 'job']);
+    expect(hit.required).not.toContain('type');
+    expect(hit.properties.text?.description).toMatch(/job/);
+    expect(hit.properties.text?.description).toMatch(/not keyword-searched/);
+  });
+
+  it('says untagged searches include poll options, and where a poll hit finds its discussion root', () => {
+    expect(inputProperty('tags').description).toMatch(/poll options/);
+    const storyId = inputProperty('storyId').description!;
+    expect(storyId).toMatch(/poll hit/);
+    expect(storyId).toContain('item.storyId');
+  });
+
+  it('names poll hits and item.storyId in the zero-hit storyId hint', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const notice = structured(await callSearch({ storyId: 9707, tags: 'comment' })).notice;
+
+    expect(notice).toBe(
+      joined(
+        'No items matched these filters: tags, storyId. Relax or change them.',
+        STORY_ID_SENTENCE,
+      ),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #45 — count above the per-call cap is served at the cap, not rejected
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content count above the per-call cap', () => {
+  const pageOf = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ ...storyHit, objectID: String(i + 1) }));
+
+  /** The params object the handler handed to hn.search on its one call. */
+  const sentParams = () => mockSearch.mock.calls[0]![0] as Record<string, unknown>;
+
+  it('serves count: 100 on page 0 as one page of 50, naming count: 50 for the next page', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: pageOf(50), nbHits: 600, nbPages: 12, page: 0, hitsPerPage: 50 }),
+    );
+
+    const result = await callSearch({ query: 'rust', count: 100 });
+    const sc = structured(result);
+
+    expect(sentParams()).toMatchObject({ count: 50, page: 0 });
+    expect(sc.hits).toHaveLength(50);
+    expect(sc).toMatchObject({ page: 0, totalPages: 12, truncated: true, shown: 50, cap: 50 });
+    expect(sc.criteria).toMatchObject({ count: 50 });
+    expect(sc.notice).toBe(
+      'Showing 50 of 600 hits (page 0 of 12). Pass count: 50, page: 1 for more. count 100 is above the per-call cap of 50, so this call served count: 50.',
+    );
+    const text = contentText(result);
+    expect(text).toContain(sc.notice as string);
+    expect(text).toContain('count: 50 | view: full');
+  });
+
+  it('serves {count: 100, page: 2} as hits 200–249 (page 4 at count 50), never hits 100–149', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: pageOf(50), nbHits: 600, nbPages: 12, page: 4, hitsPerPage: 50 }),
+    );
+
+    const result = await callSearch({ query: 'rust', count: 100, page: 2 });
+    const sc = structured(result);
+
+    expect(sentParams()).toMatchObject({ count: 50, page: 4 });
+    expect(sc).toMatchObject({ page: 4, totalPages: 12, shown: 50, cap: 50 });
+    expect(sc.notice).toBe(
+      'Showing 50 of 600 hits (page 4 of 12). Pass count: 50, page: 5 for more. count 100 is above the per-call cap of 50, so this call served count: 50. Page 2 at count 100 starts at the same hit as page 4 at count 50, the page served.',
+    );
+    expect(contentText(result)).toContain(sc.notice as string);
+  });
+
+  it('serves the 1,000 ceiling on page 0 at the cap', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: pageOf(50), nbHits: 600, nbPages: 12, page: 0, hitsPerPage: 50 }),
+    );
+
+    const sc = structured(await callSearch({ tags: 'story', count: 1000 }));
+
+    expect(sentParams()).toMatchObject({ count: 50, page: 0 });
+    expect(sc).toMatchObject({ shown: 50, cap: 50 });
+    expect(sc.notice).toBe(
+      'Showing 50 of 600 hits (page 0 of 12). Pass count: 50, page: 1 for more. count 1000 is above the per-call cap of 50, so this call served count: 50.',
+    );
+  });
+
+  it('maps {count: 1000, page: 1} past the 1,000-hit ceiling and says which page it ran as', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: [], nbHits: 0, nbPages: 0, page: 20, hitsPerPage: 50 }),
+    );
+
+    const result = await callSearch({ query: 'a', count: 1000, page: 1 });
+    const sc = structured(result);
+
+    expect(sentParams()).toMatchObject({ count: 50, page: 20 });
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc.notice).toBe(
+      'Page 20 is past the last page Algolia serves for this search (at most 1,000 hits per search), where totalHits and totalPages read 0. Pass page: 0 to start over; if that also returns nothing, the search itself matches nothing. count 1000 is above the per-call cap of 50, so this call served count: 50. Page 1 at count 1000 starts at the same hit as page 20 at count 50, the page served.',
+    );
+  });
+
+  it('names count: 50 with the last valid page when the mapped page is past the end', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: [], nbHits: 120, nbPages: 3, page: 6, hitsPerPage: 50 }),
+    );
+
+    const sc = structured(await callSearch({ query: 'lisp', count: 100, page: 3 }));
+
+    expect(sentParams()).toMatchObject({ count: 50, page: 6 });
+    expect(sc.notice).toBe(
+      'Page 6 is past the last page of results (120 hits across 3 pages). Pass count: 50, page: 2 for the last page, or page: 0 to start over. count 100 is above the per-call cap of 50, so this call served count: 50. Page 3 at count 100 starts at the same hit as page 6 at count 50, the page served.',
+    );
+  });
+
+  it('names one lever when the mapped page is past the end of a one-page search', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: [], nbHits: 30, nbPages: 1, page: 2, hitsPerPage: 50 }),
+    );
+
+    const result = await callSearch({ query: 'lisp', count: 100, page: 1 });
+    const sc = structured(result);
+
+    expect(sentParams()).toMatchObject({ count: 50, page: 2 });
+    expect(sc.notice).toBe(
+      'Page 2 is past the last page of results (30 hits across 1 page). Pass count: 50, page: 0 for that page. count 100 is above the per-call cap of 50, so this call served count: 50. Page 1 at count 100 starts at the same hit as page 2 at count 50, the page served.',
+    );
+    expect(contentText(result)).toContain(sc.notice as string);
+  });
+
+  it('adds nothing on page 0 when the served page already holds every hit', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: pageOf(30), nbHits: 30, nbPages: 1, page: 0, hitsPerPage: 50 }),
+    );
+
+    const sc = structured(await callSearch({ query: 'rust', count: 100 }));
+
+    expect(sentParams()).toMatchObject({ count: 50, page: 0 });
+    expect(sc.hits).toHaveLength(30);
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc).not.toHaveProperty('shown');
+    expect(sc).not.toHaveProperty('cap');
+    expect(sc).not.toHaveProperty('notice');
+  });
+
+  it('rejects count above the 1,000 ceiling before any upstream call', async () => {
+    const result = await callSearch({ query: 'rust', count: 1001 });
+    const error = wireError(result);
+
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.data).toMatchObject({
+      reason: 'invalid_arguments',
+      issues: [{ path: ['count'], code: 'too_big', maximum: 1000 }],
+    });
+    expect(mockSearch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [75, 1, 75, 'Pass count: 25, page: 3 to start at the same hit.'],
+    [
+      51,
+      1,
+      51,
+      'Pass count: 17, page: 3 to start at the same hit, or count: 50, page: 1 for hits 50–99, which include hit 51.',
+    ],
+    [120, 3, 360, 'Pass count: 45, page: 8 to start at the same hit.'],
+  ])(
+    'rejects count %i with page %i, whose first hit %i starts no page of 50, naming a count and page that start there',
+    async (count, page, firstHit, hint) => {
+      const result = await callSearch({ query: 'rust', count, page });
+      const error = wireError(result);
+
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data?.reason).toBe('count_page_unaligned');
+      expect(error.message).toBe(
+        `count ${count} is above the per-call cap of 50, and page ${page} at count ${count} starts after ${firstHit} hits, where no page of 50 hits begins.`,
+      );
+      expect(error.data?.recovery?.hint).toBe(hint);
+      expect(contentText(result)).toContain(hint);
+      expect(mockSearch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [52, 1, 'Pass count: 26, page: 2 to start at the same hit.'],
+    [
+      69,
+      1,
+      'Pass count: 23, page: 3 to start at the same hit, or count: 50, page: 1 for hits 50–99, which include hit 69.',
+    ],
+    [
+      53,
+      1,
+      'Pass count: 1, page: 53 to start at the same hit, or count: 50, page: 1 for hits 50–99, which include hit 53.',
+    ],
+    [
+      997,
+      1,
+      'Pass count: 1, page: 997 to start at the same hit, or count: 50, page: 19 for hits 950–999, which include hit 997.',
+    ],
+  ])(
+    'adds the page of 50 holding the first hit only when the count starting there is under 25 — count %i, page %i',
+    async (count, page, hint) => {
+      const result = await callSearch({ query: 'rust', count, page });
+      const error = wireError(result);
+
+      expect(error.data?.reason).toBe('count_page_unaligned');
+      expect(error.data?.recovery?.hint).toBe(hint);
+      expect(contentText(result)).toContain(hint);
+    },
+  );
+
+  it('advertises the 1,000 ceiling and describes the per-call cap', () => {
+    const count = inputProperty('count') as SchemaNode & { maximum?: number };
+    expect(count.maximum).toBe(1000);
+    expect(count.description).toBe(
+      'Number of results to return, at most 50 per call. A larger value is served at 50: the search runs at count 50 from the hit where the requested page starts, and the notice names the count and page to pass next. With page above 0, that hit (page × count) must begin a page of 50 hits.',
+    );
+  });
+});
+
+describe('composeSearchNotice — over-cap count', () => {
+  const overCapFacts = {
+    query: 'example.com/a',
+    droppedPrefix: 'https://www.',
+    storyId: 8863,
+    count: 50,
+    overCap: { count: 100, page: 0 },
+  };
+
+  it('appends the over-cap sentence after every other cause', () => {
+    const notice = composeSearchNotice({
+      ...overCapFacts,
+      shown: 50,
+      page: 0,
+      totalHits: 300,
+      totalPages: 6,
+    });
+
+    expect(notice).toBe(
+      joined(
+        'Showing 50 of 300 hits (page 0 of 6). Pass count: 50, page: 1 for more.',
+        droppedSentence('https://www.'),
+        'count 100 is above the per-call cap of 50, so this call served count: 50.',
+      ),
+    );
+  });
+
+  it('leaves the over-cap sentence out of an empty first page, where the cap withheld nothing', () => {
+    const notice = composeSearchNotice({
+      ...overCapFacts,
+      shown: 0,
+      page: 0,
+      totalHits: 0,
+      totalPages: 0,
+    });
+
+    expect(notice).toBe(
+      joined(
+        'Try broader keywords, or relax these filters: storyId.',
+        droppedSentence('https://www.'),
+        FRAGMENTS_SENTENCE,
+        STORY_ID_SENTENCE,
+      ),
+    );
   });
 });

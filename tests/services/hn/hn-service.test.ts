@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   dateBoundToEpochMs,
   dateBoundToEpochSeconds,
+  dateRangeToEpochSeconds,
   decodeHtmlEntities,
   extractDomain,
   HnService,
@@ -20,7 +21,8 @@ import {
   stripHtmlPreservingEm,
 } from '@/services/hn/hn-service.js';
 import type { HnItem } from '@/services/hn/types.js';
-import { httpStatus, rejectUnmockedFetch, stubHnApi } from '../../helpers/hn-api-stub.js';
+import { expectLinearCpu } from '../../helpers/cpu-time.js';
+import { httpStatus, rejectUnmockedFetch, stall, stubHnApi } from '../../helpers/hn-api-stub.js';
 
 rejectUnmockedFetch();
 
@@ -374,19 +376,13 @@ describe('stripHtmlPreservingEm — links with highlight markers (#25)', () => {
 });
 
 describe('stripHtml / stripHtmlPreservingEm — worst-case timing', () => {
-  /** Best of three wall-clock readings, in ms. */
-  function best(fn: () => void): number {
-    let min = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < 3; i++) {
-      const start = performance.now();
-      fn();
-      min = Math.min(min, performance.now() - start);
-    }
-    return min;
-  }
-
   const repeat = (unit: string) => (n: number) =>
     unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
+
+  const run = (input: string) => {
+    stripHtml(input);
+    stripHtmlPreservingEm(input);
+  };
 
   it.each([
     ['a run of "<" with no ">"', repeat('<')],
@@ -397,18 +393,16 @@ describe('stripHtml / stripHtmlPreservingEm — worst-case timing', () => {
     ['repeated <em> with no </em>', repeat('<em>')],
     ['a run of "&#"', repeat('&#')],
     ['a run of "\\"', repeat('\\')],
-  ])('stays linear on %s', (_label, make) => {
-    const inputs = [5_000, 20_000, 80_000].map(make);
-    for (const input of inputs) stripHtmlPreservingEm(input);
-    const [t5k, , t80k] = inputs.map((input) =>
-      best(() => {
-        stripHtml(input);
-        stripHtmlPreservingEm(input);
-      }),
-    ) as [number, number, number];
-    expect(t80k / Math.max(t5k, 0.05)).toBeLessThan(64);
-    expect(t80k).toBeLessThan(250);
-  });
+    ['one long line ending in a break', (n: number) => `${repeat('§1 x')(n)}\ny`],
+    ['line breaks throughout', repeat('  \r\n')],
+    ['a run of digits', repeat('1')],
+  ])(
+    'stays linear on %s',
+    (_label, make) => {
+      expectLinearCpu({ make, run });
+    },
+    120_000,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -726,6 +720,143 @@ describe('HnService.fetchItems against a stubbed HN API', () => {
     expect(attempts()).toEqual({ 1: 1, 2: 1, 3: 1 });
     expect(slots.map((s) => s.kind)).toEqual(['failed', 'item', 'failed']);
   });
+
+  describe('with a deadline', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    it('fails a fetch still running at the deadline, retries and backoff included, as a slot', async () => {
+      stubHnApi({
+        '/item/1.json': stall(Number.POSITIVE_INFINITY),
+        '/item/2.json': { id: 2, type: 'story' },
+      });
+      const startedAt = Date.now();
+      let settledAfter = Number.NaN;
+
+      const pending = new HnService(2)
+        .fetchItems([1, 2], createMockContext(), startedAt + 15_000)
+        .then((slots) => {
+          settledAfter = Date.now() - startedAt;
+          return slots;
+        });
+      await vi.advanceTimersByTimeAsync(120_000);
+      const slots = await pending;
+
+      /** Unbounded, a hung fetch spends four 10-second attempts and the backoff between them. */
+      expect(settledAfter).toBe(15_000);
+      expect(slots[1]).toEqual({ kind: 'item', id: 2, item: { id: 2, type: 'story' } });
+      expect(slots[0]).toMatchObject({ kind: 'failed', id: 1 });
+      const { error } = slots[0] as { error: McpError };
+      expect(error).toBeInstanceOf(McpError);
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.data).toMatchObject({ reason: 'retry_deadline_exceeded' });
+    });
+
+    it('still rethrows a caller cancellation when it lands, starting nothing more', async () => {
+      const { requested } = stubHnApi({
+        '/item/1.json': stall(Number.POSITIVE_INFINITY),
+        '/item/2.json': { id: 2, type: 'story' },
+      });
+      const controller = new AbortController();
+      const ctx = createMockContext({ signal: controller.signal });
+      const warnSpy = vi.spyOn(ctx.log, 'warning');
+      const startedAt = Date.now();
+      let settledAfter = Number.NaN;
+
+      const pending = new HnService(1).fetchItems([1, 2], ctx, startedAt + 15_000).finally(() => {
+        settledAfter = Date.now() - startedAt;
+      });
+      const settled = expect(pending).rejects.toMatchObject({
+        code: JsonRpcErrorCode.RequestCancelled,
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settled;
+
+      expect(settledAfter).toBe(1_000);
+      expect(requested()).toEqual(['/item/1.json']);
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it('fails a 429 whose Retry-After outlasts the time left at once, keeping its retryAfter', async () => {
+      /** 20 s is inside the retry cap, so a retry would sleep it out, but past the 15 s left. */
+      const { attempts } = stubItems({ 1: 429 }, { 'Retry-After': '20' });
+      const startedAt = Date.now();
+      let settledAfter = Number.NaN;
+
+      const pending = new HnService(1)
+        .fetchItems([1], createMockContext(), startedAt + 15_000)
+        .finally(() => {
+          settledAfter = Date.now() - startedAt;
+        });
+      await vi.advanceTimersByTimeAsync(120_000);
+      const [slot] = await pending;
+
+      expect(settledAfter).toBe(0);
+      expect(attempts()).toEqual({ 1: 1 });
+      expect(slot).toMatchObject({ kind: 'failed', id: 1 });
+      const { error } = slot as { error: McpError };
+      expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(error.data).toMatchObject({
+        reason: 'upstream_rate_limited',
+        status: 429,
+        retryAfter: '20',
+      });
+    });
+
+    it('classifies a 429 whose backoff the deadline cuts short as upstream_rate_limited, and stops the batch', async () => {
+      /** No Retry-After: the first backoff (at least 750 ms) outlasts the 500 ms left. */
+      const { attempts } = stubItems({ 1: 429, 2: { id: 2, type: 'story' } });
+
+      const pending = new HnService(1).fetchItems([1, 2], createMockContext(), Date.now() + 500);
+      await vi.advanceTimersByTimeAsync(120_000);
+      const slots = await pending;
+
+      expect(attempts()).toEqual({ 1: 1 });
+      expect(slots.map((s) => s.kind)).toEqual(['failed', 'failed']);
+      const { error } = slots[0] as { error: McpError };
+      expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(error.data).toMatchObject({ reason: 'upstream_rate_limited', status: 429 });
+      expect((slots[1] as { error: unknown }).error).toBe(error);
+    });
+
+    it('keeps a 5xx whose backoff the deadline cuts short on upstream_unavailable', async () => {
+      const { attempts } = stubItems({ 1: 503 });
+
+      const pending = new HnService(1).fetchItems([1], createMockContext(), Date.now() + 500);
+      await vi.advanceTimersByTimeAsync(120_000);
+      const [slot] = await pending;
+
+      expect(attempts()).toEqual({ 1: 1 });
+      const { error } = slot as { error: McpError };
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).toMatchObject({ reason: 'upstream_unavailable', status: 503 });
+    });
+  });
+
+  it('rethrows a caller cancellation that lands during a retry backoff, starting nothing more', async () => {
+    vi.useFakeTimers();
+    const { attempts } = stubItems({ 1: 500, 2: { id: 2, type: 'story' } });
+    const controller = new AbortController();
+    const ctx = createMockContext({ signal: controller.signal });
+    const warnSpy = vi.spyOn(ctx.log, 'warning');
+
+    const pending = new HnService(1).fetchItems([1, 2], ctx);
+    const settled = expect(pending).rejects.toSatisfy(
+      (error) => controller.signal.aborted && error === controller.signal.reason,
+    );
+    /** The first attempt's 500 has landed; the retry is sleeping its backoff. */
+    await vi.advanceTimersByTimeAsync(100);
+    expect(attempts()).toEqual({ 1: 1 });
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settled;
+
+    expect(attempts()).toEqual({ 1: 1 });
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -877,6 +1008,7 @@ describe('HnService.search URL construction', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
     if (originalTz === undefined) delete process.env.TZ;
     else process.env.TZ = originalTz;
   });
@@ -998,6 +1130,36 @@ describe('HnService.search URL construction', () => {
   it('omits numericFilters when no filters are set', async () => {
     const url = await requestedUrl({});
     expect(url.searchParams.get('numericFilters')).toBeNull();
+  });
+
+  it.each<[{ start?: string; end?: string }, { start?: number; end?: number }]>([
+    [{ start: '2024-05-05T10:00:00+02:00' }, { start: 1714896000 }],
+    [{ end: '2024-05-05T10:00:00.5Z' }, { end: 1714903201 }],
+    [{ start: '2024' }, { start: 1704067200 }],
+    [
+      { start: '2024-05-05T10:00:00.5Z', end: '2024-05-06' },
+      { start: 1714903200, end: 1714953600 },
+    ],
+  ])('sends the bounds dateRangeToEpochSeconds gives %j', async (dateRange, bounds) => {
+    /** The tool's criteria echo reads the same function, so it reports these exact seconds. */
+    expect(dateRangeToEpochSeconds(dateRange)).toStrictEqual(bounds);
+
+    vi.useFakeTimers();
+    stubHnApi({ '/api/v1/search': JSON.parse(EMPTY_PAGE) });
+    const pending = new HnService(1).search(
+      { query: 'x', sort: 'relevance', count: 10, page: 0, dateRange },
+      createMockContext(),
+    );
+    await vi.advanceTimersByTimeAsync(120_000);
+    await pending;
+    const calls = vi.mocked(globalThis.fetch).mock.calls;
+    expect(calls).toHaveLength(1);
+    const url = new URL(String(calls[0]?.[0]));
+    const sent = [
+      bounds.start != null ? `created_at_i>${bounds.start}` : null,
+      bounds.end != null ? `created_at_i<${bounds.end}` : null,
+    ].filter((f) => f != null);
+    expect(url.searchParams.get('numericFilters')).toBe(sent.join(','));
   });
 });
 

@@ -37,6 +37,10 @@ export type HnFeedType = 'top' | 'new' | 'best' | 'ask' | 'show' | 'jobs';
 
 /** Raw Algolia search response. */
 export interface AlgoliaResponse {
+  /** `nbHits: false` marks `nbHits` as an estimate rather than an exact count. */
+  exhaustive?: { nbHits?: boolean };
+  /** The older spelling of `exhaustive.nbHits`. */
+  exhaustiveNbHits?: boolean;
   hits: AlgoliaHit[];
   hitsPerPage: number;
   nbHits: number;
@@ -65,11 +69,14 @@ export interface AlgoliaHit {
     story_text?: AlgoliaHighlightValue;
     story_title?: AlgoliaHighlightValue;
   };
+  /** One item type (`story`, `comment`, `poll`, `pollopt`, or `job`), plus `author_<name>`, `story_<id>`, and story subsets such as `ask_hn`. */
   _tags?: string[];
   author: string;
   comment_text?: string | null;
   created_at: string;
   created_at_i: number;
+  /** A job's description (HTML). Not searched or highlighted. */
+  job_text?: string | null;
   num_comments?: number | null;
   objectID: string;
   points?: number | null;

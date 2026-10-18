@@ -417,14 +417,17 @@ describe('hn_get_thread — upstream text in content[]', () => {
   });
 
   it('heads an untitled comment root with its author verbatim and quotes its text', async () => {
-    serve({ 7: { id: 7, type: 'comment', by: 'snake_user', parent: 3, text: 'a_b *c*' } });
+    serve({
+      3: { id: 3, type: 'story', by: 'op', title: 'Story' },
+      7: { id: 7, type: 'comment', by: 'snake_user', parent: 3, text: 'a_b *c*' },
+    });
 
     const { text } = await call(getThread, { itemId: 7, depth: 0 });
 
     expect(text).toBe(
       [
         '## Comment by snake_user',
-        'id:7 | type:comment | parent:3 | by snake_user',
+        'id:7 | type:comment | parent:3 | story:3 | by snake_user',
         '> a_b *c*',
       ].join('\n'),
     );
@@ -882,6 +885,47 @@ describe('hn_search_content — upstream text in content[]', () => {
     const { text } = await call(searchHn, { query: 'fn main println', tags: 'comment' });
 
     expect(text.split('\n').slice(4)).toEqual(quoted('', CODE_LINES));
+  });
+
+  it('strips and bounds a job body that arrives as job_text (hit 49524704)', async () => {
+    const job = {
+      objectID: '49524704',
+      _tags: ['job', 'author_R_R'],
+      author: 'R_R',
+      created_at: '2026-09-01T17:00:14Z',
+      title: 'Quill (YC W20) Is Hiring a Fullstack SWE',
+      _highlightResult: {
+        author: { matchLevel: 'none' as const, matchedWords: [], value: 'R_R' },
+        title: {
+          matchLevel: 'full' as const,
+          matchedWords: ['quill', 'fullstack'],
+          value: '<em>Quill</em> (YC W20) Is Hiring a <em>Fullstack</em> SWE',
+        },
+      },
+    };
+    serveSearch([
+      { ...job, job_text: BODY_HTML },
+      {
+        ...job,
+        objectID: '2',
+        job_text:
+          'Remote, PT&#x2F;ET hours | <a href="https:&#x2F;&#x2F;quill.co&#x2F;" rel="nofollow">https:&#x2F;&#x2F;quill.co&#x2F;</a>',
+      },
+    ]);
+
+    const { sc, text } = await call(searchHn, { query: 'Quill Fullstack', tags: 'job' });
+
+    expect(sc.hits[0].type).toBe('job');
+    expect(sc.hits[0].text).toBe(BODY_LINES.join('\n'));
+    expect(sc.hits[0].highlights.text).toBeUndefined();
+    expect(sc.hits[1].text).toBe('Remote, PT/ET hours | https://quill.co/');
+    expect(text.split('\n').slice(2, 6 + BODY_RENDERED.length)).toEqual([
+      '### Quill (YC W20) Is Hiring a Fullstack SWE',
+      'id:49524704 | type:job | R_R | 2026-09-01T17:00:14Z',
+      ...quoted('', BODY_RENDERED),
+      '',
+      '> match — title: <em>Quill</em> (YC W20) Is Hiring a <em>Fullstack</em> SWE | terms: quill, fullstack',
+    ]);
   });
 });
 

@@ -83,8 +83,7 @@ const PARTIAL_ENTITY = /&#?[0-9A-Za-z]*$/;
  * Replace each `open … close` span, leftmost opener first and the nearest closer
  * after it, with `render(opener, inner)`. An opener with no closer after it ends
  * the scan — no later opener can find one either — so every search runs forward
- * once and a pass stays linear, where a lazy `open([\s\S]*?)close` regex rescans
- * to the end for each unclosed opener.
+ * once and a pass stays linear.
  */
 function replaceSpans(
   text: string,
@@ -108,8 +107,7 @@ function replaceSpans(
 
 /**
  * Apply `rewrite` to the text up to its last `>`. No tag can close past that
- * point, and leaving it out keeps a regex from rescanning to the end of the
- * string for every unmatched `<` there.
+ * point, so the rewrite never reads beyond it.
  */
 function throughLastTag(text: string, rewrite: (head: string) => string): string {
   const end = text.lastIndexOf('>') + 1;
@@ -255,6 +253,22 @@ export function dateBoundToEpochSeconds(
   rounding: 'floor' | 'ceil' = 'floor',
 ): number {
   return Math[rounding](dateBoundToEpochMs(bound) / 1000);
+}
+
+/**
+ * The exclusive `created_at_i` bounds a search sends to Algolia, in Unix
+ * seconds: the start rounded down and the end rounded up, as
+ * {@link dateBoundToEpochSeconds} describes. A bound left unset is absent. The
+ * request and the tool's echo of its criteria both read this one conversion.
+ */
+export function dateRangeToEpochSeconds(range: {
+  start?: string | undefined;
+  end?: string | undefined;
+}): { start?: number; end?: number } {
+  return {
+    ...(range.start ? { start: dateBoundToEpochSeconds(range.start) } : {}),
+    ...(range.end ? { end: dateBoundToEpochSeconds(range.end, 'ceil') } : {}),
+  };
 }
 
 /**
@@ -414,16 +428,23 @@ function upstreamFailureFor(upstream: string, status: number, cause: McpError): 
  * (`errorSource: 'FetchHttpError'`) are rewritten. The message drops the
  * upstream URL and the verbatim response body, which stay on the `cause` chain
  * for server-side logs.
+ *
+ * A retry deadline that cuts the ladder short ends it with its own `Timeout`,
+ * the last attempt's failure as its cause. When that attempt failed on an HTTP
+ * status, the status is classified as an exhausted ladder's would be: a 429
+ * still reads as `upstream_rate_limited`, so a batch stops on it.
  */
 async function withUpstreamHttpErrors<T>(upstream: string, fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (err) {
-    if (!(err instanceof McpError) || err.data?.errorSource !== 'FetchHttpError') throw err;
-    const status = err.data.status;
+    const failure =
+      err instanceof McpError && err.data?.reason === 'retry_deadline_exceeded' ? err.cause : err;
+    if (!(failure instanceof McpError) || failure.data?.errorSource !== 'FetchHttpError') throw err;
+    const status = failure.data.status;
     if (typeof status !== 'number') throw err;
 
-    throw upstreamFailureFor(upstream, status, err);
+    throw upstreamFailureFor(upstream, status, failure);
   }
 }
 
@@ -442,29 +463,43 @@ export class HnService {
    * GET a JSON document from an upstream, with retries around the full
    * fetch-and-parse pipeline and both failure shapes — non-2xx status and
    * HTML-instead-of-JSON — classified onto a contract reason.
+   *
+   * `deadline`, a `Date.now()` instant, bounds every attempt and backoff
+   * together; past it the call fails with a `Timeout` whose `data.reason` is
+   * `retry_deadline_exceeded`, unless the last attempt failed on an HTTP
+   * status, which keeps its contract reason. A caller abort still wins over it.
    */
   private getJson<T>(
     upstream: string,
     operation: string,
     url: string | URL,
     ctx: Context,
+    deadline?: number,
   ): Promise<T> {
     return withUpstreamHttpErrors(upstream, () =>
       withRetry(
-        async () => {
-          const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS, ctx, {
-            signal: ctx.signal,
+        async ({ signal, remainingMs }) => {
+          const res = await fetchWithTimeout(url, Math.min(REQUEST_TIMEOUT_MS, remainingMs), ctx, {
+            signal,
           });
           return parseJsonBody<T>(await res.text(), upstream);
         },
-        { operation, context: ctx, signal: ctx.signal },
+        {
+          operation,
+          context: ctx,
+          signal: ctx.signal,
+          ...(deadline !== undefined && { deadlineMs: Math.max(0, deadline - Date.now()) }),
+        },
       ),
     );
   }
 
-  /** Fetch a single item by ID. Returns null when HN reports the item is missing. */
-  fetchItem(id: number, ctx: Context): Promise<HnItem | null> {
-    return this.getJson('HN API', 'hn.fetchItem', `${HN_API}/item/${id}.json`, ctx);
+  /**
+   * Fetch a single item by ID. Returns null when HN reports the item is missing.
+   * `deadline` bounds its retries as in {@link HnService.getJson}.
+   */
+  fetchItem(id: number, ctx: Context, deadline?: number): Promise<HnItem | null> {
+    return this.getJson('HN API', 'hn.fetchItem', `${HN_API}/item/${id}.json`, ctx, deadline);
   }
 
   /**
@@ -495,13 +530,17 @@ export class HnService {
    * not per-item:
    *
    * - A caller abort rethrows, ending the batch instead of spending the rest of
-   *   the ID list on fetches nobody is waiting for.
+   *   the ID list on fetches nobody is waiting for — including one that lands
+   *   during a retry's backoff, which surfaces as the raw abort reason.
    * - An `upstream_rate_limited` failure stops the batch. Fetches already in
    *   flight settle, and every slot not yet started is reported `failed` with
    *   that error, rather than each running its own retry ladder against a
    *   throttled upstream.
+   *
+   * With a `deadline` (a `Date.now()` instant), a fetch still retrying when it
+   * passes fails its slot with a `Timeout` instead of finishing its ladder.
    */
-  async fetchItems(ids: readonly number[], ctx: Context): Promise<ItemSlot[]> {
+  async fetchItems(ids: readonly number[], ctx: Context, deadline?: number): Promise<ItemSlot[]> {
     const slots = new Array<ItemSlot | undefined>(ids.length);
     let rateLimit: McpError | undefined;
     let next = 0;
@@ -512,10 +551,13 @@ export class HnService {
         const id = ids[i];
         if (id == null) continue;
         try {
-          const item = await this.fetchItem(id, ctx);
+          const item = await this.fetchItem(id, ctx, deadline);
           slots[i] = item ? { kind: 'item', id, item } : { kind: 'absent', id };
         } catch (error) {
-          if (error instanceof McpError && error.code === JsonRpcErrorCode.RequestCancelled) {
+          if (
+            ctx.signal.aborted ||
+            (error instanceof McpError && error.code === JsonRpcErrorCode.RequestCancelled)
+          ) {
             throw error;
           }
           slots[i] = { kind: 'failed', id, error };
@@ -574,12 +616,9 @@ export class HnService {
 
     const numericFilters: string[] = [];
     if (params.minPoints != null) numericFilters.push(`points>=${params.minPoints}`);
-    if (params.dateRange?.start) {
-      numericFilters.push(`created_at_i>${dateBoundToEpochSeconds(params.dateRange.start)}`);
-    }
-    if (params.dateRange?.end) {
-      numericFilters.push(`created_at_i<${dateBoundToEpochSeconds(params.dateRange.end, 'ceil')}`);
-    }
+    const bounds = params.dateRange ? dateRangeToEpochSeconds(params.dateRange) : {};
+    if (bounds.start != null) numericFilters.push(`created_at_i>${bounds.start}`);
+    if (bounds.end != null) numericFilters.push(`created_at_i<${bounds.end}`);
     if (numericFilters.length) url.searchParams.set('numericFilters', numericFilters.join(','));
 
     return this.getJson('Algolia', 'hn.search', url, ctx);
