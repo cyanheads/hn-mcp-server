@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.22](changelog/0.5.x/0.5.22.md) — 2026-10-18
+
+hn_get_thread returns live replies below dead and deleted comments, marks OP against the story's author on comment roots, and issues packed cursors; hn_search_content discloses estimated totals, echoes its criteria, and types its hits; an over-cap count is served at the cap.
+
 ## [0.5.21](changelog/0.5.x/0.5.21.md) — 2026-10-05
 
 Framework ^0.13.6 → ^0.13.12: tool error results now end with a request ID, the Docker image installs dependencies in a build-platform deps stage, and server.json launches with npx.
