@@ -371,6 +371,131 @@ describe('hn_get_user submission pagination', () => {
 });
 
 // ---------------------------------------------------------------------------
+// submissionCount above the per-call cap — served at the cap, not rejected
+// ---------------------------------------------------------------------------
+
+describe('hn_get_user — submissionCount above the per-call cap', () => {
+  type ToolResult = Awaited<ReturnType<typeof runToolContract>>;
+
+  /** 120 submissions with IDs 1001..1120, most recent first. */
+  const history = Array.from({ length: 120 }, (_, i) => 1001 + i);
+
+  beforeEach(() => {
+    mockFetchUser.mockResolvedValue({ ...baseUser, submitted: history });
+    mockFetchItems.mockImplementation(async (ids) =>
+      slotsOf(ids.map((id) => ({ id, type: 'story', by: 'testuser', title: `Post ${id}` }))),
+    );
+  });
+
+  function call(input: Record<string, unknown>): Promise<ToolResult> {
+    return runToolContract(
+      getUser,
+      { username: 'testuser', includeSubmissions: true, ...input } as never,
+      { context: { errors: getUser.errors } },
+    );
+  }
+
+  function structured(result: ToolResult): Record<string, unknown> {
+    expect(result.isError).toBeFalsy();
+    return result.structuredContent as Record<string, unknown>;
+  }
+
+  function contentText(result: ToolResult): string {
+    return result.content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+  }
+
+  it('serves submissionCount: 51 as the first 50 submissions, naming the cap and the next offset', async () => {
+    const result = await call({ submissionCount: 51 });
+    const sc = structured(result);
+
+    expect(mockFetchItems).toHaveBeenCalledWith(history.slice(0, 50), expect.anything());
+    expect((sc.submissions as { id: number }[]).map((s) => s.id)).toEqual(history.slice(0, 50));
+    expect(sc).toMatchObject({ submissionOffset: 0, truncated: true, shown: 50, cap: 50 });
+    expect(sc.notice).toBe(
+      'Showing 50 live items from positions 1–50 of 120 submissions. submissionCount 51 is above the per-call cap of 50, so this call served submissionCount: 50. Set submissionOffset to 50 for the next page.',
+    );
+    expect(contentText(result)).toContain(sc.notice as string);
+  });
+
+  it('serves the 1,000 ceiling as the first 50 submissions of the window asked for', async () => {
+    const result = await call({ submissionCount: 1000, submissionOffset: 60 });
+    const sc = structured(result);
+
+    expect((sc.submissions as { id: number }[]).map((s) => s.id)).toEqual(history.slice(60, 110));
+    expect(sc).toMatchObject({ submissionOffset: 60, shown: 50, cap: 50 });
+    expect(sc.notice).toBe(
+      'Showing 50 live items from positions 61–110 of 120 submissions. submissionCount 1000 is above the per-call cap of 50, so this call served submissionCount: 50. Set submissionOffset to 110 for the next page.',
+    );
+    expect(contentText(result)).toContain(sc.notice as string);
+  });
+
+  it('rejects submissionCount above the 1,000 ceiling before any upstream call', async () => {
+    const result = await call({ submissionCount: 1001 });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.InvalidParams,
+        data: {
+          reason: 'invalid_arguments',
+          issues: [{ path: ['submissionCount'], code: 'too_big', maximum: 1000 }],
+        },
+      },
+    });
+    expect(mockFetchUser).not.toHaveBeenCalled();
+  });
+
+  it('adds nothing when the capped window already reaches the end of the history', async () => {
+    const sc = structured(await call({ submissionCount: 80, submissionOffset: 100 }));
+
+    expect((sc.submissions as { id: number }[]).map((s) => s.id)).toEqual(history.slice(100));
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc).not.toHaveProperty('notice');
+  });
+
+  it('keeps the past-the-end notice alone when an over-cap window starts past the end', async () => {
+    const sc = structured(await call({ submissionCount: 500, submissionOffset: 300 }));
+
+    expect(sc.submissions).toEqual([]);
+    expect(sc.notice).toBe(
+      'submissionOffset 300 is past the end of 120 submissions. Valid offsets are 0 to 119.',
+    );
+  });
+
+  it('advertises the 1,000 ceiling and pages by the served size, not the requested one', () => {
+    const schema = z.toJSONSchema(getUser.input) as {
+      properties: Record<string, { maximum?: number; description?: string }>;
+    };
+    expect(schema.properties.submissionCount?.maximum).toBe(1000);
+    expect(schema.properties.submissionCount?.description).toBe(
+      'Page size — how many submissions to resolve per call, at most 50 per call. A larger value is served at 50, and the notice names the submissionOffset for the next page. Only used when includeSubmissions is true.',
+    );
+    expect(schema.properties.submissionOffset?.description).toBe(
+      'How many submissions to skip before resolving, counting back from the most recent. Use with submissionCount to page through a long history: request offset 0, then advance by the page size served, and so on. The enrichment block echoes submissionOffset and, when more remain, the offset to send next. Only used when includeSubmissions is true.',
+    );
+  });
+
+  it('describes cap as the size served and descendants as the live-comment count', () => {
+    expect(getUser.enrichment!.cap!.description).toBe(
+      'The submissionCount value served: as passed, or 50 when submissionCount was above that cap.',
+    );
+    expect(getUser.enrichment!.notice!.description).toMatch(/served at its per-call cap/);
+
+    const output = z.toJSONSchema(getUser.output) as unknown as {
+      properties: {
+        submissions: { items: { properties: Record<string, { description?: string }> } };
+      };
+    };
+    expect(output.properties.submissions.items.properties.descendants?.description).toBe(
+      "HN's count of live comments in the thread (descendants); dead and deleted comments are not counted. Present for stories and polls.",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Format
 // ---------------------------------------------------------------------------
 
@@ -492,11 +617,15 @@ describe('hn_get_user input validation', () => {
     ).toBe(15000);
   });
 
-  it('constrains submissionCount to 1-50', () => {
+  it('constrains submissionCount to 1-1,000', () => {
     expect(() => getUser.input.parse({ username: 'test', submissionCount: 0 })).toThrow();
-    expect(() => getUser.input.parse({ username: 'test', submissionCount: 51 })).toThrow();
+    expect(() => getUser.input.parse({ username: 'test', submissionCount: 1001 })).toThrow();
     expect(getUser.input.parse({ username: 'test', submissionCount: 1 }).submissionCount).toBe(1);
     expect(getUser.input.parse({ username: 'test', submissionCount: 50 }).submissionCount).toBe(50);
+    expect(getUser.input.parse({ username: 'test', submissionCount: 51 }).submissionCount).toBe(51);
+    expect(getUser.input.parse({ username: 'test', submissionCount: 1000 }).submissionCount).toBe(
+      1000,
+    );
   });
 });
 

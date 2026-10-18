@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeInline, quoteBody } from '@/mcp-server/tools/markdown-escape.js';
+import { servedAtCap } from '@/mcp-server/tools/served-at-cap.js';
 import {
   decodeHtmlEntities,
   getHnService,
@@ -13,6 +14,12 @@ import {
   settlePage,
   stripHtml,
 } from '@/services/hn/hn-service.js';
+
+/** Most submissions one call resolves; a larger `submissionCount` is served at this cap. */
+const SUBMISSION_COUNT_CAP = 50;
+
+/** Largest `submissionCount` accepted; anything above it is rejected. */
+const SUBMISSION_COUNT_CEILING = 1000;
 
 export const getUser = tool('hn_get_user', {
   description:
@@ -85,10 +92,10 @@ export const getUser = tool('hn_get_user', {
       .number()
       .int()
       .min(1)
-      .max(50)
+      .max(SUBMISSION_COUNT_CEILING)
       .default(10)
       .describe(
-        'Page size — how many submissions to resolve per call. Only used when includeSubmissions is true.',
+        `Page size — how many submissions to resolve per call, at most ${SUBMISSION_COUNT_CAP} per call. A larger value is served at ${SUBMISSION_COUNT_CAP}, and the notice names the submissionOffset for the next page. Only used when includeSubmissions is true.`,
       ),
     submissionOffset: z
       .number()
@@ -96,7 +103,7 @@ export const getUser = tool('hn_get_user', {
       .min(0)
       .default(0)
       .describe(
-        'How many submissions to skip before resolving, counting back from the most recent. Use with submissionCount to page through a long history: request offset 0, then offset submissionCount, and so on. The enrichment block echoes submissionOffset and, when more remain, the offset to send next. Only used when includeSubmissions is true.',
+        'How many submissions to skip before resolving, counting back from the most recent. Use with submissionCount to page through a long history: request offset 0, then advance by the page size served, and so on. The enrichment block echoes submissionOffset and, when more remain, the offset to send next. Only used when includeSubmissions is true.',
       ),
   }),
   output: z.object({
@@ -127,7 +134,12 @@ export const getUser = tool('hn_get_user', {
             text: z.string().optional().describe('Body text (HTML stripped).'),
             score: z.number().optional().describe('Score/upvotes.'),
             time: z.number().optional().describe('Unix timestamp.'),
-            descendants: z.number().optional().describe('Comment count (stories/polls).'),
+            descendants: z
+              .number()
+              .optional()
+              .describe(
+                "HN's count of live comments in the thread (descendants); dead and deleted comments are not counted. Present for stories and polls.",
+              ),
           })
           .describe('A single submission by the user (story, comment, job, poll, or poll option).'),
       )
@@ -146,7 +158,12 @@ export const getUser = tool('hn_get_user', {
       ),
     truncated: z.boolean().optional().describe('True when submissions remain beyond this page.'),
     shown: z.number().optional().describe('Number of submissions returned.'),
-    cap: z.number().optional().describe('The submissionCount cap that was applied.'),
+    cap: z
+      .number()
+      .optional()
+      .describe(
+        `The submissionCount value served: as passed, or ${SUBMISSION_COUNT_CAP} when submissionCount was above that cap.`,
+      ),
     failedIds: z
       .array(z.number())
       .optional()
@@ -157,7 +174,7 @@ export const getUser = tool('hn_get_user', {
       .string()
       .optional()
       .describe(
-        'Pagination context — which window of the history this page covers and the submissionOffset to send next, the submission IDs that failed to load and how to retry them, or a warning that the offset is past the end. Absent when the page reaches the end of the history with no failed IDs, or when no submissions were resolved.',
+        'Pagination context — which window of the history this page covers and the submissionOffset to send next, the submission IDs that failed to load and how to retry them, or a warning that the offset is past the end — noting when submissionCount was served at its per-call cap. Absent when the page reaches the end of the history with no failed IDs, or when no submissions were resolved.',
       ),
   },
   enrichmentTrailer: {
@@ -182,7 +199,8 @@ export const getUser = tool('hn_get_user', {
     };
 
     const offset = input.submissionOffset;
-    const pageEnd = offset + input.submissionCount;
+    const submissionCount = Math.min(input.submissionCount, SUBMISSION_COUNT_CAP);
+    const pageEnd = offset + submissionCount;
 
     const windowIds =
       input.includeSubmissions && user.submitted?.length
@@ -226,10 +244,12 @@ export const getUser = tool('hn_get_user', {
           `submissionOffset ${offset} is past the end of ${total.toLocaleString()} submissions. Valid offsets are 0 to ${total - 1}.`,
         );
       } else if (pageEnd < total) {
-        ctx.enrich.truncated({ shown, cap: input.submissionCount });
+        ctx.enrich.truncated({ shown, cap: submissionCount });
         ctx.enrich.notice(
           [
             `Showing ${shown} live item${shown === 1 ? '' : 's'} from positions ${(offset + 1).toLocaleString()}–${pageEnd.toLocaleString()} of ${total.toLocaleString()} submissions.`,
+            input.submissionCount > SUBMISSION_COUNT_CAP &&
+              servedAtCap('submissionCount', input.submissionCount, SUBMISSION_COUNT_CAP),
             failureMessage,
             `Set submissionOffset to ${pageEnd} for the next page.`,
           ]

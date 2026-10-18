@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeInline, quoteBody } from '@/mcp-server/tools/markdown-escape.js';
+import { servedAtCap } from '@/mcp-server/tools/served-at-cap.js';
 import {
   decodeHtmlEntities,
   extractDomain,
@@ -15,8 +16,11 @@ import {
   stripHtml,
 } from '@/services/hn/hn-service.js';
 
-/** Largest page `count` accepts, mirrored in the input schema. */
-const MAX_COUNT = 100;
+/** Most stories one call serves; a larger `count` is served at this cap. */
+const COUNT_CAP = 100;
+
+/** Largest `count` accepted; anything above it is rejected. */
+const COUNT_CEILING = 1000;
 
 export const getStories = tool('hn_get_stories', {
   description:
@@ -74,9 +78,11 @@ export const getStories = tool('hn_get_stories', {
       .number()
       .int()
       .min(1)
-      .max(MAX_COUNT)
+      .max(COUNT_CEILING)
       .default(30)
-      .describe('Number of stories to return. Larger counts take longer.'),
+      .describe(
+        `Number of stories to return, at most ${COUNT_CAP} per call. A larger value is served at ${COUNT_CAP}, and the notice names the offset for the next page. Larger counts take longer.`,
+      ),
     offset: z
       .number()
       .int()
@@ -119,7 +125,12 @@ export const getStories = tool('hn_get_stories', {
               .number()
               .optional()
               .describe('Unix timestamp when provided by HN. Omitted when unknown.'),
-            descendants: z.number().optional().describe('Total comment count. Absent for jobs.'),
+            descendants: z
+              .number()
+              .optional()
+              .describe(
+                "HN's count of live comments in the thread (descendants); dead and deleted comments are not counted. Absent for jobs.",
+              ),
             text: z
               .string()
               .optional()
@@ -146,7 +157,12 @@ export const getStories = tool('hn_get_stories', {
         'True when more stories remain beyond this page (hasMore). Absent on the last page of the feed.',
       ),
     shown: z.number().optional().describe('Number of stories returned on this page.'),
-    cap: z.number().optional().describe('The count cap that was applied.'),
+    cap: z
+      .number()
+      .optional()
+      .describe(
+        `The count value served: as passed, or ${COUNT_CAP} when count was above that cap.`,
+      ),
     failedIds: z
       .array(z.number())
       .optional()
@@ -157,7 +173,7 @@ export const getStories = tool('hn_get_stories', {
       .string()
       .optional()
       .describe(
-        'Agent guidance: the offset to pass for the next page while more stories remain, the IDs that failed to load and how to retry them, or why a page came back empty — offset past the end of the feed, an empty feed, or every item on the page deleted or flagged. Absent on the last page of a non-empty result with no failed IDs.',
+        'Agent guidance: the offset to pass for the next page while more stories remain, the IDs that failed to load and how to retry them, or why a page came back empty — offset past the end of the feed, an empty feed, or every item on the page deleted or flagged — noting when count was served at its per-call cap. Absent on the last page of a non-empty result with no failed IDs.',
       ),
   },
   enrichmentTrailer: {
@@ -167,7 +183,8 @@ export const getStories = tool('hn_get_stories', {
   async handler(input, ctx) {
     const hn = getHnService();
     const feedIds = await hn.fetchFeed(input.feed, ctx);
-    const sliced = feedIds.slice(input.offset, input.offset + input.count);
+    const count = Math.min(input.count, COUNT_CAP);
+    const sliced = feedIds.slice(input.offset, input.offset + count);
     const { items, failedIds } = settlePage(await hn.fetchItems(sliced, ctx));
 
     const stories = items.map((item) => {
@@ -194,7 +211,7 @@ export const getStories = tool('hn_get_stories', {
     });
 
     const total = feedIds.length;
-    const nextOffset = input.offset + input.count;
+    const nextOffset = input.offset + count;
     const hasMore = nextOffset < total;
     ctx.enrich({
       total,
@@ -210,16 +227,17 @@ export const getStories = tool('hn_get_stories', {
         : undefined;
 
     if (hasMore) {
-      const raiseCount = input.count < MAX_COUNT ? `, or raise count (max ${MAX_COUNT})` : '';
+      const raiseCount = input.count < COUNT_CAP ? `, or raise count (max ${COUNT_CAP})` : '';
       const nextPage = `Pass offset: ${nextOffset} for the next page${raiseCount}.`;
       const pageStatus =
         stories.length === 0 && !failureMessage
           ? deadPageMessage
           : `Showing items ${input.offset + 1}–${nextOffset} of ${total} in the ${input.feed} feed.`;
+      const overCap = input.count > COUNT_CAP ? servedAtCap('count', input.count, COUNT_CAP) : '';
       ctx.enrich.truncated({
         shown: stories.length,
-        cap: input.count,
-        guidance: [pageStatus, failureMessage, nextPage].filter(Boolean).join(' '),
+        cap: count,
+        guidance: [pageStatus, overCap, failureMessage, nextPage].filter(Boolean).join(' '),
       });
     } else if (stories.length === 0) {
       if (total === 0) {

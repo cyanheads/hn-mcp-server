@@ -3,6 +3,7 @@
  * @module mcp-server/tools/definitions/get-stories.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   createMockContext as createFrameworkMockContext,
@@ -89,7 +90,12 @@ describe('getStories', () => {
 
     it('rejects count out of range', () => {
       expect(() => getStories.input.parse({ feed: 'top', count: 0 })).toThrow();
-      expect(() => getStories.input.parse({ feed: 'top', count: 101 })).toThrow();
+      expect(() => getStories.input.parse({ feed: 'top', count: 1001 })).toThrow();
+    });
+
+    it('accepts count above the per-call cap up to the 1,000 ceiling', () => {
+      expect(getStories.input.parse({ feed: 'top', count: 101 }).count).toBe(101);
+      expect(getStories.input.parse({ feed: 'top', count: 1000 }).count).toBe(1000);
     });
 
     it('rejects invalid feed value', () => {
@@ -677,6 +683,144 @@ describe('getStories — pagination notices', () => {
     const enrichment = getStories.enrichment as Record<string, { description?: string }>;
     expect(enrichment.truncated!.description).toMatch(/more stories remain/i);
     expect(enrichment.notice!.description).not.toMatch(/Absent on non-empty result pages/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// count above the per-call cap — served at the cap, not rejected
+// ---------------------------------------------------------------------------
+
+describe('getStories — count above the per-call cap', () => {
+  const mockService = {
+    fetchFeed: vi.fn<() => Promise<number[]>>(),
+    fetchItems: vi.fn<(ids: number[]) => Promise<ItemSlot[]>>(),
+  };
+
+  const feed500 = Array.from({ length: 500 }, (_, i) => i + 1);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getHnService).mockReturnValue(mockService as any);
+    mockService.fetchFeed.mockResolvedValue(feed500);
+    mockService.fetchItems.mockImplementation(async (ids) =>
+      slotsOf(ids.map((id) => makeItem({ id }))),
+    );
+  });
+
+  function call(input: Record<string, unknown>): Promise<ToolResult> {
+    return runToolContract(getStories, input as never, {
+      context: { errors: getStories.errors },
+    });
+  }
+
+  it('serves count: 101 as the first 100 stories, naming the cap and the next offset', async () => {
+    const result = await call({ feed: 'top', count: 101 });
+    const sc = structured(result);
+    const stories = sc.stories as { id: number }[];
+
+    expect(mockService.fetchItems).toHaveBeenCalledWith(feed500.slice(0, 100), expect.anything());
+    expect(stories.map((s) => s.id)).toEqual(feed500.slice(0, 100));
+    expect(sc).toMatchObject({ hasMore: true, truncated: true, shown: 100, cap: 100 });
+    expect(sc.notice).toBe(
+      'Showing items 1–100 of 500 in the top feed. count 101 is above the per-call cap of 100, so this call served count: 100. Pass offset: 100 for the next page.',
+    );
+    expect(contentText(result)).toContain(sc.notice as string);
+  });
+
+  it('serves the 1,000 ceiling as the first 100 stories of the window asked for', async () => {
+    const result = await call({ feed: 'best', count: 1000, offset: 200 });
+    const sc = structured(result);
+    const stories = sc.stories as { id: number }[];
+
+    expect(stories.map((s) => s.id)).toEqual(feed500.slice(200, 300));
+    expect(sc).toMatchObject({ offset: 200, cap: 100, shown: 100 });
+    expect(sc.notice).toBe(
+      'Showing items 201–300 of 500 in the best feed. count 1000 is above the per-call cap of 100, so this call served count: 100. Pass offset: 300 for the next page.',
+    );
+    expect(contentText(result)).toContain(sc.notice as string);
+  });
+
+  it('rejects count above the 1,000 ceiling before any upstream call', async () => {
+    const result = await call({ feed: 'top', count: 1001 });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.InvalidParams,
+        data: {
+          reason: 'invalid_arguments',
+          issues: [{ path: ['count'], code: 'too_big', maximum: 1000 }],
+        },
+      },
+    });
+    expect(mockService.fetchFeed).not.toHaveBeenCalled();
+  });
+
+  it('adds nothing when the capped page already reaches the end of the feed', async () => {
+    const result = await call({ feed: 'top', count: 150, offset: 450 });
+    const sc = structured(result);
+
+    expect(mockService.fetchItems).toHaveBeenCalledWith(feed500.slice(450), expect.anything());
+    expect((sc.stories as { id: number }[]).map((s) => s.id)).toEqual(feed500.slice(450));
+    expect(sc.hasMore).toBe(false);
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc).not.toHaveProperty('shown');
+    expect(sc).not.toHaveProperty('cap');
+    expect(sc).not.toHaveProperty('notice');
+  });
+
+  it('keeps the offset-past-end notice alone when an over-cap count starts past the end', async () => {
+    const sc = structured(await call({ feed: 'top', count: 500, offset: 600 }));
+
+    expect(sc.stories).toEqual([]);
+    expect(sc.notice).toBe(
+      'Offset 600 is past the end of the top feed (500 items). Reset offset below 500.',
+    );
+  });
+
+  it('keeps the failure retry and the next offset beside the over-cap sentence', async () => {
+    mockService.fetchItems.mockImplementation(async (ids) => [
+      { kind: 'failed', id: ids[0]!, error: new Error('upstream down') },
+      ...slotsOf(ids.slice(1).map((id) => makeItem({ id }))),
+    ]);
+
+    const sc = structured(await call({ feed: 'top', count: 250, offset: 100 }));
+
+    expect(sc.failedIds).toEqual([101]);
+    expect(sc.notice).toBe(
+      'Showing items 101–200 of 500 in the top feed. count 250 is above the per-call cap of 100, so this call served count: 100. Could not fetch 1 of 100 items on this page (id 101). Retry with offset: 100, or pass an id as itemId to hn_get_thread to fetch that story alone. Pass offset: 200 for the next page.',
+    );
+  });
+
+  it('advertises the 1,000 ceiling and describes the per-call cap', () => {
+    const schema = z.toJSONSchema(getStories.input) as {
+      properties: Record<string, { maximum?: number; description?: string }>;
+    };
+    expect(schema.properties.count?.maximum).toBe(1000);
+    expect(schema.properties.count?.description).toBe(
+      'Number of stories to return, at most 100 per call. A larger value is served at 100, and the notice names the offset for the next page. Larger counts take longer.',
+    );
+  });
+});
+
+describe('getStories — output descriptions', () => {
+  it('describes descendants as the live-comment count, not the total', () => {
+    const schema = z.toJSONSchema(getStories.output) as unknown as {
+      properties: {
+        stories: { items: { properties: Record<string, { description?: string }> } };
+      };
+    };
+    const description = schema.properties.stories.items.properties.descendants?.description;
+    expect(description).toBe(
+      "HN's count of live comments in the thread (descendants); dead and deleted comments are not counted. Absent for jobs.",
+    );
+  });
+
+  it('describes cap as the size served, and the notice as naming a count served at its cap', () => {
+    expect(getStories.enrichment!.cap!.description).toBe(
+      'The count value served: as passed, or 100 when count was above that cap.',
+    );
+    expect(getStories.enrichment!.notice!.description).toMatch(/served at its per-call cap/);
   });
 });
 
