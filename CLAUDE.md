@@ -2,10 +2,10 @@
 
 **Server:** hn-mcp-server
 **Version:** 0.5.21
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.12`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` 2.2.0
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` 2.3.1
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -218,6 +218,8 @@ src/
       types.ts                          # HN domain types
   mcp-server/
     tools/markdown-escape.ts           # format() boundary: escape titles, quote bodies
+    tools/served-at-cap.ts             # notice sentence for a size input served at its per-call cap
+    tools/thread-cursor.ts             # hn_get_thread cursor codec: packed frontier, JSON format still decoded
     tools/definitions/
       get-stories.tool.ts              # hn_get_stories — Fetch stories from an HN feed
       get-thread.tool.ts               # hn_get_thread — Get item + comment tree
@@ -378,6 +380,7 @@ import { getHnService } from '@/services/hn/hn-service.js';
 bun publish --access public
 
 docker buildx build --platform linux/amd64,linux/arm64 \
+  --build-arg APP_VERSION=<version> \
   -t ghcr.io/cyanheads/hn-mcp-server:<version> \
   -t ghcr.io/cyanheads/hn-mcp-server:latest \
   --push .

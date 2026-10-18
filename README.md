@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.5.21-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/hn-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/hn-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/hn-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun->=1.4.0-f9f1e1.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.5.21-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/hn-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/hn-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/hn-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun->=1.4.0-f9f1e1.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Overview
 
-Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Search API. Browse ranked feeds, read full comment threads, look up user profiles, and search stories, comments, polls, and jobs by keyword or by type, author, parent story, date, or score. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Hacker News feeds, threads, and profiles. Browse ranked feeds, read full comment threads, look up users, and search stories, comments, polls, and jobs by keyword, author, date, or score.
 
 ### Tools
 
@@ -44,7 +44,7 @@ Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Searc
 
 ### `hn_get_stories` <sub>tool</sub>
 
-- Six feed types: `top`, `new`, `best`, `ask`, `show`, `jobs`; `count` (1–100, default 30) and `offset` for pagination
+- Six feed types: `top`, `new`, `best`, `ask`, `show`, `jobs`; `count` (default 30) and `offset` for pagination. One call serves at most 100 stories; a `count` up to 1,000 is served at 100, with a `notice` naming the next `offset`
 - Returns id, type, title, url, domain, score, author, timestamp, comment count, and body text — each field omitted (not null) when HN doesn't provide it
 - Enrichment reports `total`, `offset`, and `hasMore`; while more stories remain, `truncated` is set and `notice` names the next `offset`, and a `notice` explains empty pages (empty feed, offset past end, or every item on the page deleted/flagged). The last page carries no truncation
 - Items whose fetch failed after retries are listed in `failedIds` with a `notice` naming the retry; a page where every item failed returns the classified upstream error instead of an empty list
@@ -53,19 +53,19 @@ Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Searc
 
 ### `hn_get_thread` <sub>tool</sub>
 
-- `itemId` plus `depth` (0–10, default 3; 0 returns the item with no comments) and `maxComments` (1–200, default 50) capping one response across all levels, alongside a fixed 64,000-byte text budget that cuts only between comments
+- `itemId` plus `depth` (default 3; 0 returns the item with no comments) and `maxComments` (default 50) capping one response across all levels, alongside a fixed 64,000-byte text budget that cuts only between comments. One call resolves at most 10 levels and 200 comments; a `depth` up to 100 is served at 10 and a `maxComments` up to 1,000 at 200, with a `notice` naming the comment to pass as `itemId` or the `nextCursor` that reaches the rest
 - Breadth-first traversal ranked like HN — top-ranked top-level comments resolve first, replies fill in only after the level above is exhausted
-- Resumable: a response stopped by `maxComments`, the byte budget, or an upstream rate limit returns `nextCursor`; passing it back as `cursor` with the same `itemId` continues at the next unseen comment. The cursor carries the unvisited comments themselves, so re-ranked replies cannot shift it, and the server keeps no session state. A cursor passed with a different `itemId` fails with `invalid_cursor`
-- The root carries its relationships and state: `parent` for a comment, `poll` for a poll option, `parts` and resolved `options` (text and votes, at every depth) for a poll, and `deleted`/`dead` markers. The `content[]` heading names the type — a title, `Comment by <author>`, `Poll option by <author> on poll <id>` — and marks a deleted or dead root
-- Flat comment list carries `depth`/`parentId` for tree reconstruction, plus `childCount` and an `isOp` flag when the comment author matches the root item's author
-- `truncated` and `truncationReason` (`count`, `size`, `rate_limited`, or `depth` when replies lie below the depth limit) are set only while comments remain unread — never on a terminal page, including a thread that loads in full at exactly the cap. `notice` reports deleted/dead comments omitted during traversal and the next step: the cursor, or a larger `depth` or a comment id as `itemId`
+- Resumable: a response stopped by `maxComments`, the byte budget, or an upstream rate limit returns `nextCursor`; passing it back as `cursor` with the same `itemId` continues at the next unseen comment. The cursor carries the unvisited comments themselves, so re-ranked replies cannot shift it, and the server keeps no session state. A cursor the tool did not issue, an altered one, or one passed with a different `itemId` fails with `invalid_cursor`
+- The root carries its relationships and state: `parent` and `storyId` (the story or poll the discussion belongs to) for a comment, `poll` for a poll option, `parts` and resolved `options` (text and votes, at every depth) for a poll, and `deleted`/`dead` markers. The `content[]` heading names the type — a title, `Comment by <author>`, `Poll option by <author> on poll <id>` — and marks a deleted or dead root
+- Flat comment list carries `depth`/`parentId` for tree reconstruction, plus `childCount` and an `isOp` flag when the comment author submitted the thread's story — on a comment root, the story at `storyId`, never the comment's own author. Dead and deleted comments are left out, but their live replies are still returned at their true `depth`, with `parentId` naming the omitted comment
+- `truncated` and `truncationReason` (`count`, `size`, `rate_limited`, or `depth` when replies lie below the depth limit) are set only while comments remain unread — never on a terminal page, including a thread that loads in full at exactly the cap. `notice` reports deleted/dead comments omitted during traversal and the next step: the cursor, or a larger `depth` or a comment id as `itemId`, naming by ID any omitted comment whose replies the depth limit cut
 - Comments and poll options whose fetch failed after retries are listed in `failedIds`, and `notice` names them with the retry; failed comments ride in `nextCursor`, so paging on retries them rather than skipping them. The root item is still returned, and a failure is never passed off as a `maxComments`/`depth` limit
 
 ---
 
 ### `hn_get_user` <sub>tool</sub>
 
-- `username` is case-sensitive and trimmed; `includeSubmissions` (default false) resolves recent submissions, with `submissionCount` (1–50, default 10) and `submissionOffset` paging through a long history
+- `username` is case-sensitive and trimmed; `includeSubmissions` (default false) resolves recent submissions, with `submissionCount` (default 10) and `submissionOffset` paging through a long history. One call resolves at most 50 submissions; a `submissionCount` up to 1,000 is served at 50, with a `notice` naming the next `submissionOffset`
 - Profile includes karma, creation date, and about text (HTML stripped); submissions filter out dead/deleted items
 - A comment submission carries its `parent` and a poll-option submission its `poll`, so either links back to what it answered
 - Enrichment echoes `submissionOffset` and the offset to send next, or a notice when the requested offset is past the end of the history
@@ -75,13 +75,18 @@ Feeds, threads, and profiles from the Hacker News Firebase API and Algolia Searc
 
 ### `hn_search_content` <sub>tool</sub>
 
-- Free-text `query` plus `tags` (`story`/`comment`/`poll`/`job`/`ask_hn`/`show_hn`/`front_page`), `author`, `storyId`, `dateRange`, and `minPoints` filters; `sort` by relevance or date; `count` (1–50, default 30) and `page` for pagination
+- Free-text `query` plus `tags` (`story`/`comment`/`poll`/`job`/`ask_hn`/`show_hn`/`front_page`), `author` (the exact, case-sensitive username), `storyId`, `dateRange`, and `minPoints` filters; `sort` by relevance or date; `count` (default 30) and `page` for pagination. One call serves at most 50 hits; a `count` up to 1,000 is served as the page of 50 starting at the requested page's first hit, with a `notice` naming the `count: 50` page to pass next; a non-zero `page` whose first hit begins no page of 50 fails with `count_page_unaligned`, naming a `count` and `page` that start there and, when that count is under 25, the page of 50 that holds that hit
+- `tags: "front_page"` is the front page right now (about 30 stories), never past front pages; for an earlier window, use `tags: "story"` with `dateRange` and `minPoints`
 - `query` is optional when a filter is set — list Ask HN, Show HN, polls, or jobs on their own, or pass a story's `storyId` with `tags: "comment"` to search within one thread. No query and no filter fails with `missing_query_or_filter`
+- To check whether a page was discussed, pass its URL alone as `query`: the leading `http://`, `https://`, or `www.` is dropped before searching, so submissions under either scheme, with or without `www.`, all match. The output `query` and the notice show what was searched
 - `dateRange` bounds take ISO 8601 (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or a date-time with optional offset), read as UTC and both exclusive; an empty or out-of-order range fails with `invalid_date_range`
 - `minPoints` applies to stories and polls — comments and jobs carry no points, so pairing it with `tags: "comment"` or `"job"` fails with `min_points_unscored_type`
 - `view: "compact"` drops the two body-text fields (`text`, `highlights.text`), which otherwise repeat a long comment twice per hit — pass a hit id to `hn_get_thread` to read the body
+- Each hit carries its `type` (`story`, `comment`, `poll`, `pollopt`, `job`) when Algolia records one. Untagged searches also return poll options, which carry only an id, author, vote count, and date — `hn_get_thread` reads an option's text and poll. A poll hit has no `storyId`; its own `id` is the discussion root
+- Job descriptions come back as `text`, though keywords don't search them
 - Highlight metadata (`highlights.title`, `highlights.text`, `matchedWords`) shows which terms matched and where
-- Enrichment reports `totalHits`, `page`, and the actual reachable `totalPages` — not derived from `totalHits`, since broad queries report far more hits than Algolia will serve. While more pages remain, `truncated` is set and `notice` names the next `page`; a page past the end gets a notice naming the last valid page (or `page: 0` past Algolia's 1,000-hit ceiling)
+- Enrichment echoes the applied `criteria` — each filter set (`author` trimmed, `dateRange` as the exclusive UTC bounds applied, to the second), plus `sort`, `count`, and `view` with defaults filled — so a saved result says what it answers
+- Enrichment reports `totalHits`, `page`, and the actual reachable `totalPages` — not derived from `totalHits`, since broad queries report far more hits than Algolia will serve. `totalHitsExact: false` marks `totalHits` as an estimate, and `reachableHits: 1000` marks a search that matches more than Algolia's 1,000-hit ceiling; the last page of such a search gets a notice naming the ceiling and narrower `dateRange` windows to reach the rest. While more pages remain, `truncated` is set and `notice` names the next `page`; a page past the end gets a notice naming the last valid page (or `page: 0` past the ceiling)
 
 ## Features
 
@@ -99,7 +104,7 @@ Agent-friendly output:
 
 - Graceful partial failure — an item whose fetch fails after retries is reported by ID in `failedIds`, apart from deleted, dead, or nonexistent items, rather than silently shrinking the result; `hn_get_thread` also counts the deleted and dead comments it drops, and a rate-limited item stops the batch instead of sending every remaining item through its own retry ladder
 - Discriminated output contracts — typed error reasons (`item_not_found`, `upstream_rate_limited`, `upstream_html`, …) with per-reason recovery text (a rate limit passes on the upstream's `Retry-After` as `retryAfter`), and a `depth`/`parentId` pair on every comment so callers reconstruct the tree without guessing nesting
-- Pagination provenance — every paged listing echoes the offset it used (`offset`, `submissionOffset`, `page`) plus the exact next-offset value in `notice`, and `hn_get_thread` returns a self-contained `nextCursor`, so an agent can resume without recomputing state
+- Pagination provenance — every paged listing echoes the offset it used (`offset`, `submissionOffset`, `page`) plus the exact next-offset value in `notice`, `hn_search_content` also echoes the `criteria` it searched with, and `hn_get_thread` returns a self-contained `nextCursor`, so an agent can resume without recomputing state
 - Response shaping — HTML stripping, URL normalization, and domain extraction remove upstream markup noise; `hn_search_content`'s `view: "compact"` drops the two body-text fields that otherwise duplicate a hit's full text
 - Fenced upstream text — in `content[]`, every line of a body is block-quoted and titles are escaped only where they could break the surrounding Markdown, so a comment cannot pass for a server-authored line
 

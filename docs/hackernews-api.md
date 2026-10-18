@@ -50,7 +50,7 @@ Stories, comments, jobs, Ask HNs, and polls are all "items."
 | `score` | Story score or pollopt votes |
 | `title` | HTML title (stories, polls, jobs) |
 | `parts` | Related pollopt IDs in display order |
-| `descendants` | Total comment count (stories/polls) |
+| `descendants` | Count of live comments in the thread, including live replies below a dead or deleted comment; dead and deleted comments are not counted (stories/polls) |
 
 ### Examples
 
