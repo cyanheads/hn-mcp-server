@@ -11,6 +11,7 @@ import {
   quoteBody,
 } from '@/mcp-server/tools/markdown-escape.js';
 import { stripHtml } from '@/services/hn/hn-service.js';
+import { expectLinearCpu } from '../helpers/cpu-time.js';
 
 describe('escapeInline', () => {
   it.each([
@@ -162,45 +163,42 @@ describe('quoteBody', () => {
 });
 
 describe('markdown-escape — worst-case timing', () => {
-  /** Best of three wall-clock readings, in ms. */
-  function best(fn: () => void): number {
-    let min = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < 3; i++) {
-      const start = performance.now();
-      fn();
-      min = Math.min(min, performance.now() - start);
-    }
-    return min;
-  }
-
   const repeat = (unit: string) => (n: number) =>
     unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
 
-  it.each([
+  const run = (input: string) => {
+    escapeInline(input);
+    escapeQuoted(input);
+    escapeHighlight(input);
+    quoteBody(input, '  ');
+  };
+
+  /** One call's CPU ceiling: 10 ms plus 1 ms per 1,000 characters. */
+  const maxMs = (chars: number) => 10 + chars / 1_000;
+
+  /** A third entry shortens the span for that shape; the others run the full 5k → 320k. */
+  it.each<[string, (n: number) => string, number?]>([
     ['a run of "\\"', repeat('\\')],
-    ['a run of "*"', repeat('*')],
+    ['a run of "*"', repeat('*'), 40_000],
     ['a run of "<"', repeat('<')],
     ['repeated "](" ', repeat(']](')],
     ['repeated "<em>" with no closer', repeat('<em>')],
     ['a run of line breaks', repeat('\r\n\n\r')],
     ['a run of "&#"', repeat('&#')],
-    ['a run of "> " with no "["', repeat('> ')],
+    ['a run of "> " with no "["', repeat('> '), 80_000],
     ['a run of "[" with no "]"', repeat('[')],
-    ['nested list and quote markers', repeat('>- 1. ')],
-    ['nested markers separated by tabs', repeat('-\t>\t1)\t')],
+    ['nested list and quote markers', repeat('>- 1. '), 80_000],
+    ['nested markers separated by tabs', repeat('-\t>\t1)\t'), 80_000],
     ['a run of tabs and spaces', repeat(' \t')],
     ['a leading "[" then a long line with no "]"', (n: number) => `[${'x'.repeat(n - 1)}`],
-  ])('stays linear on %s', (_label, make) => {
-    const run = (input: string) => {
-      escapeInline(input);
-      escapeQuoted(input);
-      escapeHighlight(input);
-      quoteBody(input, '  ');
-    };
-    const inputs = [5_000, 20_000, 80_000].map(make);
-    for (const input of inputs) run(input);
-    const [t5k, , t80k] = inputs.map((input) => best(() => run(input))) as [number, number, number];
-    expect(t80k / Math.max(t5k, 0.05)).toBeLessThan(64);
-    expect(t80k).toBeLessThan(250);
-  });
+    ['one long line ending in a break', (n: number) => `${repeat('§1 x')(n)}\ny`],
+    ['line breaks throughout', repeat('  \r\n')],
+    ['a run of digits', repeat('1')],
+  ])(
+    'stays linear on %s',
+    (_label, make, to) => {
+      expectLinearCpu({ make, run, maxMs, ...(to && { to }) });
+    },
+    120_000,
+  );
 });

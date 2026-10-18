@@ -3,10 +3,15 @@
  * @module config/server-config.test
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 describe('getServerConfig', () => {
   const originalEnv = process.env;
+
+  /** The first import transforms the module graph; pay it once, outside each test's timeout. */
+  beforeAll(async () => {
+    await import('@/config/server-config.js');
+  }, 60_000);
 
   beforeEach(() => {
     vi.resetModules();
