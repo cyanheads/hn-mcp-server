@@ -1,0 +1,27 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "hn-mcp-server",
+  "version": "0.5.22",
+  "description": "Browse Hacker News feeds, threads, and user profiles with full-text search via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/hn-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/hn-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "hacker-news",
+    "hn",
+    "firebase",
+    "algolia"
+  ]
+}
