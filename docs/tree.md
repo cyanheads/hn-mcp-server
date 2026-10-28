@@ -1,6 +1,6 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-10-18 21:44:00
+Generated on: 2026-10-28 14:46:05
 
 ```text
 hn-mcp-server/
@@ -42,6 +42,8 @@ hn-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -141,6 +143,9 @@ hn-mcp-server/
 │   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
+├── skills/
+│   └── hn-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -152,6 +157,7 @@ hn-mcp-server/
 │   │       │   ├── get-user.tool.ts
 │   │       │   └── search-content.tool.ts
 │   │       ├── markdown-escape.ts
+│   │       ├── response-budget.ts
 │   │       ├── served-at-cap.ts
 │   │       └── thread-cursor.ts
 │   ├── services/
@@ -167,6 +173,8 @@ hn-mcp-server/
 │   │   ├── cpu-time.ts
 │   │   ├── hn-api-stub.test.ts
 │   │   └── hn-api-stub.ts
+│   ├── scripts/
+│   │   └── bundle-agent-docs.test.ts
 │   ├── services/
 │   │   └── hn/
 │   │       └── hn-service.test.ts
@@ -175,6 +183,7 @@ hn-mcp-server/
 │       ├── get-thread.tool.test.ts
 │       ├── get-user.tool.test.ts
 │       ├── markdown-escape.test.ts
+│       ├── response-budget.test.ts
 │       ├── search-content.tool.test.ts
 │       ├── thread-cursor.test.ts
 │       └── upstream-text-rendering.test.ts
@@ -193,7 +202,9 @@ hn-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json
