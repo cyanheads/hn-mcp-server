@@ -11,6 +11,15 @@ import {
   escapeQuoted,
   quoteBody,
 } from '@/mcp-server/tools/markdown-escape.js';
+import {
+  byteLength,
+  cutPointer,
+  cutToBytes,
+  fitsBudget,
+  largestFittingLimit,
+  measureResponse,
+  RESPONSE_BUDGET_TEXT,
+} from '@/mcp-server/tools/response-budget.js';
 import { servedAtCap } from '@/mcp-server/tools/served-at-cap.js';
 import {
   dateBoundToEpochMs,
@@ -211,6 +220,8 @@ function appliedFilters(
 /** What the search notice is composed from: the inputs as searched, and the page Algolia returned. */
 export interface SearchNoticeFacts {
   author?: string | undefined;
+  /** How a full page over the response budget was fitted to it; absent for a page that fit. */
+  budget?: SearchBudget | undefined;
   count: number;
   dateRange?: { start?: string | undefined; end?: string | undefined } | undefined;
   /** The URL prefix dropped from the caller's query before searching. */
@@ -327,17 +338,38 @@ function causeSentences(facts: SearchNoticeFacts): string[] {
   return sentences;
 }
 
+/** The two steps that fit a full page over the response budget to it. */
+interface SearchBudget {
+  /** Ids of the hits step 2 cut the text of, in page order; empty when step 1 sufficed. */
+  cutIds: readonly number[];
+  /** Step 1 dropped highlights.text from every hit. False when no hit carried one. */
+  highlightsTextOmitted: boolean;
+}
+
+/** The sentence disclosing how the page was fitted to the response budget. */
+function budgetSentence({ highlightsTextOmitted, cutIds }: SearchBudget): string {
+  const budget = `To stay within the ${RESPONSE_BUDGET_TEXT}-byte response budget,`;
+  const omitted = 'highlights.text is omitted from every hit';
+  if (cutIds.length === 0)
+    return `${budget} ${omitted}; matchedWords still lists the matched terms.`;
+  const cut = `the text of ${cutIds.length === 1 ? 'hit' : 'hits'} ${cutIds.join(', ')} is cut short`;
+  return `${budget} ${highlightsTextOmitted ? `${omitted} and ` : ''}${cut}; hn_get_thread with a cut hit's id returns its full text, and view: "compact" or a smaller count avoids the cut.`;
+}
+
 /**
  * Compose the one `notice` string every search writes. `notice` is last-wins,
  * so each source goes through here: the page-state sentence first, then the
- * cause sentences in input order — query, tags, author, storyId, count. None
- * replaces another. Undefined when nothing applies — the last page of an
- * uncapped, non-empty search.
+ * cause sentences in input order — query, tags, author, storyId, count — then
+ * the budget sentence for a page fitted to the response budget. None replaces
+ * another. Undefined when nothing applies — the last page of an uncapped,
+ * non-empty search that fit.
  */
 export function composeSearchNotice(facts: SearchNoticeFacts): string | undefined {
-  const sentences = [pageStateSentence(facts), ...causeSentences(facts)].filter(
-    (sentence) => sentence != null,
-  );
+  const sentences = [
+    pageStateSentence(facts),
+    ...causeSentences(facts),
+    facts.budget && budgetSentence(facts.budget),
+  ].filter((sentence) => sentence != null);
   return sentences.length > 0 ? sentences.join(' ') : undefined;
 }
 
@@ -354,19 +386,21 @@ function decodeHighlightTitle(title: string): string {
 }
 
 /**
- * Project Algolia's `_highlightResult` into a flat snippet object: the title
- * snippet, the body snippet (comment_text, else story_text — the order `text`
- * reads them in; a job's job_text is never highlighted), and the deduplicated
+ * Project Algolia's `_highlightResult` into a flat object: the title snippet,
+ * the body highlight — the whole matched body with markers, not a snippet
+ * (comment_text, else story_text — the order `text` reads them in; a job's
+ * job_text is never highlighted) — and the deduplicated
  * union of matched words across all surfaced fields. Returns undefined when
  * nothing matched.
  *
  * Titles are not HTML, though some arrive entity-encoded (`&lt;details&gt;`,
  * `&#34;`), so the title snippet is entity-decoded between its `<em>` markers
- * and never tag-stripped. The body snippet is stripped of its HTML with the
- * markers kept.
+ * and never tag-stripped. The body highlight, the whole matched body, is
+ * stripped of its HTML with the markers kept.
  *
- * `includeBody` is false under the compact projection, which drops the body
- * snippet — the field that duplicates a hit's full comment text.
+ * `includeBody` is false under the compact projection, and on a full page over
+ * the response budget, both of which drop the body highlight — the field that
+ * repeats a hit's full body text.
  */
 function extractHighlights(hit: AlgoliaHit, includeBody: boolean) {
   const h = hit._highlightResult;
@@ -393,6 +427,207 @@ function extractHighlights(hit: AlgoliaHit, includeBody: boolean) {
     ...(text != null && { text }),
     matchedWords,
   };
+}
+
+const searchHit = z
+  .object({
+    id: z.number().describe('HN item ID — use with hn_get_thread to read the discussion.'),
+    type: z
+      .enum(HIT_TYPES)
+      .optional()
+      .describe(
+        'Item type: story (Ask HN, Show HN, and front-page stories included), comment, poll, pollopt (one option of a poll), or job. Absent when the search record names no type.',
+      ),
+    title: z.string().optional().describe('Item title (present for stories, polls, and jobs).'),
+    url: z.string().optional().describe('External link URL.'),
+    domain: z
+      .string()
+      .optional()
+      .describe(
+        'Bare hostname derived from url (e.g. "github.com", with leading "www." stripped). Absent when url is missing or unparseable.',
+      ),
+    author: z.string().describe('Author username.'),
+    points: z.number().optional().describe('Score/upvotes.'),
+    numComments: z.number().optional().describe('Comment count.'),
+    createdAt: z.string().describe('Creation time (ISO 8601).'),
+    storyTitle: z.string().optional().describe('Parent story title (present for comment results).'),
+    storyId: z
+      .number()
+      .optional()
+      .describe(
+        "Parent story ID for comment hits; equals `id` for story hits. Absent for polls, poll options, and jobs — a poll's own `id` is its discussion root.",
+      ),
+    text: z
+      .string()
+      .optional()
+      .describe(
+        `Body text, HTML stripped: a comment's text, a text post's body, or a job's description. A job description is returned but not keyword-searched or highlighted. Cut short when the page would otherwise exceed the ${RESPONSE_BUDGET_TEXT}-byte response budget, with textTruncated set. Absent when the hit has no body, and always absent under view "compact" — call hn_get_thread with this id to read it.`,
+      ),
+    textTruncated: z
+      .boolean()
+      .optional()
+      .describe(
+        `True when text is a prefix of the body, cut short to keep the page within the ${RESPONSE_BUDGET_TEXT}-byte response budget — hn_get_thread with this id returns it whole. Absent when text is whole.`,
+      ),
+    highlights: z
+      .object({
+        title: z
+          .string()
+          .optional()
+          .describe(
+            'Title snippet with matched terms wrapped in `<em>…</em>`. Titles are not HTML, though some arrive entity-encoded; entities are decoded and no tags are stripped, so a literal `<em>` in the title is indistinguishable from a marker. Absent when the title did not match.',
+          ),
+        text: z
+          .string()
+          .optional()
+          .describe(
+            'The matched body in full, not a snippet (comment_text or story_text), HTML stripped, with matched terms wrapped in `<em>…</em>` — the same text as `text` plus its markers. A literal `<em>` typed into the body is indistinguishable from a marker. Absent when the body did not match, when highlightsTextOmitted is true, and always under view "compact" — matchedWords still lists what matched.',
+          ),
+        matchedWords: z
+          .array(z.string())
+          .describe(
+            'Deduplicated union of matched terms across all searchable fields (title, url, author, comment_text, story_text, story_title).',
+          ),
+      })
+      .optional()
+      .describe(
+        'Algolia per-field highlight metadata showing which terms matched and where. Absent when no fields produced a match.',
+      ),
+  })
+  .describe('A single Algolia search hit (story, comment, poll, poll option, or job).');
+
+type SearchHit = z.infer<typeof searchHit>;
+
+/**
+ * Project an Algolia hit into a search hit. `text` carries its body; under
+ * `bodyHighlight` its highlights carry the body too — the matched body in full,
+ * with markers.
+ */
+function projectHit(hit: AlgoliaHit, text: boolean, bodyHighlight: boolean): SearchHit {
+  const rawText = text ? (hit.comment_text ?? hit.story_text ?? hit.job_text) : undefined;
+  const url = normalizeUrl(hit.url);
+  const domain = extractDomain(url);
+  const highlights = extractHighlights(hit, bodyHighlight);
+  const type = hitType(hit._tags);
+  return {
+    id: Number(hit.objectID),
+    ...(type && { type }),
+    title: hit.title != null ? decodeHtmlEntities(hit.title) : undefined,
+    url,
+    domain,
+    author: hit.author,
+    points: hit.points ?? undefined,
+    numComments: hit.num_comments ?? undefined,
+    createdAt: hit.created_at,
+    storyTitle: hit.story_title != null ? decodeHtmlEntities(hit.story_title) : undefined,
+    storyId: hit.story_id ?? undefined,
+    text: rawText ? stripHtml(rawText) || undefined : undefined,
+    ...(highlights && { highlights }),
+  };
+}
+
+const searchOutput = z.object({
+  hits: z.array(searchHit).describe('Search results ranked by sort order.'),
+  query: z
+    .string()
+    .optional()
+    .describe(
+      'The query that was searched — for a URL query, without its leading scheme and www. Absent for a filter-only search.',
+    ),
+});
+
+type SearchOutput = z.infer<typeof searchOutput>;
+
+const searchTrailer = {
+  criteria: { render: renderCriteria },
+};
+
+/**
+ * Render highlight metadata as a `> match — …` footer, surfacing each highlights
+ * field separately so structured consumers and the LLM both see what matched.
+ * The footer follows an unquoted blank line, which a quoted body never
+ * produces, so a body line reading `match — …` cannot pass for it. The
+ * matched body comes last and continues on quoted lines of its own.
+ */
+function renderHighlights(hl: NonNullable<SearchHit['highlights']>): string {
+  const parts: string[] = [];
+  if (hl.title) parts.push(`title: ${escapeHighlight(hl.title)}`);
+  if (hl.matchedWords.length) parts.push(`terms: ${hl.matchedWords.join(', ')}`);
+  if (hl.text) parts.push(`body: ${hl.text}`);
+  return parts.length ? `\n\n${quoteBody(`match — ${parts.join(' | ')}`)}` : '';
+}
+
+/** A hit's quoted body, and after a cut body the unquoted pointer to the whole text, a blank line apart. */
+function renderBody(h: SearchHit): string {
+  const text = h.text ? `\n${quoteBody(h.text)}` : '';
+  return h.textTruncated ? `${text}\n\n${cutPointer(h.id)}` : text;
+}
+
+function formatSearch(result: SearchOutput) {
+  if (result.hits.length === 0) {
+    return [
+      {
+        type: 'text' as const,
+        text:
+          result.query != null ? `"${escapeQuoted(result.query)}" — no results.` : 'No results.',
+      },
+    ];
+  }
+
+  const lines = result.hits.map((h) => {
+    const typeToken = h.type ? `type:${h.type}` : null;
+    const hlLine = h.highlights ? renderHighlights(h.highlights) : '';
+    if (h.type === 'pollopt') {
+      // A poll option's search record carries no text and no poll; hn_get_thread has both.
+      const meta = [
+        `id:${h.id}`,
+        typeToken,
+        h.author,
+        h.points != null ? `${h.points} pts` : null,
+        h.createdAt,
+      ]
+        .filter(Boolean)
+        .join(' | ');
+      return `### Poll option by ${h.author}\n${meta}\nOption text and its poll: hn_get_thread with itemId ${h.id}${hlLine}`;
+    }
+    if (h.title) {
+      // Story result — Algolia returns storyId === id for stories, so suppress the parent ref unless it actually differs or a parent title is set.
+      const parentRef =
+        (h.storyId != null && h.storyId !== h.id) || h.storyTitle
+          ? ` | story:"${escapeQuoted(h.storyTitle ?? '?')}"#${h.storyId ?? '?'}`
+          : '';
+      const meta = [
+        `id:${h.id}`,
+        typeToken,
+        h.author,
+        h.points != null ? `${h.points} pts` : null,
+        h.numComments != null ? `${h.numComments} comments` : null,
+        h.createdAt,
+      ]
+        .filter(Boolean)
+        .join(' | ');
+      const domain = h.domain ? ` (${h.domain})` : '';
+      const url = h.url ? `\n${h.url}` : '';
+      return `### ${escapeInline(h.title)}${domain}\n${meta}${parentRef}${url}${renderBody(h)}${hlLine}`;
+    }
+    // Comment result — parent context in heading.
+    const meta = [
+      `id:${h.id}`,
+      typeToken,
+      h.author,
+      h.points != null ? `${h.points} pts` : null,
+      h.createdAt,
+    ]
+      .filter(Boolean)
+      .join(' | ');
+    return `### Comment on "${escapeQuoted(h.storyTitle ?? 'unknown')}" (story id:${h.storyId ?? '?'})\n${meta}${renderBody(h)}${hlLine}`;
+  });
+
+  const header =
+    result.query != null
+      ? `## "${escapeQuoted(result.query)}" — search results`
+      : '## Search results (filters only)';
+  return [{ type: 'text' as const, text: `${header}\n\n${lines.join('\n\n')}` }];
 }
 
 export const searchHn = tool('hn_search_content', {
@@ -483,7 +718,7 @@ export const searchHn = tool('hn_search_content', {
       )
       .optional()
       .describe(
-        'Search terms. Supports simple keywords — Algolia handles stemming and relevance, and a hit must contain every term. Trimmed before searching; blank or whitespace-only input is rejected. To find discussions of a page, pass its URL alone: a query with no spaces that starts with http://, https://, or www. is searched without that prefix, so submissions under either scheme, with or without www., all match. Omit for a filter-only search, which needs at least one of tags, author, storyId, minPoints, or a dateRange bound.',
+        'Search terms. Supports simple keywords — Algolia handles stemming and relevance, and a hit must contain every term. Matching is typo-tolerant and the last term also matches as a prefix (zig matches Zigbee); wrap a term in double quotes to match it exactly ("zig"), or put - before one to exclude it ("zig" -devlog). Trimmed before searching; blank or whitespace-only input is rejected. To find discussions of a page, pass its URL alone: a query with no spaces that starts with http://, https://, or www. is searched without that prefix, so submissions under either scheme, with or without www., all match. Omit for a filter-only search, which needs at least one of tags, author, storyId, minPoints, or a dateRange bound.',
       ),
     tags: z
       .enum(SEARCH_TAGS)
@@ -551,87 +786,10 @@ export const searchHn = tool('hn_search_content', {
       .enum(['full', 'compact'])
       .default('full')
       .describe(
-        'How much of each hit to return. "full" includes every field. "compact" omits the two body-text fields — `text` and `highlights.text` — which together can repeat a long comment twice per hit; everything else (id, title, url, domain, author, points, comment count, timestamp, parent story, title highlight, matchedWords) is unchanged. Use "compact" to scan many results, then pass a hit id to hn_get_thread to read the body you skipped.',
+        `How much of each hit to return. "full" includes every field, within a ${RESPONSE_BUDGET_TEXT}-byte budget on each response surface: a page over it drops highlights.text from every hit (highlightsTextOmitted), and if still over, cuts the longest text bodies to one shared length (textTruncated) — every hit stays on the page. "compact" omits the two body-text fields — \`text\` and \`highlights.text\` — which together can repeat a long comment twice per hit; everything else (id, title, url, domain, author, points, comment count, timestamp, parent story, title highlight, matchedWords) is unchanged. Use "compact" to scan many results, then pass a hit id to hn_get_thread to read the body you skipped.`,
       ),
   }),
-  output: z.object({
-    hits: z
-      .array(
-        z
-          .object({
-            id: z.number().describe('HN item ID — use with hn_get_thread to read the discussion.'),
-            type: z
-              .enum(HIT_TYPES)
-              .optional()
-              .describe(
-                'Item type: story (Ask HN, Show HN, and front-page stories included), comment, poll, pollopt (one option of a poll), or job. Absent when the search record names no type.',
-              ),
-            title: z
-              .string()
-              .optional()
-              .describe('Item title (present for stories, polls, and jobs).'),
-            url: z.string().optional().describe('External link URL.'),
-            domain: z
-              .string()
-              .optional()
-              .describe(
-                'Bare hostname derived from url (e.g. "github.com", with leading "www." stripped). Absent when url is missing or unparseable.',
-              ),
-            author: z.string().describe('Author username.'),
-            points: z.number().optional().describe('Score/upvotes.'),
-            numComments: z.number().optional().describe('Comment count.'),
-            createdAt: z.string().describe('Creation time (ISO 8601).'),
-            storyTitle: z
-              .string()
-              .optional()
-              .describe('Parent story title (present for comment results).'),
-            storyId: z
-              .number()
-              .optional()
-              .describe(
-                "Parent story ID for comment hits; equals `id` for story hits. Absent for polls, poll options, and jobs — a poll's own `id` is its discussion root.",
-              ),
-            text: z
-              .string()
-              .optional()
-              .describe(
-                "Body text, HTML stripped: a comment's text, a text post's body, or a job's description. A job description is returned but not keyword-searched or highlighted. Absent when the hit has no body, and always absent under view \"compact\" — call hn_get_thread with this id to read it.",
-              ),
-            highlights: z
-              .object({
-                title: z
-                  .string()
-                  .optional()
-                  .describe(
-                    'Title snippet with matched terms wrapped in `<em>…</em>`. Titles are not HTML, though some arrive entity-encoded; entities are decoded and no tags are stripped, so a literal `<em>` in the title is indistinguishable from a marker. Absent when the title did not match.',
-                  ),
-                text: z
-                  .string()
-                  .optional()
-                  .describe(
-                    'Body snippet (comment_text or story_text), HTML stripped, with matched terms wrapped in `<em>…</em>`. A literal `<em>` typed into the body is indistinguishable from a marker. Absent when the body did not match, and always absent under view "compact" — matchedWords still lists what matched.',
-                  ),
-                matchedWords: z
-                  .array(z.string())
-                  .describe(
-                    'Deduplicated union of matched terms across all searchable fields (title, url, author, comment_text, story_text, story_title).',
-                  ),
-              })
-              .optional()
-              .describe(
-                'Algolia per-field highlight metadata showing which terms matched and where. Absent when no fields produced a match.',
-              ),
-          })
-          .describe('A single Algolia search hit (story, comment, poll, poll option, or job).'),
-      )
-      .describe('Search results ranked by sort order.'),
-    query: z
-      .string()
-      .optional()
-      .describe(
-        'The query that was searched — for a URL query, without its leading scheme and www. Absent for a filter-only search.',
-      ),
-  }),
+  output: searchOutput,
 
   enrichment: {
     criteria: searchCriteria,
@@ -675,16 +833,20 @@ export const searchHn = tool('hn_search_content', {
       .describe(
         `The count value served: as passed, or ${COUNT_CAP} when count was above that cap.`,
       ),
+    highlightsTextOmitted: z
+      .boolean()
+      .optional()
+      .describe(
+        `True when highlights.text was dropped from every hit to keep this view "full" page within the ${RESPONSE_BUDGET_TEXT}-byte response budget; highlights.title and matchedWords remain. Absent otherwise.`,
+      ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Agent guidance, one string. It opens with the page state: the next page to request while more pages remain, the 1,000-hit ceiling on the last page of a search that matches more, the last valid page when the requested page is past the end, or the filters to relax when a first page comes back empty. Notes on the inputs follow it. Absent when none applies.',
+        `Agent guidance, one string. It opens with the page state: the next page to request while more pages remain, the 1,000-hit ceiling on the last page of a search that matches more, the last valid page when the requested page is past the end, or the filters to relax when a first page comes back empty. Notes on the inputs follow it, then, on a view "full" page fitted to the ${RESPONSE_BUDGET_TEXT}-byte response budget, a sentence naming what was omitted and the ids of hits whose text was cut. Absent when none applies.`,
       ),
   },
-  enrichmentTrailer: {
-    criteria: { render: renderCriteria },
-  },
+  enrichmentTrailer: searchTrailer,
 
   async handler(input, ctx) {
     const { dateRange } = input;
@@ -737,31 +899,7 @@ export const searchHn = tool('hn_search_content', {
     const result = await hn.search(params, ctx);
 
     const includeBody = input.view === 'full';
-
-    const hits = result.hits.map((hit) => {
-      const rawText = includeBody
-        ? (hit.comment_text ?? hit.story_text ?? hit.job_text)
-        : undefined;
-      const url = normalizeUrl(hit.url);
-      const domain = extractDomain(url);
-      const highlights = extractHighlights(hit, includeBody);
-      const type = hitType(hit._tags);
-      return {
-        id: Number(hit.objectID),
-        ...(type && { type }),
-        title: hit.title != null ? decodeHtmlEntities(hit.title) : undefined,
-        url,
-        domain,
-        author: hit.author,
-        points: hit.points ?? undefined,
-        numComments: hit.num_comments ?? undefined,
-        createdAt: hit.created_at,
-        storyTitle: hit.story_title != null ? decodeHtmlEntities(hit.story_title) : undefined,
-        storyId: hit.story_id ?? undefined,
-        text: rawText ? stripHtml(rawText) || undefined : undefined,
-        ...(highlights && { highlights }),
-      };
-    });
+    const hits = result.hits.map((hit) => projectHit(hit, includeBody, includeBody));
 
     ctx.log.info('Search completed', {
       query: params.query,
@@ -777,7 +915,7 @@ export const searchHn = tool('hn_search_content', {
       ? undefined
       : (result.exhaustive?.nbHits ?? result.exhaustiveNbHits);
     const bounds = params.dateRange ? dateRangeToEpochSeconds(params.dateRange) : {};
-    ctx.enrich({
+    const pageFields = {
       criteria: {
         ...(params.tags != null && { tags: params.tags }),
         ...(params.author != null && { author: params.author }),
@@ -798,9 +936,9 @@ export const searchHn = tool('hn_search_content', {
       page,
       totalPages,
       ...(totalHits > HIT_CEILING && { reachableHits: HIT_CEILING }),
-    });
-    if (shown > 0 && page + 1 < totalPages) ctx.enrich.truncated({ shown, cap: params.count });
-    const notice = composeSearchNotice({
+    };
+    const morePages = shown > 0 && page + 1 < totalPages;
+    const noticeFacts: SearchNoticeFacts = {
       ...params,
       droppedPrefix: searched?.droppedPrefix,
       shown,
@@ -809,100 +947,70 @@ export const searchHn = tool('hn_search_content', {
       totalHitsExact,
       totalPages,
       overCap,
-    });
-    if (notice) ctx.enrich.notice(notice);
-
-    return {
-      hits,
-      ...(params.query != null && { query: params.query }),
     };
-  },
 
-  format: (result) => {
-    if (result.hits.length === 0) {
-      return [
-        {
-          type: 'text' as const,
-          text:
-            result.query != null ? `"${escapeQuoted(result.query)}" — no results.` : 'No results.',
+    /** The response serving `served`, with the notice and flag for how `budget` fitted it. */
+    const respond = (served: SearchHit[], budget?: SearchBudget) => ({
+      output: { hits: served, ...(params.query != null && { query: params.query }) },
+      notice: composeSearchNotice({ ...noticeFacts, budget }),
+      highlightsTextOmitted: budget?.highlightsTextOmitted === true,
+    });
+
+    /** Both surfaces of a response as the caller receives it, enrichment and trailer included. */
+    const measure = (response: ReturnType<typeof respond>) =>
+      measureResponse({
+        content: formatSearch(response.output),
+        result: response.output,
+        enrichment: {
+          ...pageFields,
+          ...(response.highlightsTextOmitted && { highlightsTextOmitted: true }),
+          ...(morePages && { truncated: true, shown, cap: params.count }),
+          ...(response.notice != null && { notice: response.notice }),
         },
-      ];
+        trailer: searchTrailer,
+      });
+
+    let response = respond(hits);
+    if (includeBody && !fitsBudget(measure(response))) {
+      /** Step 1: drop the body highlight, which repeats the matched body in full, from every hit. */
+      const highlightsTextOmitted = hits.some((hit) => hit.highlights?.text != null);
+      const lean = highlightsTextOmitted
+        ? result.hits.map((hit) => projectHit(hit, true, false))
+        : hits;
+      if (highlightsTextOmitted) response = respond(lean, { highlightsTextOmitted, cutIds: [] });
+      if (!highlightsTextOmitted || !fitsBudget(measure(response))) {
+        /** Step 2: cut every body longer than the largest limit they can share. */
+        const bodies = lean.map((hit) => ({ hit, bytes: hit.text ? byteLength(hit.text) : 0 }));
+        const cutAt = (limit: number) => {
+          const served = bodies.map(({ hit, bytes }) =>
+            hit.text && bytes > limit
+              ? { ...hit, text: cutToBytes(hit.text, limit), textTruncated: true }
+              : hit,
+          );
+          const cutIds = served.filter((hit) => hit.textTruncated).map((hit) => hit.id);
+          return respond(served, { highlightsTextOmitted, cutIds });
+        };
+        const limit = largestFittingLimit(
+          bodies.map((body) => body.bytes),
+          (limitBytes) => measure(cutAt(limitBytes)),
+        );
+        response = cutAt(limit);
+        ctx.log.info('Fitted search page to the response budget', {
+          limitBytes: limit,
+          cutIds: response.output.hits.filter((hit) => hit.textTruncated).map((hit) => hit.id),
+        });
+      }
     }
 
-    /**
-     * Render highlight metadata as a `> match — …` footer, surfacing each highlights
-     * field separately so structured consumers and the LLM both see what matched.
-     * The footer follows an unquoted blank line, which a quoted body never
-     * produces, so a body line reading `match — …` cannot pass for it. The body
-     * snippet comes last and continues on quoted lines of its own.
-     */
-    const renderHighlights = (hl: {
-      title?: string | undefined;
-      text?: string | undefined;
-      matchedWords: string[];
-    }) => {
-      const parts: string[] = [];
-      if (hl.title) parts.push(`title: ${escapeHighlight(hl.title)}`);
-      if (hl.matchedWords.length) parts.push(`terms: ${hl.matchedWords.join(', ')}`);
-      if (hl.text) parts.push(`body: ${hl.text}`);
-      return parts.length ? `\n\n${quoteBody(`match — ${parts.join(' | ')}`)}` : '';
-    };
-
-    const lines = result.hits.map((h) => {
-      const typeToken = h.type ? `type:${h.type}` : null;
-      const hlLine = h.highlights ? renderHighlights(h.highlights) : '';
-      if (h.type === 'pollopt') {
-        // A poll option's search record carries no text and no poll; hn_get_thread has both.
-        const meta = [
-          `id:${h.id}`,
-          typeToken,
-          h.author,
-          h.points != null ? `${h.points} pts` : null,
-          h.createdAt,
-        ]
-          .filter(Boolean)
-          .join(' | ');
-        return `### Poll option by ${h.author}\n${meta}\nOption text and its poll: hn_get_thread with itemId ${h.id}${hlLine}`;
-      }
-      if (h.title) {
-        // Story result — Algolia returns storyId === id for stories, so suppress the parent ref unless it actually differs or a parent title is set.
-        const parentRef =
-          (h.storyId != null && h.storyId !== h.id) || h.storyTitle
-            ? ` | story:"${escapeQuoted(h.storyTitle ?? '?')}"#${h.storyId ?? '?'}`
-            : '';
-        const meta = [
-          `id:${h.id}`,
-          typeToken,
-          h.author,
-          h.points != null ? `${h.points} pts` : null,
-          h.numComments != null ? `${h.numComments} comments` : null,
-          h.createdAt,
-        ]
-          .filter(Boolean)
-          .join(' | ');
-        const domain = h.domain ? ` (${h.domain})` : '';
-        const url = h.url ? `\n${h.url}` : '';
-        const text = h.text ? `\n${quoteBody(h.text)}` : '';
-        return `### ${escapeInline(h.title)}${domain}\n${meta}${parentRef}${url}${text}${hlLine}`;
-      }
-      // Comment result — parent context in heading.
-      const meta = [
-        `id:${h.id}`,
-        typeToken,
-        h.author,
-        h.points != null ? `${h.points} pts` : null,
-        h.createdAt,
-      ]
-        .filter(Boolean)
-        .join(' | ');
-      const text = h.text ? `\n${quoteBody(h.text)}` : '';
-      return `### Comment on "${escapeQuoted(h.storyTitle ?? 'unknown')}" (story id:${h.storyId ?? '?'})\n${meta}${text}${hlLine}`;
+    ctx.enrich({
+      ...pageFields,
+      ...(response.highlightsTextOmitted && { highlightsTextOmitted: true }),
     });
+    if (morePages) ctx.enrich.truncated({ shown, cap: params.count });
+    if (response.notice) ctx.enrich.notice(response.notice);
 
-    const header =
-      result.query != null
-        ? `## "${escapeQuoted(result.query)}" — search results`
-        : '## Search results (filters only)';
-    return [{ type: 'text' as const, text: `${header}\n\n${lines.join('\n\n')}` }];
+    return response.output;
   },
+
+  format: formatSearch,
 });

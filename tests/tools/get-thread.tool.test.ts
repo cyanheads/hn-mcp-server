@@ -27,7 +27,7 @@ vi.mock('@/services/hn/hn-service.js', async (importOriginal) => ({
 }));
 
 import { getThread } from '@/mcp-server/tools/definitions/get-thread.tool.js';
-import { encodeThreadCursor } from '@/mcp-server/tools/thread-cursor.js';
+import { decodeThreadCursor, encodeThreadCursor } from '@/mcp-server/tools/thread-cursor.js';
 import {
   getHnService,
   HnService,
@@ -2297,6 +2297,181 @@ describe('hn_get_thread — resumable traversal', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The response budget on both whole surfaces — trailer, cursor, and JSON included
+// ---------------------------------------------------------------------------
+
+describe('hn_get_thread — the response budget on both whole surfaces', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    (getHnService as Mock).mockReturnValue(new HnService(3));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  const BUDGET = 64_000;
+
+  /** Bytes of every content[] text block, and of the structuredContent JSON. */
+  function surfaces(result: ToolResult) {
+    const content = result.content.reduce(
+      (sum, block) => sum + (block.type === 'text' ? Buffer.byteLength(block.text) : 0),
+      0,
+    );
+    return { content, structured: Buffer.byteLength(JSON.stringify(result.structuredContent)) };
+  }
+
+  /**
+   * `n` ids from two ranges 40,000,000 apart, alternating, so each one packs
+   * into the cursor as a 4-byte varint delta; `offset` keeps sets disjoint.
+   */
+  const scattered = (n: number, offset = 0) =>
+    Array.from({ length: n }, (_, i) => (i % 2 === 0 ? 50_000_000 : 10_000_000) + offset + i);
+
+  const nulls = (ids: number[]) => Object.fromEntries(ids.map((id) => [id, null]));
+  /** Top-level comments with `text`, keeping the kids `kidsOf` gives them. */
+  const withText = (ids: number[], text: string, kidsOf: Record<number, number[]> = {}) =>
+    Object.fromEntries(ids.map((id) => [id, { ...comment(id, 1, kidsOf[id]), text }]));
+
+  /** Follow nextCursor to the last page, returning every page's result. */
+  async function pageThrough(input: Record<string, unknown>): Promise<ToolResult[]> {
+    const pages: ToolResult[] = [];
+    let cursor: string | undefined;
+    do {
+      const result = await callStubbed({ ...input, ...(cursor && { cursor }) });
+      pages.push(result);
+      cursor = okStructured(result).nextCursor as string | undefined;
+      expect(pages.length).toBeLessThan(40);
+    } while (cursor);
+    return pages;
+  }
+
+  it('holds a size-stopped page to the budget on content[], the trailer and the cursor it issues included', async () => {
+    const long = Array.from({ length: 13 }, (_, i) => 10 + i);
+    const unread = scattered(1_700);
+    serveItems({
+      ...storyTree({ 1: [...long, ...unread] }, withText(long, 'x'.repeat(5_000)), {
+        descendants: 1_713,
+      }),
+      ...nulls(unread),
+    });
+
+    const pages = await pageThrough({ itemId: 1, depth: 1, maxComments: 50 });
+    const first = okStructured(pages[0]!);
+
+    expect(first).toMatchObject({ truncated: true, truncationReason: 'size' });
+    expect((first.nextCursor as string).length).toBeGreaterThan(8_000);
+    expect(allText(pages[0]!)).toContain(`**nextCursor:** \`${first.nextCursor}\``);
+    for (const page of pages) {
+      expect(surfaces(page).content).toBeLessThanOrEqual(BUDGET);
+      expect(surfaces(page).structured).toBeLessThanOrEqual(BUDGET);
+    }
+    /** Cut only between comments: every comment whole, each exactly once, in order. */
+    const comments = pages.flatMap((p) => okStructured(p).comments as Array<{ text: string }>);
+    expect(comments.every((c) => c.text.length === 5_000)).toBe(true);
+    expect(pages.map(okStructured).flatMap(commentIds)).toEqual(long);
+  });
+
+  it('stops on structuredContent when its JSON outgrows the rendered text', async () => {
+    /** A double quote is one byte in content[] and two in the JSON. */
+    const ids = [10, 11, 12];
+    serveItems(storyTree({ 1: ids }, withText(ids, '"'.repeat(15_000)), { descendants: 3 }));
+
+    const result = await callStubbed({ itemId: 1, depth: 1, maxComments: 50 });
+    const sc = okStructured(result);
+
+    expect(commentIds(sc)).toEqual([10, 11]);
+    expect(sc).toMatchObject({ truncated: true, truncationReason: 'size', shown: 2 });
+    expect(surfaces(result).structured).toBeLessThanOrEqual(BUDGET);
+    expect(surfaces(result).content).toBeLessThan(BUDGET / 2);
+    expect(sc.notice).toBe(
+      'Stopped at the 64,000-byte response budget after 2 comments with 2/3 comments loaded. Pass nextCursor as cursor, with the same itemId, to continue.',
+    );
+
+    const next = okStructured(
+      await callStubbed({ itemId: 1, depth: 1, maxComments: 50, cursor: sc.nextCursor }),
+    );
+    expect(commentIds(next)).toEqual([12]);
+    expect(next).not.toHaveProperty('nextCursor');
+  });
+
+  it('drops a comment the cursor cannot fit beside, with the replies it queued and a deleted comment after it', async () => {
+    /**
+     * Five 14,000-byte top-level comments, each with 500 replies, and a deleted
+     * comment with two replies between the third and fourth. Four fit the page
+     * alone; with a cursor carrying their 2,000 queued replies they do not.
+     */
+    const top = [10, 11, 12, 13, 14];
+    const kidsOf: Record<number, number[]> = { 1: [10, 11, 12, 15, 13, 14], 15: [16, 17] };
+    for (const [k, id] of top.entries()) kidsOf[id] = scattered(500, k * 1_000);
+    serveItems(
+      storyTree(
+        kidsOf,
+        {
+          ...withText(top, 'x'.repeat(14_000), kidsOf),
+          15: { id: 15, type: 'comment', deleted: true, parent: 1, kids: [16, 17] },
+        },
+        { descendants: 2_507 },
+      ),
+    );
+
+    const pages = await pageThrough({ itemId: 1, depth: 2, maxComments: 200 });
+    const [first, second] = pages.map(okStructured);
+
+    expect(commentIds(first!)).toEqual([10, 11, 12]);
+    expect(first).toMatchObject({ truncationReason: 'size' });
+    expect(first!.notice).not.toMatch(/deleted/);
+    expect(commentIds(second!).slice(0, 2)).toEqual([13, 14]);
+    expect(second!.notice).toMatch(/^1 deleted, 0 dead — omitted from this view\./);
+    for (const page of pages) {
+      expect(surfaces(page).content).toBeLessThanOrEqual(BUDGET);
+      expect(surfaces(page).structured).toBeLessThanOrEqual(BUDGET);
+    }
+    /** Breadth-first, each live comment once: the top level, then replies in parent order. */
+    const replies = [10, 11, 12, 15, 13, 14].flatMap((id) => kidsOf[id] ?? []);
+    expect(pages.map(okStructured).flatMap(commentIds)).toEqual([...top, ...replies]);
+  });
+
+  it('still returns a first comment larger than the budget whole beside a large cursor', async () => {
+    const huge = 'y'.repeat(100_000);
+    const unread = scattered(1_700);
+    serveItems({
+      ...storyTree({ 1: [10, ...unread] }, withText([10], huge), { descendants: 1_701 }),
+      ...nulls(unread),
+    });
+
+    const sc = okStructured(await callStubbed({ itemId: 1, depth: 1 }));
+
+    expect(sc.comments).toEqual([expect.objectContaining({ id: 10, text: huge })]);
+    expect(sc).toMatchObject({ truncated: true, truncationReason: 'size' });
+  });
+
+  it('renders truncationReason and nextCursor in the trailer as code spans', async () => {
+    serveItems(storyTree({ 1: [10, 11, 12] }, {}, { descendants: 3 }));
+
+    const result = await callStubbed({ itemId: 1, depth: 1, maxComments: 2 });
+    const sc = okStructured(result);
+
+    expect(allText(result)).toContain('\n**truncationReason:** `count`\n');
+    expect(allText(result).endsWith(`\n**nextCursor:** \`${sc.nextCursor}\``)).toBe(true);
+  });
+
+  it('leaves a size-stopped page that fits on both surfaces as it was', async () => {
+    const ids = [10, 11, 12, 13, 14];
+    serveItems(storyTree({ 1: ids }, withText(ids, 'x'.repeat(20_000)), { descendants: 5 }));
+
+    const result = await callStubbed({ itemId: 1, depth: 1, maxComments: 50 });
+    const sc = okStructured(result);
+
+    expect(commentIds(sc)).toEqual([10, 11, 12]);
+    expect(sc).toMatchObject({ truncationReason: 'size', shown: 3, cap: 50, totalLoaded: 3 });
+    /** Byte counts of this page before the budget covered the whole surfaces. */
+    expect(surfaces(result)).toEqual({ content: 60_486, structured: 60_582 });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Replies below dead and deleted comments — omitted themselves, walked through
 // ---------------------------------------------------------------------------
 
@@ -3377,5 +3552,304 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
     expect(storyId.safeParse('50126253').success).toBe(false);
     expect(isOp.description).toMatch(/story/);
     expect(isOp.description).not.toMatch(/root item author/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The per-call time budget (#47) — the real HnService at its default
+// concurrency against a stubbed HN API, on the fake clock with jitter pinned
+// ---------------------------------------------------------------------------
+
+describe('hn_get_thread — the per-call time budget', () => {
+  const HUNG = stall(Number.POSITIVE_INFINITY);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    /** Backoff without jitter: one hung fetch's ladder is 4 × 10 s + 1 + 2 + 4 s = 47 s. */
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    (getHnService as Mock).mockReturnValue(new HnService(10));
+  });
+
+  afterEach(() => {
+    vi.mocked(Math.random).mockRestore();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  /** Run a call and note when it settled on the fake clock, relative to its start. */
+  async function timedCall(input: Record<string, unknown>) {
+    const startedAt = Date.now();
+    let settledAfter = Number.NaN;
+    const pending = runToolContract(getThread, input as never, {
+      context: { errors: getThread.errors },
+    }).then((result) => {
+      settledAfter = Date.now() - startedAt;
+      return result;
+    });
+    /** Far past any budget, so an unbounded call shows its real settle time. */
+    await vi.advanceTimersByTimeAsync(1_000_000);
+    return { result: await pending, settledAfter };
+  }
+
+  const frontierOf = (sc: Record<string, unknown>) => {
+    const cursor = decodeThreadCursor(sc.nextCursor as string, 10);
+    if (!cursor) throw new Error('Expected a cursor this tool issued');
+    return cursor.frontier;
+  };
+
+  /** Story 1 with `n` top-level comments 101…, each with one reply (id + 1000); `hung` ids never answer. */
+  function wideStory(n: number, hung: number[] = []) {
+    const kids = Array.from({ length: n }, (_, i) => 101 + i);
+    const items: Record<number, unknown> = {
+      1: { id: 1, type: 'story', by: 'op', title: 'S', descendants: n * 2, kids },
+    };
+    for (const id of kids) {
+      items[id] = hung.includes(id) ? HUNG : comment(id, 1, [id + 1000]);
+      items[id + 1000] = hung.includes(id + 1000) ? HUNG : comment(id + 1000, id);
+    }
+    return items;
+  }
+
+  const range = (from: number, to: number) =>
+    Array.from({ length: to - from + 1 }, (_, i) => from + i);
+
+  it('stops before a second batch it has under 10 s to run, leaving the frontier in nextCursor', async () => {
+    /** 103 hangs in the first batch (101–125), 128 in the second, which is never sent. */
+    const { requested } = serveItems(wideStory(30, [103, 128]));
+
+    const { result, settledAfter } = await timedCall({ itemId: 1, depth: 2 });
+    const sc = okStructured(result);
+
+    /** Unbounded, the hung 128 adds a second 47-second ladder: 94 s, past a 60 s client timeout. */
+    expect(settledAfter).toBe(47_000);
+    const loaded = range(101, 125).filter((id) => id !== 103);
+    expect(commentIds(sc)).toEqual(loaded);
+    expect(sc.failedIds).toEqual([103]);
+    expect(sc).toMatchObject({ truncated: true, truncationReason: 'time', totalLoaded: 24 });
+    expect(requested()).not.toContain('/item/126.json');
+    expect(frontierOf(sc)).toEqual([
+      { id: 103, level: 0, parentId: 1 },
+      ...range(126, 130).map((id) => ({ id, level: 0, parentId: 1 })),
+      ...loaded.map((id) => ({ id: id + 1000, level: 1, parentId: id })),
+    ]);
+    const notice =
+      "Could not fetch 1 comment (id 103); its replies were not reached either. nextCursor carries it, so continuing retries it; or pass an id as itemId to fetch that comment and its replies. Stopped early to stay within this call's 50-second time budget with 24/60 comments loaded. Pass nextCursor as cursor, with the same itemId, to continue.";
+    expect(sc.notice).toBe(notice);
+
+    const text = allText(result);
+    expect(text).toContain(notice);
+    expect(text).toContain('**Failed to load:** 103');
+  });
+
+  it('reads the rest of the thread exactly once when the cursor continues against a recovered API', async () => {
+    serveItems(wideStory(30, [103, 128]));
+    const { result } = await timedCall({ itemId: 1, depth: 2 });
+    const first = okStructured(result);
+
+    serveItems(wideStory(30));
+    const { result: nextResult, settledAfter } = await timedCall({
+      itemId: 1,
+      depth: 2,
+      cursor: first.nextCursor,
+    });
+    const next = okStructured(nextResult);
+
+    expect(settledAfter).toBe(0);
+    /** The failed 103 leads, then the rest of level 0, then every reply level 1 still owes. */
+    expect(commentIds(next).slice(0, 6)).toEqual([103, ...range(126, 130)]);
+    const all = [...commentIds(first), ...commentIds(next)];
+    expect(new Set(all).size).toBe(all.length);
+    expect([...all].sort((a, b) => a - b)).toEqual([...range(101, 130), ...range(1101, 1130)]);
+    expect(next).not.toHaveProperty('nextCursor');
+    expect(next).not.toHaveProperty('truncationReason');
+    expect(next).not.toHaveProperty('failedIds');
+  });
+
+  it('settles at the budget when every comment hangs, listing the cut ones in failedIds and the cursor', async () => {
+    const { requested } = serveItems(wideStory(30, range(101, 130)));
+
+    const { result, settledAfter } = await timedCall({ itemId: 1, depth: 2 });
+    const sc = okStructured(result);
+
+    /** Unbounded: three rounds of 10 hung fetches in batch one, then one in batch two — 188 s. */
+    expect(settledAfter).toBe(50_000);
+    expect(sc.comments).toEqual([]);
+    expect(sc.failedIds).toEqual(range(101, 125));
+    expect(sc).toMatchObject({ truncated: true, truncationReason: 'time', totalLoaded: 0 });
+    /** 101–110 ran full ladders, 111–120 started at 47 s and were cut, 121–125 never started. */
+    expect(requested().filter((p) => p === '/item/121.json')).toEqual([]);
+    expect(frontierOf(sc).map((entry) => entry.id)).toEqual(range(101, 130));
+  });
+
+  it('issues a cursor when the budget cuts the last batch, for a comment root whose lookup timed out', async () => {
+    /** Ancestor 10 hangs through the 20-second lookup slice; reply 30 hangs until the budget cuts it. */
+    serveItems({
+      20: { id: 20, type: 'comment', by: 'r', text: 'c20', parent: 10, kids: [30, 31] },
+      10: HUNG,
+      30: HUNG,
+      31: comment(31, 20),
+    });
+
+    const { result, settledAfter } = await timedCall({ itemId: 20, depth: 1 });
+    const sc = okStructured(result);
+
+    /** Unbounded: 20 s of lookup plus reply 30's 47-second ladder — 67 s. */
+    expect(settledAfter).toBe(50_000);
+    expect(commentIds(sc)).toEqual([31]);
+    expect(sc.failedIds).toEqual([30]);
+    expect(sc).toMatchObject({ truncated: true, truncationReason: 'time' });
+    expect(frontierOf(sc)).toEqual([{ id: 30, level: 0, parentId: 20 }]);
+    expect(sc.notice).toBe(
+      "Could not find the story this comment belongs to: the lookup ran out of time. storyId is absent and replies by the story's author are not marked isOp. Continuing with nextCursor retries the lookup. Could not fetch 1 comment (id 30); its replies were not reached either. nextCursor carries it, so continuing retries it; or pass an id as itemId to fetch that comment and its replies. Stopped early to stay within this call's 50-second time budget. Pass nextCursor as cursor, with the same itemId, to continue.",
+    );
+  });
+
+  it('fetches no comment when a hung poll option leaves under 10 s, keeping the whole seed in nextCursor', async () => {
+    const { requested } = serveItems({
+      1: {
+        id: 1,
+        type: 'poll',
+        by: 'op',
+        title: 'P',
+        descendants: 2,
+        parts: [2],
+        kids: [101, 102],
+      },
+      2: HUNG,
+      101: comment(101, 1),
+      102: comment(102, 1),
+    });
+
+    const { result, settledAfter } = await timedCall({ itemId: 1, depth: 1 });
+    const sc = okStructured(result);
+
+    expect(settledAfter).toBe(47_000);
+    expect(requested().filter((p) => p.startsWith('/item/10'))).toEqual([]);
+    expect(sc.comments).toEqual([]);
+    expect(sc.failedIds).toEqual([2]);
+    expect(sc).toMatchObject({ truncated: true, truncationReason: 'time' });
+    expect(frontierOf(sc)).toEqual([
+      { id: 101, level: 0, parentId: 1 },
+      { id: 102, level: 0, parentId: 1 },
+    ]);
+    expect(sc.notice).toBe(
+      "Could not fetch 1 poll option (id 2). Call again to retry. Stopped early to stay within this call's 50-second time budget with 0/2 comments loaded. Pass nextCursor as cursor, with the same itemId, to continue.",
+    );
+  });
+
+  /** A chain 101 → … → 106 below story 1, each comment answering 9 s after it is asked. */
+  const slowChain = (last: unknown = stall(9_000, comment(106, 105))) => ({
+    1: { id: 1, type: 'story', by: 'op', title: 'S', descendants: 6, kids: [101] },
+    101: stall(9_000, comment(101, 1, [102])),
+    102: stall(9_000, comment(102, 101, [103])),
+    103: stall(9_000, comment(103, 102, [104])),
+    104: stall(9_000, comment(104, 103, [105])),
+    105: stall(9_000, comment(105, 104, [106])),
+    106: last,
+  });
+
+  it.each([
+    ['time', 50, [106]],
+    ['count', 5, [106]],
+  ] as const)(
+    'reports %s when the page stops at maxComments %d with under 10 s left',
+    async (reason, maxComments, frontier) => {
+      /** Level 4 is sent at 36 s with 14 s left and answers at 45 s; level 5 would get 5 s. */
+      const { requested } = serveItems(slowChain());
+
+      const { result, settledAfter } = await timedCall({ itemId: 1, depth: 6, maxComments });
+      const sc = okStructured(result);
+
+      expect(settledAfter).toBe(45_000);
+      expect(requested()).not.toContain('/item/106.json');
+      expect(commentIds(sc)).toEqual(range(101, 105));
+      expect(sc).toMatchObject({ truncated: true, truncationReason: reason });
+      expect(frontierOf(sc).map((entry) => entry.id)).toEqual(frontier);
+    },
+  );
+
+  it('reports rate_limited with its wait when a Retry-After outlasts the budget left', async () => {
+    /** Level 4 (105) answers 429 when asked at 36 s, with 14 s of the budget left. */
+    const { requested } = serveItems({
+      ...slowChain(),
+      105: httpStatus(429, { 'Retry-After': '20' }),
+    });
+
+    const { result, settledAfter } = await timedCall({ itemId: 1, depth: 6 });
+    const sc = okStructured(result);
+
+    /** Unbounded, the 20-second wait is slept out three times before the ladder gives up: 96 s. */
+    expect(settledAfter).toBe(36_000);
+    expect(requested().filter((p) => p === '/item/105.json')).toHaveLength(1);
+    expect(commentIds(sc)).toEqual(range(101, 104));
+    expect(sc.failedIds).toEqual([105]);
+    expect(sc).toMatchObject({ truncated: true, truncationReason: 'rate_limited' });
+    expect(sc.notice).toMatch(/Wait 20 seconds, then pass nextCursor/);
+  });
+
+  it('reports rate_limited, not time, when a 429 lands in a batch the budget also cut', async () => {
+    /** Reply batch at 9 s: 201's 429 fails fast (Retry-After past the retry cap), 202 hangs until the budget cuts it. */
+    serveItems({
+      1: { id: 1, type: 'story', by: 'op', title: 'S', descendants: 3, kids: [101] },
+      101: stall(9_000, comment(101, 1, [201, 202])),
+      201: httpStatus(429, { 'Retry-After': '45' }),
+      202: HUNG,
+    });
+
+    const { result, settledAfter } = await timedCall({ itemId: 1, depth: 2 });
+    const sc = okStructured(result);
+
+    /** Unbounded, 202's ladder runs to 9 + 47 = 56 s. */
+    expect(settledAfter).toBe(50_000);
+    expect(commentIds(sc)).toEqual([101]);
+    expect(sc.failedIds).toEqual([201, 202]);
+    expect(sc).toMatchObject({ truncated: true, truncationReason: 'rate_limited' });
+    expect(sc.notice).toMatch(/Wait 45 seconds, then pass nextCursor/);
+    expect(frontierOf(sc).map((entry) => entry.id)).toEqual([201, 202]);
+  });
+
+  it('still fails a hung root at 47 s with Timeout — one ladder fits the budget', async () => {
+    serveItems({ ...wideStory(30), 1: HUNG });
+
+    const { result, settledAfter } = await timedCall({ itemId: 1, depth: 2 });
+
+    expect(settledAfter).toBe(47_000);
+    expect(wireError(result).code).toBe(JsonRpcErrorCode.Timeout);
+  });
+
+  it('propagates a cancellation that lands during a budget-bounded walk', async () => {
+    const controller = new AbortController();
+    /** The abort lands while hung comment 103's request is in flight. */
+    const { requested } = serveItems(wideStory(30, [103]), {
+      onRequest: (route) => {
+        if (route === '/item/103.json') controller.abort();
+      },
+    });
+    const ctx = createFrameworkMockContext({ errors: getThread.errors, signal: controller.signal });
+    const startedAt = Date.now();
+    let settledAfter = Number.NaN;
+
+    const pending = Promise.resolve(
+      getThread.handler(getThread.input.parse({ itemId: 1, depth: 2 }), ctx),
+    ).finally(() => {
+      settledAfter = Date.now() - startedAt;
+    });
+    const settled = expect(pending).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RequestCancelled,
+    });
+    await vi.advanceTimersByTimeAsync(1_000_000);
+    await settled;
+
+    expect(settledAfter).toBe(0);
+    expect(requested().filter((p) => p === '/item/103.json')).toHaveLength(1);
+    expect(requested()).not.toContain('/item/1101.json');
+  });
+
+  it('accepts time as a truncationReason and describes it', () => {
+    const reason = getThread.enrichment?.truncationReason;
+
+    expect(reason?.safeParse('time').success).toBe(true);
+    expect(reason?.description).toMatch(/time = /);
+    expect(getThread.enrichment?.failedIds?.description).toMatch(/time budget/);
   });
 });

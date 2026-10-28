@@ -35,7 +35,7 @@ vi.mock('@/services/hn/hn-service.js', async (importOriginal) => ({
 import { getStories } from '@/mcp-server/tools/definitions/get-stories.tool.js';
 import { getHnService, HnService, type ItemSlot } from '@/services/hn/hn-service.js';
 import type { HnItem } from '@/services/hn/types.js';
-import { httpStatus, rejectUnmockedFetch, stubHnApi } from '../helpers/hn-api-stub.js';
+import { httpStatus, rejectUnmockedFetch, stall, stubHnApi } from '../helpers/hn-api-stub.js';
 
 rejectUnmockedFetch();
 
@@ -180,12 +180,45 @@ describe('getStories', () => {
       const input = getStories.input.parse({ feed: 'new', count: 2, offset: 10 });
       const result = await getStories.handler(input, ctx);
 
-      expect(mockService.fetchItems).toHaveBeenCalledWith([11, 12], expect.anything());
+      expect(mockService.fetchItems).toHaveBeenCalledWith(
+        [11, 12],
+        expect.anything(),
+        expect.any(Number),
+      );
       expect(result.stories).toHaveLength(2);
 
       const enrichment = getEnrichment(ctx);
       expect(enrichment.offset).toBe(10);
       expect(enrichment.hasMore).toBe(true);
+    });
+
+    it('bounds the feed fetch and the item batch by one deadline, 50 s after the call starts', async () => {
+      vi.useFakeTimers();
+      try {
+        mockService.fetchFeed.mockResolvedValue([1, 2]);
+        mockService.fetchItems.mockResolvedValue(
+          slotsOf([makeItem({ id: 1 }), makeItem({ id: 2 })]),
+        );
+        const startedAt = Date.now();
+
+        await getStories.handler(
+          getStories.input.parse({ feed: 'top', count: 2 }),
+          createMockContext(),
+        );
+
+        expect(mockService.fetchFeed).toHaveBeenCalledWith(
+          'top',
+          expect.anything(),
+          startedAt + 50_000,
+        );
+        expect(mockService.fetchItems).toHaveBeenCalledWith(
+          [1, 2],
+          expect.anything(),
+          startedAt + 50_000,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('sets hasMore false when at end of feed', async () => {
@@ -718,7 +751,11 @@ describe('getStories — count above the per-call cap', () => {
     const sc = structured(result);
     const stories = sc.stories as { id: number }[];
 
-    expect(mockService.fetchItems).toHaveBeenCalledWith(feed500.slice(0, 100), expect.anything());
+    expect(mockService.fetchItems).toHaveBeenCalledWith(
+      feed500.slice(0, 100),
+      expect.anything(),
+      expect.any(Number),
+    );
     expect(stories.map((s) => s.id)).toEqual(feed500.slice(0, 100));
     expect(sc).toMatchObject({ hasMore: true, truncated: true, shown: 100, cap: 100 });
     expect(sc.notice).toBe(
@@ -760,7 +797,11 @@ describe('getStories — count above the per-call cap', () => {
     const result = await call({ feed: 'top', count: 150, offset: 450 });
     const sc = structured(result);
 
-    expect(mockService.fetchItems).toHaveBeenCalledWith(feed500.slice(450), expect.anything());
+    expect(mockService.fetchItems).toHaveBeenCalledWith(
+      feed500.slice(450),
+      expect.anything(),
+      expect.any(Number),
+    );
     expect((sc.stories as { id: number }[]).map((s) => s.id)).toEqual(feed500.slice(450));
     expect(sc.hasMore).toBe(false);
     expect(sc).not.toHaveProperty('truncated');
@@ -987,5 +1028,186 @@ describe('getStories — partial item failures', () => {
     expect(requested()).toEqual(['/topstories.json']);
     expect(sc).not.toHaveProperty('failedIds');
     expect(sc.notice).toMatch(/past the end/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The per-call time budget (#47) — the real HnService at its default
+// concurrency against a stubbed HN API, on the fake clock with jitter pinned
+// ---------------------------------------------------------------------------
+
+describe('getStories — the per-call time budget', () => {
+  const HUNG = stall(Number.POSITIVE_INFINITY);
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => 501 + i);
+
+  /** The top feed of `n` stories 501…, every id in `hung` never answering. */
+  function topFeed(n: number, hung: readonly number[] = []) {
+    return stubHnApi({
+      '/topstories.json': ids(n),
+      ...Object.fromEntries(
+        ids(n).map((id) => [
+          `/item/${id}.json`,
+          hung.includes(id) ? HUNG : { id, type: 'story', title: `T${id}`, by: `a${id}`, score: 1 },
+        ]),
+      ),
+    });
+  }
+
+  /** Run a call and note when it settled on the fake clock, relative to its start. */
+  async function timedCall(input: Record<string, unknown>) {
+    const startedAt = Date.now();
+    let settledAfter = Number.NaN;
+    const pending = runToolContract(getStories, input as never, {
+      context: { errors: getStories.errors },
+    }).then((result) => {
+      settledAfter = Date.now() - startedAt;
+      return result;
+    });
+    /** Far past any budget, so an unbounded call shows its real settle time. */
+    await vi.advanceTimersByTimeAsync(1_000_000);
+    return { result: await pending, settledAfter };
+  }
+
+  const storyIds = (sc: Record<string, unknown>) =>
+    (sc.stories as Array<{ id: number }>).map((s) => s.id);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    /** Backoff without jitter: one hung fetch's ladder is 4 × 10 s + 1 + 2 + 4 s = 47 s. */
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    vi.mocked(getHnService).mockReturnValue(new HnService(10));
+  });
+
+  afterEach(() => {
+    vi.mocked(Math.random).mockRestore();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('keeps one hung story of 30 as it was: 29 stories at 47 s, no budget named', async () => {
+    topFeed(30, [505]);
+
+    const { result, settledAfter } = await timedCall({ feed: 'top', count: 30 });
+    const sc = structured(result);
+
+    expect(settledAfter).toBe(47_000);
+    expect(storyIds(sc)).toEqual(ids(30).filter((id) => id !== 505));
+    expect(sc.failedIds).toEqual([505]);
+    expect(sc.notice).toBe(
+      'Could not fetch 1 of 30 items on this page (id 505). Retry with offset: 0, or pass an id as itemId to hn_get_thread to fetch that story alone.',
+    );
+  });
+
+  it.each([
+    [
+      [505],
+      "Could not fetch 1 of 30 items on this page (id 505). This call's 50-second time budget ran out before it loaded. Retry with offset: 0, or pass an id as itemId to hn_get_thread to fetch that story alone.",
+    ],
+    [
+      [505, 506],
+      "Could not fetch 2 of 30 items on this page (ids 505, 506). This call's 50-second time budget ran out before they loaded. Retry with offset: 0, or pass an id as itemId to hn_get_thread to fetch that story alone.",
+    ],
+  ])(
+    'bounds a slow feed and the items after it by one budget (hung %j), naming the budget',
+    async (hung, notice) => {
+      const { requested } = topFeed(30, hung);
+      const inner = globalThis.fetch;
+      let feedAttempts = 0;
+      /** The feed's first three attempts never answer; the fourth, sent at 37 s, does. */
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          if (String(input).endsWith('/topstories.json') && ++feedAttempts <= 3) {
+            return new Promise<Response>((_, reject) => {
+              init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+                once: true,
+              });
+            });
+          }
+          return inner(input, init);
+        }),
+      );
+
+      const { result, settledAfter } = await timedCall({ feed: 'top', count: 30 });
+      const sc = structured(result);
+
+      /** Unbounded: 37 s of feed, then 505's own 47-second ladder — 84 s. */
+      expect(settledAfter).toBe(50_000);
+      expect(feedAttempts).toBe(4);
+      expect(requested().filter((p) => p === '/item/505.json').length).toBeGreaterThan(0);
+      expect(storyIds(sc)).toEqual(ids(30).filter((id) => !hung.includes(id)));
+      expect(sc.failedIds).toEqual(hung);
+      expect(sc.notice).toBe(notice);
+      const text = contentText(result);
+      expect(text).toContain(notice);
+      expect(text).toContain(`**Failed to load:** ${hung.join(', ')}`);
+    },
+  );
+
+  it('names how many of the failures the budget cut when only some ran out of time', async () => {
+    /** 501–510 fill all ten workers for a full 47 s ladder; 511 starts at 47 s and is cut at 50 s. */
+    topFeed(100, ids(11));
+
+    const { result, settledAfter } = await timedCall({ feed: 'top', count: 100 });
+    const sc = structured(result);
+
+    /** Unbounded: two rounds of ladders — 94 s. */
+    expect(settledAfter).toBe(50_000);
+    expect(storyIds(sc)).toEqual(ids(100).slice(11));
+    expect(sc.failedIds).toEqual(ids(11));
+    expect(sc.notice).toBe(
+      "Could not fetch 11 of 100 items on this page (ids 501, 502, 503, 504, 505, 506, 507, 508, 509, 510, 511). This call's 50-second time budget ran out before 1 of them loaded. Retry with offset: 0, or pass an id as itemId to hn_get_thread to fetch that story alone.",
+    );
+  });
+
+  it('fails with Timeout at the budget when every story hangs, starting nothing past it', async () => {
+    const { requested } = topFeed(100, ids(100));
+
+    const { result, settledAfter } = await timedCall({ feed: 'top', count: 100 });
+    const error = (result.structuredContent as { error: { code: number } }).error;
+
+    /** Unbounded: ten rounds of ten 47-second ladders — 470 s. */
+    expect(settledAfter).toBe(50_000);
+    expect(result.isError).toBe(true);
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    /** 501–510 ran full ladders, 511–520 started at 47 s; 521 onward never started. */
+    expect(requested()).not.toContain('/item/521.json');
+  });
+
+  it('propagates a cancellation that lands while an item fetch is in flight', async () => {
+    const controller = new AbortController();
+    const { requested } = stubHnApi(
+      {
+        '/topstories.json': ids(3),
+        '/item/501.json': HUNG,
+        '/item/502.json': { id: 502, type: 'story' },
+        '/item/503.json': { id: 503, type: 'story' },
+      },
+      {
+        onRequest: (route) => {
+          if (route === '/item/501.json') controller.abort();
+        },
+      },
+    );
+    vi.mocked(getHnService).mockReturnValue(new HnService(1));
+    const ctx = createFrameworkMockContext({
+      errors: getStories.errors,
+      signal: controller.signal,
+    });
+
+    const pending = Promise.resolve(
+      getStories.handler(getStories.input.parse({ feed: 'top', count: 3 }), ctx),
+    );
+    const settled = expect(pending).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RequestCancelled,
+    });
+    await vi.advanceTimersByTimeAsync(1_000_000);
+    await settled;
+
+    expect(requested()).toEqual(['/topstories.json', '/item/501.json']);
+  });
+
+  it('describes failedIds as covering the time budget', () => {
+    expect(getStories.enrichment?.failedIds?.description).toMatch(/50-second time budget/);
   });
 });

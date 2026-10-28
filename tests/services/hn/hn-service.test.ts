@@ -15,6 +15,7 @@ import {
   extractDomain,
   HnService,
   type ItemSlot,
+  isDeadlineCut,
   normalizeUrl,
   settlePage,
   stripHtml,
@@ -833,6 +834,179 @@ describe('HnService.fetchItems against a stubbed HN API', () => {
       const { error } = slot as { error: McpError };
       expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
       expect(error.data).toMatchObject({ reason: 'upstream_unavailable', status: 503 });
+    });
+
+    it('starts no fetch past the deadline and fails every unstarted slot with a Timeout', async () => {
+      /** Concurrency 1: item 1 hangs until the deadline cuts it, so 2 and 3 never get a turn. */
+      const { requested } = stubHnApi({
+        '/item/1.json': stall(Number.POSITIVE_INFINITY),
+        '/item/2.json': { id: 2, type: 'story' },
+        '/item/3.json': { id: 3, type: 'story' },
+      });
+      const ctx = createMockContext();
+      const warnSpy = vi.spyOn(ctx.log, 'warning');
+      const startedAt = Date.now();
+      let settledAfter = Number.NaN;
+
+      const pending = new HnService(1)
+        .fetchItems([1, 2, 3], ctx, startedAt + 15_000)
+        .finally(() => {
+          settledAfter = Date.now() - startedAt;
+        });
+      await vi.advanceTimersByTimeAsync(120_000);
+      const slots = await pending;
+
+      expect(settledAfter).toBe(15_000);
+      /** Item 1's first attempt times out at 10 s; its retry is cut at 15 s. */
+      expect(requested()).toEqual(['/item/1.json', '/item/1.json']);
+      expect(slots.map((s) => [s.id, s.kind])).toEqual([
+        [1, 'failed'],
+        [2, 'failed'],
+        [3, 'failed'],
+      ]);
+      const unstarted = (slots[1] as { error: McpError }).error;
+      expect(unstarted).toBeInstanceOf(McpError);
+      expect(unstarted.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(unstarted.data).toMatchObject({ reason: 'deadline_exceeded' });
+      expect((slots[2] as { error: unknown }).error).toBe(unstarted);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('time budget'),
+        expect.objectContaining({ skipped: 2 }),
+      );
+    });
+
+    it('sends nothing when called past its deadline', async () => {
+      const { requested } = stubHnApi({
+        '/item/1.json': { id: 1, type: 'story' },
+        '/item/2.json': { id: 2, type: 'story' },
+      });
+
+      const slots = await new HnService(2).fetchItems([1, 2], createMockContext(), Date.now() - 1);
+
+      expect(requested()).toEqual([]);
+      expect(slots.map((s) => [s.id, s.kind])).toEqual([
+        [1, 'failed'],
+        [2, 'failed'],
+      ]);
+      expect((slots[0] as { error: McpError }).error.data).toMatchObject({
+        reason: 'deadline_exceeded',
+      });
+    });
+
+    it('reports a rate limit, not the deadline, for the slots a 429 left unstarted', async () => {
+      /**
+       * Concurrency 2: item 2's 429 fails fast at once (Retry-After past the retry
+       * cap) while item 1 hangs until the deadline cuts it, so item 3 is left
+       * unstarted by both.
+       */
+      const { requested } = stubHnApi({
+        '/item/1.json': stall(Number.POSITIVE_INFINITY),
+        '/item/2.json': httpStatus(429, { 'Retry-After': '120' }),
+        '/item/3.json': { id: 3, type: 'story' },
+      });
+
+      const pending = new HnService(2).fetchItems(
+        [1, 2, 3],
+        createMockContext(),
+        Date.now() + 15_000,
+      );
+      await vi.advanceTimersByTimeAsync(120_000);
+      const slots = (await pending) as Array<{ error: McpError }>;
+
+      expect(requested()).not.toContain('/item/3.json');
+      expect(slots[0]?.error.data).toMatchObject({ reason: 'retry_deadline_exceeded' });
+      expect(slots[2]?.error).toBe(slots[1]?.error);
+      expect(slots[2]?.error.data).toMatchObject({ reason: 'upstream_rate_limited' });
+    });
+
+    it.each([
+      [
+        'fetchFeed',
+        '/topstories.json',
+        (svc: HnService, deadline: number) => svc.fetchFeed('top', createMockContext(), deadline),
+      ],
+      [
+        'fetchUser',
+        '/user/pg.json',
+        (svc: HnService, deadline: number) => svc.fetchUser('pg', createMockContext(), deadline),
+      ],
+    ])(
+      '%s ends a hung request at its deadline, retries and backoff included',
+      async (_name, route, run) => {
+        stubHnApi({ [route]: stall(Number.POSITIVE_INFINITY) });
+        const startedAt = Date.now();
+        let settledAfter = Number.NaN;
+
+        const pending = run(new HnService(1), startedAt + 15_000).finally(() => {
+          settledAfter = Date.now() - startedAt;
+        });
+        const settled = expect(pending).rejects.toMatchObject({
+          code: JsonRpcErrorCode.Timeout,
+          data: { reason: 'retry_deadline_exceeded' },
+        });
+        await vi.advanceTimersByTimeAsync(120_000);
+        await settled;
+
+        /** Unbounded, the hung request runs its four 10-second attempts and three backoffs. */
+        expect(settledAfter).toBe(15_000);
+      },
+    );
+  });
+
+  describe('isDeadlineCut', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    });
+
+    afterEach(() => {
+      vi.mocked(Math.random).mockRestore();
+    });
+
+    it('is true for a slot the deadline cut in flight and for one it left unstarted', async () => {
+      stubHnApi({
+        '/item/1.json': stall(Number.POSITIVE_INFINITY),
+        '/item/2.json': { id: 2, type: 'story' },
+      });
+
+      const pending = new HnService(1).fetchItems([1, 2], createMockContext(), Date.now() + 15_000);
+      await vi.advanceTimersByTimeAsync(120_000);
+      const [inFlight, unstarted] = (await pending) as Array<{ error: unknown }>;
+
+      expect(isDeadlineCut(inFlight?.error)).toBe(true);
+      expect(isDeadlineCut(unstarted?.error)).toBe(true);
+    });
+
+    it('is false for a hung fetch whose whole retry ladder fits before the deadline', async () => {
+      /** Jitter pinned: 4 × 10 s attempts plus 1 + 2 + 4 s of backoff = 47 s, inside 50 s. */
+      stubHnApi({ '/item/1.json': stall(Number.POSITIVE_INFINITY) });
+      const startedAt = Date.now();
+      let settledAfter = Number.NaN;
+
+      const pending = new HnService(1)
+        .fetchItems([1], createMockContext(), startedAt + 50_000)
+        .finally(() => {
+          settledAfter = Date.now() - startedAt;
+        });
+      await vi.advanceTimersByTimeAsync(120_000);
+      const [slot] = (await pending) as Array<{ kind: string; error: McpError }>;
+
+      expect(settledAfter).toBe(47_000);
+      expect(slot?.kind).toBe('failed');
+      expect(slot?.error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(isDeadlineCut(slot?.error)).toBe(false);
+    });
+
+    it.each([
+      [
+        'a rate limit',
+        new McpError(JsonRpcErrorCode.RateLimited, 'x', { reason: 'upstream_rate_limited' }),
+      ],
+      ['a Timeout with no reason', new McpError(JsonRpcErrorCode.Timeout, 'x')],
+      ['a plain Error', new Error('retry_deadline_exceeded')],
+      ['undefined', undefined],
+    ])('is false for %s', (_label, error) => {
+      expect(isDeadlineCut(error)).toBe(false);
     });
   });
 

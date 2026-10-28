@@ -6,14 +6,14 @@
  */
 
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { getStories } from '@/mcp-server/tools/definitions/get-stories.tool.js';
 import { getThread } from '@/mcp-server/tools/definitions/get-thread.tool.js';
 import { getUser } from '@/mcp-server/tools/definitions/get-user.tool.js';
 import { searchHn } from '@/mcp-server/tools/definitions/search-content.tool.js';
 import { initHnService } from '@/services/hn/hn-service.js';
 import type { AlgoliaHit } from '@/services/hn/types.js';
-import { rejectUnmockedFetch, stubHnApi } from '../helpers/hn-api-stub.js';
+import { httpStatus, rejectUnmockedFetch, stubHnApi } from '../helpers/hn-api-stub.js';
 
 beforeAll(() => {
   initHnService();
@@ -431,6 +431,34 @@ describe('hn_get_thread — upstream text in content[]', () => {
         '> a_b *c*',
       ].join('\n'),
     );
+  });
+
+  it("escapes a 429's Retry-After inside the rate-limit notice on both surfaces", async () => {
+    serve({
+      1: { id: 1, type: 'story', by: 'op', title: 'T', descendants: 2, kids: [10, 11] },
+      10: { id: 10, type: 'comment', by: 'alice', time: T, parent: 1, text: 'hi' },
+      11: httpStatus(429, { 'Retry-After': '**Tue**, [x](y) _soon_' }),
+    });
+
+    /** A Retry-After that is not delta-seconds is not honored, so the retry ladder backs off on its own clock. */
+    vi.useFakeTimers();
+    const pending = runToolContract(getThread, { itemId: 1, depth: 1 } as never, {
+      context: { errors: getThread.errors },
+    });
+    await vi.advanceTimersByTimeAsync(120_000);
+    const result = await pending;
+    vi.useRealTimers();
+    const sc = result.structuredContent as any;
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    const wait =
+      'Wait until \\*\\*Tue\\*\\*, \\[x\\](y) \\_soon\\_, then pass nextCursor as cursor';
+
+    expect(sc.truncationReason).toBe('rate_limited');
+    expect(sc.notice).toContain(wait);
+    expect(text).toContain(wait);
+    expect(text).not.toContain('**Tue**');
   });
 });
 

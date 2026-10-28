@@ -22,8 +22,9 @@ vi.mock('@/services/hn/hn-service.js', async (importOriginal) => ({
 }));
 
 import { getUser } from '@/mcp-server/tools/definitions/get-user.tool.js';
+import { quoteBody } from '@/mcp-server/tools/markdown-escape.js';
 import { getHnService, HnService, type ItemSlot, stripHtml } from '@/services/hn/hn-service.js';
-import { httpStatus, rejectUnmockedFetch, stubHnApi } from '../helpers/hn-api-stub.js';
+import { httpStatus, rejectUnmockedFetch, stall, stubHnApi } from '../helpers/hn-api-stub.js';
 
 rejectUnmockedFetch();
 
@@ -149,7 +150,11 @@ describe('hn_get_user handler', () => {
 
     const result = await getUser.handler(parse({ includeSubmissions: true }), ctx);
 
-    expect(mockFetchItems).toHaveBeenCalledWith([100, 101, 102], expect.anything());
+    expect(mockFetchItems).toHaveBeenCalledWith(
+      [100, 101, 102],
+      expect.anything(),
+      expect.any(Number),
+    );
     const subs = result.submissions;
     expect(subs).toHaveLength(2);
     expect(subs?.[0]).toMatchObject({ id: 100, type: 'story', title: 'My Post' });
@@ -163,7 +168,7 @@ describe('hn_get_user handler', () => {
 
     await getUser.handler(parse({ includeSubmissions: true, submissionCount: 1 }), ctx);
 
-    expect(mockFetchItems).toHaveBeenCalledWith([100], expect.anything());
+    expect(mockFetchItems).toHaveBeenCalledWith([100], expect.anything(), expect.any(Number));
   });
 
   it('filters out dead and deleted submissions', async () => {
@@ -246,7 +251,11 @@ describe('hn_get_user submission pagination', () => {
       ctx,
     );
 
-    expect(mockFetchItems).toHaveBeenCalledWith([201, 202, 203], expect.anything());
+    expect(mockFetchItems).toHaveBeenCalledWith(
+      [201, 202, 203],
+      expect.anything(),
+      expect.any(Number),
+    );
     expect(result.submissions?.map((s) => s.id)).toEqual([201, 202, 203]);
     expect(getEnrichment(ctx).submissionOffset).toBe(0);
   });
@@ -261,7 +270,11 @@ describe('hn_get_user submission pagination', () => {
       ctx,
     );
 
-    expect(mockFetchItems).toHaveBeenCalledWith([211, 212, 213], expect.anything());
+    expect(mockFetchItems).toHaveBeenCalledWith(
+      [211, 212, 213],
+      expect.anything(),
+      expect.any(Number),
+    );
     expect(result.submissions?.map((s) => s.id)).toEqual([211, 212, 213]);
 
     const enrichment = getEnrichment(ctx);
@@ -280,7 +293,7 @@ describe('hn_get_user submission pagination', () => {
       ctx,
     );
 
-    expect(mockFetchItems).toHaveBeenCalledWith([], expect.anything());
+    expect(mockFetchItems).toHaveBeenCalledWith([], expect.anything(), expect.any(Number));
     expect(result.submissions).toEqual([]);
 
     const enrichment = getEnrichment(ctx);
@@ -300,7 +313,11 @@ describe('hn_get_user submission pagination', () => {
       ctx,
     );
 
-    expect(mockFetchItems).toHaveBeenCalledWith([221, 222, 223, 224, 225], expect.anything());
+    expect(mockFetchItems).toHaveBeenCalledWith(
+      [221, 222, 223, 224, 225],
+      expect.anything(),
+      expect.any(Number),
+    );
     const enrichment = getEnrichment(ctx);
     expect(enrichment.submissionOffset).toBe(20);
     expect(enrichment.notice).toBeUndefined();
@@ -323,7 +340,11 @@ describe('hn_get_user submission pagination', () => {
       ctx,
     );
 
-    expect(mockFetchItems).toHaveBeenCalledWith([206, 207, 208], expect.anything());
+    expect(mockFetchItems).toHaveBeenCalledWith(
+      [206, 207, 208],
+      expect.anything(),
+      expect.any(Number),
+    );
     expect(result.submissions?.map((s) => s.id)).toEqual([206]);
 
     const enrichment = getEnrichment(ctx);
@@ -411,7 +432,11 @@ describe('hn_get_user — submissionCount above the per-call cap', () => {
     const result = await call({ submissionCount: 51 });
     const sc = structured(result);
 
-    expect(mockFetchItems).toHaveBeenCalledWith(history.slice(0, 50), expect.anything());
+    expect(mockFetchItems).toHaveBeenCalledWith(
+      history.slice(0, 50),
+      expect.anything(),
+      expect.any(Number),
+    );
     expect((sc.submissions as { id: number }[]).map((s) => s.id)).toEqual(history.slice(0, 50));
     expect(sc).toMatchObject({ submissionOffset: 0, truncated: true, shown: 50, cap: 50 });
     expect(sc.notice).toBe(
@@ -945,5 +970,500 @@ describe('hn_get_user — partial submission failures', () => {
     const text = contentText(result);
     expect(text).toMatch(/id:501 \| parent:400/);
     expect(text).toMatch(/id:502 \| poll:450/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The per-call time budget (#47) — the real HnService at its default
+// concurrency against a stubbed HN API, on the fake clock with jitter pinned
+// ---------------------------------------------------------------------------
+
+describe('hn_get_user — the per-call time budget', () => {
+  type ToolResult = Awaited<ReturnType<typeof runToolContract>>;
+
+  const HUNG = stall(Number.POSITIVE_INFINITY);
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => 501 + i);
+
+  /** User `pg` with `n` submissions 501…, every id in `hung` never answering. */
+  function history(n: number, hung: readonly number[] = []) {
+    return stubHnApi({
+      '/user/pg.json': { id: 'pg', karma: 1, created: 1600000000, submitted: ids(n) },
+      ...Object.fromEntries(
+        ids(n).map((id) => [
+          `/item/${id}.json`,
+          hung.includes(id) ? HUNG : { id, type: 'story', title: `Post ${id}`, by: 'pg' },
+        ]),
+      ),
+    });
+  }
+
+  /** Run a call and note when it settled on the fake clock, relative to its start. */
+  async function timedCall(input: Record<string, unknown>) {
+    const startedAt = Date.now();
+    let settledAfter = Number.NaN;
+    const pending = runToolContract(
+      getUser,
+      { username: 'pg', includeSubmissions: true, ...input } as never,
+      { context: { errors: getUser.errors } },
+    ).then((result) => {
+      settledAfter = Date.now() - startedAt;
+      return result;
+    });
+    /** Far past any budget, so an unbounded call shows its real settle time. */
+    await vi.advanceTimersByTimeAsync(1_000_000);
+    return { result: await pending, settledAfter };
+  }
+
+  function structured(result: ToolResult): Record<string, unknown> {
+    expect(result.isError).toBeFalsy();
+    return result.structuredContent as Record<string, unknown>;
+  }
+
+  function contentText(result: ToolResult): string {
+    return result.content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+  }
+
+  const submissionIds = (sc: Record<string, unknown>) =>
+    (sc.submissions as Array<{ id: number }>).map((s) => s.id);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    /** Backoff without jitter: one hung fetch's ladder is 4 × 10 s + 1 + 2 + 4 s = 47 s. */
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    vi.mocked(getHnService).mockReturnValue(new HnService(10));
+  });
+
+  afterEach(() => {
+    vi.mocked(Math.random).mockRestore();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('keeps one hung submission of 30 as it was: 29 submissions at 47 s, no budget named', async () => {
+    history(30, [505]);
+
+    const { result, settledAfter } = await timedCall({ submissionCount: 30 });
+    const sc = structured(result);
+
+    expect(settledAfter).toBe(47_000);
+    expect(submissionIds(sc)).toEqual(ids(30).filter((id) => id !== 505));
+    expect(sc.failedIds).toEqual([505]);
+    expect(sc.notice).toBe(
+      'Could not fetch 1 of 30 submissions in this window (id 505). Retry with submissionOffset: 0, or pass an id as itemId to hn_get_thread to fetch that item alone.',
+    );
+  });
+
+  it('fails with Timeout at the budget when all 50 submissions hang, starting nothing past it', async () => {
+    const { requested } = history(50, ids(50));
+
+    const { result, settledAfter } = await timedCall({ submissionCount: 50 });
+    const error = (result.structuredContent as { error: { code: number } }).error;
+
+    /** Unbounded: five rounds of ten 47-second ladders — 235 s. */
+    expect(settledAfter).toBe(50_000);
+    expect(result.isError).toBe(true);
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    /** 501–510 ran full ladders, 511–520 started at 47 s; 521 onward never started. */
+    expect(requested()).toContain('/item/520.json');
+    expect(requested()).not.toContain('/item/521.json');
+  });
+
+  /**
+   * Over the installed stub: the user fetch's first three attempts never
+   * answer, and the fourth, sent at 37 s, does. Returns the attempt count.
+   */
+  function slowUserFetch(): () => number {
+    const inner = globalThis.fetch;
+    let userAttempts = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).endsWith('/user/pg.json') && ++userAttempts <= 3) {
+          return new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+          });
+        }
+        return inner(input, init);
+      }),
+    );
+    return () => userAttempts;
+  }
+
+  it('bounds a slow user fetch and the submissions after it by one budget, naming the budget', async () => {
+    history(30, [505]);
+    const userAttempts = slowUserFetch();
+
+    const { result, settledAfter } = await timedCall({ submissionCount: 30 });
+    const sc = structured(result);
+    const notice =
+      "Could not fetch 1 of 30 submissions in this window (id 505). This call's 50-second time budget ran out before it loaded. Retry with submissionOffset: 0, or pass an id as itemId to hn_get_thread to fetch that item alone.";
+
+    /** Unbounded: 37 s of user fetch, then 505's own 47-second ladder — 84 s. */
+    expect(settledAfter).toBe(50_000);
+    expect(userAttempts()).toBe(4);
+    expect(submissionIds(sc)).toEqual(ids(30).filter((id) => id !== 505));
+    expect(sc.failedIds).toEqual([505]);
+    expect(sc.notice).toBe(notice);
+    const text = contentText(result);
+    expect(text).toContain(notice);
+    expect(text).toContain('**Failed to load:** 505');
+  });
+
+  it('names how many of the failures the budget cut when only some ran out of time', async () => {
+    /** 501–510 fill all ten workers for a full 47 s ladder; 511 starts at 47 s and is cut at 50 s. */
+    history(50, ids(11));
+
+    const { result, settledAfter } = await timedCall({ submissionCount: 50 });
+    const sc = structured(result);
+
+    /** Unbounded: two rounds of ladders — 94 s. */
+    expect(settledAfter).toBe(50_000);
+    expect(submissionIds(sc)).toEqual(ids(50).slice(11));
+    expect(sc.failedIds).toEqual(ids(11));
+    expect(sc.notice).toBe(
+      "Could not fetch 11 of 50 submissions in this window (ids 501, 502, 503, 504, 505, 506, 507, 508, 509, 510, 511). This call's 50-second time budget ran out before 1 of them loaded. Retry with submissionOffset: 0, or pass an id as itemId to hn_get_thread to fetch that item alone.",
+    );
+  });
+
+  it('names the budget for every failure inside the paged notice when the budget cut them all', async () => {
+    history(60, [505, 506]);
+    slowUserFetch();
+
+    const { result, settledAfter } = await timedCall({ submissionCount: 20 });
+    const sc = structured(result);
+
+    /** Unbounded: 37 s of user fetch, then two parallel 47-second ladders — 84 s. */
+    expect(settledAfter).toBe(50_000);
+    expect(submissionIds(sc)).toEqual(ids(20).filter((id) => id !== 505 && id !== 506));
+    expect(sc.failedIds).toEqual([505, 506]);
+    expect(sc).toMatchObject({ truncated: true, shown: 18, cap: 20 });
+    expect(sc.notice).toBe(
+      "Showing 18 live items from positions 1–20 of 60 submissions. Could not fetch 2 of 20 submissions in this window (ids 505, 506). This call's 50-second time budget ran out before they loaded. Retry with submissionOffset: 0, or pass an id as itemId to hn_get_thread to fetch that item alone. Set submissionOffset to 20 for the next page.",
+    );
+  });
+
+  it('propagates a cancellation that lands while a submission fetch is in flight', async () => {
+    const controller = new AbortController();
+    const { requested } = stubHnApi(
+      {
+        '/user/pg.json': { id: 'pg', karma: 1, created: 1600000000, submitted: ids(3) },
+        '/item/501.json': HUNG,
+        '/item/502.json': { id: 502, type: 'story' },
+        '/item/503.json': { id: 503, type: 'story' },
+      },
+      {
+        onRequest: (route) => {
+          if (route === '/item/501.json') controller.abort();
+        },
+      },
+    );
+    vi.mocked(getHnService).mockReturnValue(new HnService(1));
+    const ctx = createMockContext({ errors: getUser.errors, signal: controller.signal });
+
+    const pending = Promise.resolve(
+      getUser.handler(parse({ username: 'pg', includeSubmissions: true }), ctx),
+    );
+    const settled = expect(pending).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RequestCancelled,
+    });
+    await vi.advanceTimersByTimeAsync(1_000_000);
+    await settled;
+
+    expect(requested()).toEqual(['/user/pg.json', '/item/501.json']);
+  });
+
+  it('propagates a cancellation that lands while the user fetch is in flight', async () => {
+    const controller = new AbortController();
+    const { requested } = stubHnApi(
+      { '/user/pg.json': HUNG },
+      {
+        onRequest: (route) => {
+          if (route === '/user/pg.json') controller.abort();
+        },
+      },
+    );
+    const ctx = createMockContext({ errors: getUser.errors, signal: controller.signal });
+
+    const pending = Promise.resolve(
+      getUser.handler(parse({ username: 'pg', includeSubmissions: true }), ctx),
+    );
+    const settled = expect(pending).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RequestCancelled,
+    });
+    await vi.advanceTimersByTimeAsync(1_000_000);
+    await settled;
+
+    expect(requested()).toEqual(['/user/pg.json']);
+  });
+
+  it('describes failedIds as covering the time budget', () => {
+    expect(getUser.enrichment?.failedIds?.description).toMatch(/50-second time budget/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #49 — the 64,000-byte response budget
+// ---------------------------------------------------------------------------
+
+describe('hn_get_user — the 64,000-byte response budget', () => {
+  type ToolResult = Awaited<ReturnType<typeof runToolContract>>;
+  type WireSubmission = Record<string, any> & {
+    id: number;
+    text?: string;
+    textTruncated?: boolean;
+  };
+
+  const BUDGET_BYTES = 64_000;
+  const utf8 = new TextEncoder();
+  const bytes = (text: string) => utf8.encode(text).byteLength;
+
+  /** The line content[] puts after a cut body, outside its quote. */
+  const cutLine = (id: number) =>
+    `Text cut short to fit the response budget — hn_get_thread with itemId ${id} returns it whole.`;
+
+  /** The notice sentence for a page whose bodies `cutIds` were cut. */
+  const cutSentence = (cutIds: number[]) =>
+    `To stay within the 64,000-byte response budget, the text of ${cutIds.length === 1 ? 'submission' : 'submissions'} ${cutIds.join(', ')} is cut short; hn_get_thread with a cut submission's id returns its full text, and a smaller submissionCount cuts less.`;
+
+  const joined = new Date(1600000000 * 1000).toLocaleDateString('en-US', {
+    month: 'short',
+    year: 'numeric',
+  });
+
+  /** `n` UTF-16 units of `unit` repeated. */
+  const body = (n: number, unit = 'macro ') => unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
+
+  const comment = (id: number, text: string): HnItem => ({
+    id,
+    type: 'comment',
+    by: 'pg',
+    text,
+    parent: 9,
+    time: 1600000000,
+  });
+  const story = (id: number): HnItem => ({
+    id,
+    type: 'story',
+    by: 'pg',
+    title: `Post ${id}`,
+    score: 3,
+    time: 1600000000,
+  });
+
+  /** User `pg` with `submitted` as their history, and `slots` as the window's fetch result. */
+  function serve(submitted: number[], slots: ItemSlot[]) {
+    mockFetchUser.mockResolvedValue({ id: 'pg', karma: 1, created: 1600000000, submitted });
+    mockFetchItems.mockResolvedValue(slots);
+  }
+
+  function callUser(input: Record<string, unknown> = {}): Promise<ToolResult> {
+    return runToolContract(
+      getUser,
+      { username: 'pg', includeSubmissions: true, ...input } as never,
+      { context: { errors: getUser.errors } },
+    );
+  }
+
+  /** Both surfaces of an assembled result, sized as the caller receives them; `sc` is the wire JSON. */
+  function measure(result: ToolResult) {
+    expect(result.isError).toBeFalsy();
+    const sc = JSON.parse(JSON.stringify(result.structuredContent)) as Record<string, any> & {
+      submissions: WireSubmission[];
+    };
+    const blocks = result.content.filter(
+      (b): b is { type: 'text'; text: string } => b.type === 'text',
+    );
+    return {
+      sc,
+      text: blocks.map((b) => b.text).join(''),
+      contentBytes: blocks.reduce((sum, b) => sum + bytes(b.text), 0),
+      structuredBytes: bytes(JSON.stringify(result.structuredContent)),
+    };
+  }
+
+  it('leaves a page under budget as it was on both surfaces: whole bodies, no flag, no budget sentence', async () => {
+    const long = body(55_000);
+    serve([1, 2], slotsOf([comment(1, long), story(2)]));
+
+    const { sc, text, contentBytes, structuredBytes } = measure(await callUser());
+
+    expect(contentBytes).toBeGreaterThan(55_000);
+    expect(contentBytes).toBeLessThan(BUDGET_BYTES);
+    expect(structuredBytes).toBeLessThan(BUDGET_BYTES);
+    expect(sc).toStrictEqual({
+      user: { id: 'pg', karma: 1, created: 1600000000, totalSubmissions: 2 },
+      submissions: [
+        { id: 1, type: 'comment', parent: 9, text: long, time: 1600000000 },
+        { id: 2, type: 'story', title: 'Post 2', score: 3, time: 1600000000 },
+      ],
+      submissionOffset: 0,
+    });
+    expect(text).toBe(
+      [
+        '## pg',
+        `**Karma:** 1 | **Joined:** ${joined} (t:1600000000) | **Total submissions:** 2`,
+        '',
+        '### Submissions',
+        '- **[comment]** — id:1 | parent:9 | 2020-09-13 (t:1600000000)',
+        `  > ${long}`,
+        '',
+        '- **Post 2** — id:2 | story | 3 pts | 2020-09-13 (t:1600000000)',
+        '',
+        '**submissionOffset:** 0',
+      ].join('\n'),
+    );
+  });
+
+  it('cuts the longest bodies to one shared limit, the largest that fits, keeping every submission and the paging fields', async () => {
+    const a = body(40_000, 'lorem ipsum dolor\n\n');
+    const b = body(35_000, 'sit amet ');
+    const short = body(500);
+    serve(
+      Array.from({ length: 10 }, (_, i) => i + 1),
+      slotsOf([comment(1, a), story(2), comment(3, b), comment(4, short)]),
+    );
+
+    const { sc, text, contentBytes, structuredBytes } = measure(
+      await callUser({ submissionCount: 4 }),
+    );
+
+    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    /** One byte more for each cut body would not fit: the limit is the largest. */
+    expect(Math.max(contentBytes, structuredBytes)).toBeGreaterThan(BUDGET_BYTES - 64);
+
+    expect(sc.submissions.map((s) => s.id)).toStrictEqual([1, 2, 3, 4]);
+    expect(sc).toMatchObject({ submissionOffset: 0, truncated: true, shown: 4, cap: 4 });
+    const [cutA, post, cutB, whole] = sc.submissions;
+    expect(a.startsWith(cutA!.text!)).toBe(true);
+    expect(b.startsWith(cutB!.text!)).toBe(true);
+    expect(bytes(cutA!.text!)).toBeLessThan(bytes(b));
+    expect(bytes(cutA!.text!)).toBe(bytes(cutB!.text!));
+    expect(bytes(cutA!.text!)).toBeGreaterThan(bytes(short));
+    expect(cutA!.textTruncated).toBe(true);
+    expect(cutB!.textTruncated).toBe(true);
+    expect(whole!.text).toBe(short);
+    expect(whole).not.toHaveProperty('textTruncated');
+    expect(post).not.toHaveProperty('textTruncated');
+
+    expect(sc.notice).toBe(
+      `Showing 4 live items from positions 1–4 of 10 submissions. Set submissionOffset to 4 for the next page. ${cutSentence([1, 3])}`,
+    );
+
+    /** content[] carries the same cut prefix, quoted, then the pointer after a blank line, inside the list item. */
+    expect(text).toContain(
+      `\n${quoteBody(cutA!.text!, '  ')}\n\n  ${cutLine(1)}\n\n- **Post 2** — id:2 |`,
+    );
+    expect(text).toContain(
+      `\n${quoteBody(cutB!.text!, '  ')}\n\n  ${cutLine(3)}\n\n- **[comment]** — id:4 |`,
+    );
+    expect(text).toContain(`\n  > ${short}\n\n**submissionOffset:** 0`);
+    expect(text).not.toContain(cutLine(2));
+    expect(text).not.toContain(cutLine(4));
+    expect(text).toContain(`> ${sc.notice}`);
+  });
+
+  it('cuts a single submission larger than the budget to fit, the budget sentence the whole notice', async () => {
+    const huge = body(300_000);
+    serve([5], slotsOf([comment(5, huge)]));
+
+    const { sc, text, contentBytes, structuredBytes } = measure(await callUser());
+
+    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(Math.max(contentBytes, structuredBytes)).toBeGreaterThan(BUDGET_BYTES - 64);
+    expect(sc.submissions[0]!.textTruncated).toBe(true);
+    expect(huge.startsWith(sc.submissions[0]!.text!)).toBe(true);
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc.notice).toBe(cutSentence([5]));
+    expect(text).toContain(`\n\n  ${cutLine(5)}\n\n**submissionOffset:** 0`);
+  });
+
+  it('follows the failed-IDs sentence with the budget sentence, and fits with failedIds in the trailer', async () => {
+    serve(
+      [1, 2, 3],
+      [
+        { kind: 'item', id: 1, item: comment(1, body(100_000)) },
+        { kind: 'failed', id: 2, error: new Error('upstream failure') },
+        { kind: 'item', id: 3, item: story(3) },
+      ],
+    );
+
+    const { sc, text, contentBytes, structuredBytes } = measure(await callUser());
+
+    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(sc.submissions.map((s) => s.id)).toStrictEqual([1, 3]);
+    expect(sc.failedIds).toStrictEqual([2]);
+    expect(sc.notice).toBe(
+      `Could not fetch 1 of 3 submissions in this window (id 2). Retry with submissionOffset: 0, or pass an id as itemId to hn_get_thread to fetch that item alone. ${cutSentence([1])}`,
+    );
+    expect(text).toContain('**Failed to load:** 2');
+    expect(text).toContain(`\n\n  ${cutLine(1)}\n\n- **Post 3**`);
+  });
+
+  it('cuts on a code-point boundary, identically on both surfaces', async () => {
+    const emoji = '😀é'.repeat(30_000);
+    serve([6], slotsOf([comment(6, emoji)]));
+
+    const { sc, text, contentBytes, structuredBytes } = measure(await callUser());
+    const cut = sc.submissions[0]!.text!;
+
+    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(cut.length).toBeLessThan(emoji.length);
+    expect(emoji.startsWith(cut)).toBe(true);
+    expect(cut).not.toMatch(/[\uD800-\uDBFF]$/);
+    expect(text).toContain(`\n  > ${cut}\n\n  ${cutLine(6)}`);
+  });
+
+  it('keeps all 50 submissions of a capped page, cutting every body when all share one length', async () => {
+    const history = Array.from({ length: 60 }, (_, i) => i + 1);
+    serve(
+      history,
+      slotsOf(history.slice(0, 50).map((id) => comment(id, body(2_000, `${id} words `)))),
+    );
+
+    const { sc, contentBytes, structuredBytes } = measure(await callUser({ submissionCount: 51 }));
+
+    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(sc.submissions.map((s) => s.id)).toStrictEqual(history.slice(0, 50));
+    expect(sc.submissions.every((s) => s.textTruncated === true)).toBe(true);
+    expect(new Set(sc.submissions.map((s) => bytes(s.text!))).size).toBe(1);
+    expect(sc).toMatchObject({ truncated: true, shown: 50, cap: 50 });
+    expect(sc.notice).toBe(
+      `Showing 50 live items from positions 1–50 of 60 submissions. submissionCount 51 is above the per-call cap of 50, so this call served submissionCount: 50. Set submissionOffset to 50 for the next page. ${cutSentence(history.slice(0, 50))}`,
+    );
+  });
+
+  it('format() puts the pointer after a cut body even when the cut left no text', () => {
+    const blocks = getUser.format!({
+      user: { id: 'pg', karma: 1, created: 1600000000, totalSubmissions: 2 },
+      submissions: [
+        { id: 7, type: 'comment', text: '', textTruncated: true },
+        { id: 8, type: 'comment', text: 'whole' },
+      ],
+    } as never);
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain(`- **[comment]** — id:7\n\n  ${cutLine(7)}\n\n- **[comment]** — id:8`);
+  });
+
+  it('describes the cut on text, textTruncated, and notice', () => {
+    const output = z.toJSONSchema(getUser.output) as unknown as {
+      properties: {
+        submissions: { items: { properties: Record<string, { description?: string }> } };
+      };
+    };
+    const submission = output.properties.submissions.items.properties;
+    expect(submission.text?.description).toMatch(/64,000-byte response budget/);
+    expect(submission.textTruncated?.description).toMatch(/hn_get_thread with this id/);
+    expect(getUser.enrichment?.notice?.description).toMatch(/64,000-byte response budget/);
   });
 });

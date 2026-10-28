@@ -8,12 +8,14 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeInline, quoteBody } from '@/mcp-server/tools/markdown-escape.js';
 import { servedAtCap } from '@/mcp-server/tools/served-at-cap.js';
 import {
+  CALL_BUDGET_MS,
   decodeHtmlEntities,
   extractDomain,
   getHnService,
   normalizeUrl,
   settlePage,
   stripHtml,
+  timeBudgetCutSentence,
 } from '@/services/hn/hn-service.js';
 
 /** Most stories one call serves; a larger `count` is served at this cap. */
@@ -167,13 +169,13 @@ export const getStories = tool('hn_get_stories', {
       .array(z.number())
       .optional()
       .describe(
-        'IDs on this page whose fetch failed after retries. They are not deleted or missing and may load on a later call: retry the page with the same offset, or pass an ID to hn_get_thread to fetch that story alone. Absent when every item on the page loaded.',
+        `IDs on this page whose fetch failed after retries or ran past the call's ${CALL_BUDGET_MS / 1000}-second time budget. They are not deleted or missing and may load on a later call: retry the page with the same offset, or pass an ID to hn_get_thread to fetch that story alone. Absent when every item on the page loaded.`,
       ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Agent guidance: the offset to pass for the next page while more stories remain, the IDs that failed to load and how to retry them, or why a page came back empty — offset past the end of the feed, an empty feed, or every item on the page deleted or flagged — noting when count was served at its per-call cap. Absent on the last page of a non-empty result with no failed IDs.',
+        `Agent guidance: the offset to pass for the next page while more stories remain, the IDs that failed to load and how to retry them (naming the call's ${CALL_BUDGET_MS / 1000}-second time budget when it cut them), or why a page came back empty — offset past the end of the feed, an empty feed, or every item on the page deleted or flagged — noting when count was served at its per-call cap. Absent on the last page of a non-empty result with no failed IDs.`,
       ),
   },
   enrichmentTrailer: {
@@ -182,10 +184,13 @@ export const getStories = tool('hn_get_stories', {
 
   async handler(input, ctx) {
     const hn = getHnService();
-    const feedIds = await hn.fetchFeed(input.feed, ctx);
+    /** One budget for the feed and every item fetch after it. */
+    const deadline = Date.now() + CALL_BUDGET_MS;
+    const feedIds = await hn.fetchFeed(input.feed, ctx, deadline);
     const count = Math.min(input.count, COUNT_CAP);
     const sliced = feedIds.slice(input.offset, input.offset + count);
-    const { items, failedIds } = settlePage(await hn.fetchItems(sliced, ctx));
+    const slots = await hn.fetchItems(sliced, ctx, deadline);
+    const { items, failedIds } = settlePage(slots);
 
     const stories = items.map((item) => {
       const url = normalizeUrl(item.url);
@@ -223,7 +228,7 @@ export const getStories = tool('hn_get_stories', {
     const deadPageMessage = `No live stories on this page of the ${input.feed} feed (offset:${input.offset}, total:${total}). Items may have been deleted or flagged.`;
     const failureMessage =
       failedIds.length > 0
-        ? `Could not fetch ${failedIds.length} of ${sliced.length} items on this page (id${failedIds.length === 1 ? '' : 's'} ${failedIds.join(', ')}). Retry with offset: ${input.offset}, or pass an id as itemId to hn_get_thread to fetch that story alone.`
+        ? `Could not fetch ${failedIds.length} of ${sliced.length} items on this page (id${failedIds.length === 1 ? '' : 's'} ${failedIds.join(', ')}).${timeBudgetCutSentence(slots)} Retry with offset: ${input.offset}, or pass an id as itemId to hn_get_thread to fetch that story alone.`
         : undefined;
 
     if (hasMore) {

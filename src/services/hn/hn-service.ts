@@ -10,6 +10,7 @@ import {
   McpError,
   rateLimited,
   serviceUnavailable,
+  timeout,
 } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 
@@ -18,7 +19,19 @@ import type { AlgoliaResponse, HnFeedType, HnItem, HnUser } from './types.js';
 
 const HN_API = 'https://hacker-news.firebaseio.com/v0';
 const ALGOLIA_API = 'https://hn.algolia.com/api/v1';
-const REQUEST_TIMEOUT_MS = 10_000;
+
+/** One attempt's timeout, the body read included. */
+export const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * The time budget of one tool call that chains batch fetches, counted from the
+ * call's start and shared by every request in it, retries and backoff included.
+ * One hung fetch's whole retry ladder (four attempts and three backoffs, at most
+ * 48.75 s with jitter) fits, so a single slow item settles as it would unbounded;
+ * the margin under the MCP SDK client's 60-second default request timeout covers
+ * transport and serialization.
+ */
+export const CALL_BUDGET_MS = 50_000;
 
 // ---------------------------------------------------------------------------
 // HTML utilities
@@ -203,7 +216,7 @@ export function stripHtml(html: string): string {
 }
 
 /**
- * {@link stripHtml} for an Algolia highlight snippet, which is the field's HTML
+ * {@link stripHtml} for an Algolia highlight value, which is the field's HTML
  * with `<em>` inserted around matched terms: the `<em>…</em>` markers survive,
  * including inside a link collapsed to its href.
  */
@@ -276,9 +289,10 @@ export function dateRangeToEpochSeconds(range: {
  *
  * - `item` — HN returned the item. It may be dead or deleted; callers filter.
  * - `absent` — HN answered `null`: no item exists under this ID.
- * - `failed` — the fetch failed after retries, or never started because an
- *   earlier slot was rate-limited. `error` is the classified failure. A later
- *   call may succeed, so a caller reports the ID rather than dropping it.
+ * - `failed` — the fetch failed after retries, the batch's deadline cut it, or
+ *   it never started because an earlier slot was rate-limited or the deadline
+ *   had passed. `error` is the classified failure. A later call may succeed, so
+ *   a caller reports the ID rather than dropping it.
  */
 export type ItemSlot =
   | { kind: 'item'; id: number; item: HnItem }
@@ -310,6 +324,32 @@ export function settlePage(slots: readonly ItemSlot[]): { items: HnItem[]; faile
 /** True for the classified 429 `getJson` throws once retries are spent or the wait outlasts them. */
 export function isRateLimited(err: unknown): err is McpError {
   return err instanceof McpError && err.data?.reason === 'upstream_rate_limited';
+}
+
+/**
+ * True for a failure a deadline caused: a retry ladder it cut short
+ * (`retry_deadline_exceeded`) or a {@link HnService.fetchItems} slot it left
+ * unstarted (`deadline_exceeded`). A hung fetch whose whole ladder ran out
+ * before the deadline is an ordinary `Timeout`, not a cut.
+ */
+export function isDeadlineCut(err: unknown): err is McpError {
+  return (
+    err instanceof McpError &&
+    err.code === JsonRpcErrorCode.Timeout &&
+    (err.data?.reason === 'retry_deadline_exceeded' || err.data?.reason === 'deadline_exceeded')
+  );
+}
+
+/**
+ * The sentence, leading space included, a paged tool's failure notice adds when
+ * the call's time budget cut some of the failed `slots`; empty when it cut none.
+ */
+export function timeBudgetCutSentence(slots: readonly ItemSlot[]): string {
+  const failed = slots.filter((slot) => slot.kind === 'failed');
+  const cut = failed.filter((slot) => isDeadlineCut(slot.error)).length;
+  if (cut === 0) return '';
+  const which = cut < failed.length ? `${cut} of them` : failed.length === 1 ? 'it' : 'they';
+  return ` This call's ${CALL_BUDGET_MS / 1000}-second time budget ran out before ${which} loaded.`;
 }
 
 /** Detect HTML error bodies returned by upstream APIs under rate limiting or maintenance. */
@@ -468,6 +508,10 @@ export class HnService {
    * together; past it the call fails with a `Timeout` whose `data.reason` is
    * `retry_deadline_exceeded`, unless the last attempt failed on an HTTP
    * status, which keeps its contract reason. A caller abort still wins over it.
+   *
+   * An attempt keeps its full request timeout even with less of the deadline
+   * left: the deadline's own signal then ends it, so a cut always reads as the
+   * deadline's rather than racing an attempt timer set to the same instant.
    */
   private getJson<T>(
     upstream: string,
@@ -478,10 +522,8 @@ export class HnService {
   ): Promise<T> {
     return withUpstreamHttpErrors(upstream, () =>
       withRetry(
-        async ({ signal, remainingMs }) => {
-          const res = await fetchWithTimeout(url, Math.min(REQUEST_TIMEOUT_MS, remainingMs), ctx, {
-            signal,
-          });
+        async ({ signal }) => {
+          const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS, ctx, { signal });
           return parseJsonBody<T>(await res.text(), upstream);
         },
         {
@@ -506,21 +548,26 @@ export class HnService {
    * Fetch a user profile by username. Returns null when the user does not exist.
    * The username is percent-encoded as a single path segment — an unencoded
    * value containing `/` or dot-segments would otherwise escape the `/user/`
-   * route and resolve to a different Firebase resource.
+   * route and resolve to a different Firebase resource. `deadline` bounds its
+   * retries as in {@link HnService.getJson}.
    */
-  fetchUser(username: string, ctx: Context): Promise<HnUser | null> {
+  fetchUser(username: string, ctx: Context, deadline?: number): Promise<HnUser | null> {
     return this.getJson(
       'HN API',
       'hn.fetchUser',
       `${HN_API}/user/${encodeURIComponent(username)}.json`,
       ctx,
+      deadline,
     );
   }
 
-  /** Fetch a feed's ID array. Throws on upstream failure after retries. */
-  fetchFeed(type: HnFeedType, ctx: Context): Promise<number[]> {
+  /**
+   * Fetch a feed's ID array. Throws on upstream failure after retries.
+   * `deadline` bounds its retries as in {@link HnService.getJson}.
+   */
+  fetchFeed(type: HnFeedType, ctx: Context, deadline?: number): Promise<number[]> {
     const endpoint = type === 'jobs' ? 'jobstories' : `${type}stories`;
-    return this.getJson('HN API', 'hn.fetchFeed', `${HN_API}/${endpoint}.json`, ctx);
+    return this.getJson('HN API', 'hn.fetchFeed', `${HN_API}/${endpoint}.json`, ctx, deadline);
   }
 
   /**
@@ -538,15 +585,20 @@ export class HnService {
    *   throttled upstream.
    *
    * With a `deadline` (a `Date.now()` instant), a fetch still retrying when it
-   * passes fails its slot with a `Timeout` instead of finishing its ladder.
+   * passes fails its slot with a `Timeout` instead of finishing its ladder, and
+   * no fetch starts past it: every slot not yet started is reported `failed`
+   * with one `Timeout` (`data.reason: 'deadline_exceeded'`), or with the rate
+   * limit when one also stopped the batch. {@link isDeadlineCut} tells both
+   * kinds of cut slot from an ordinary failure.
    */
   async fetchItems(ids: readonly number[], ctx: Context, deadline?: number): Promise<ItemSlot[]> {
     const slots = new Array<ItemSlot | undefined>(ids.length);
     let rateLimit: McpError | undefined;
     let next = 0;
+    const pastDeadline = () => deadline !== undefined && Date.now() >= deadline;
 
     const worker = async () => {
-      while (!rateLimit && next < ids.length) {
+      while (!rateLimit && !pastDeadline() && next < ids.length) {
         const i = next++;
         const id = ids[i];
         if (id == null) continue;
@@ -574,12 +626,23 @@ export class HnService {
     await Promise.all(Array.from({ length: workerCount }, worker));
 
     const skipped = ids.length - next;
-    if (rateLimit && skipped > 0) {
+    let unstarted = rateLimit;
+    if (skipped > 0 && rateLimit) {
       ctx.log.warning('Batch stopped: upstream rate-limited, remaining items not fetched', {
         skipped,
       });
+    } else if (skipped > 0) {
+      unstarted = timeout('The time budget ran out before this item was fetched.', {
+        reason: 'deadline_exceeded',
+        recovery: {
+          hint: "The HN API was too slow to answer within this call's time budget. Retry the same call after a short delay.",
+        },
+      });
+      ctx.log.warning('Batch stopped: time budget spent, remaining items not fetched', {
+        skipped,
+      });
     }
-    return ids.map((id, i) => slots[i] ?? { kind: 'failed', id, error: rateLimit });
+    return ids.map((id, i) => slots[i] ?? { kind: 'failed', id, error: unstarted });
   }
 
   /**

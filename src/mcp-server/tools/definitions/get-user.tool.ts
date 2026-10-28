@@ -6,13 +6,24 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeInline, quoteBody } from '@/mcp-server/tools/markdown-escape.js';
+import {
+  byteLength,
+  cutPointer,
+  cutToBytes,
+  fitsBudget,
+  largestFittingLimit,
+  measureResponse,
+  RESPONSE_BUDGET_TEXT,
+} from '@/mcp-server/tools/response-budget.js';
 import { servedAtCap } from '@/mcp-server/tools/served-at-cap.js';
 import {
+  CALL_BUDGET_MS,
   decodeHtmlEntities,
   getHnService,
   normalizeUrl,
   settlePage,
   stripHtml,
+  timeBudgetCutSentence,
 } from '@/services/hn/hn-service.js';
 
 /** Most submissions one call resolves; a larger `submissionCount` is served at this cap. */
@@ -20,6 +31,117 @@ const SUBMISSION_COUNT_CAP = 50;
 
 /** Largest `submissionCount` accepted; anything above it is rejected. */
 const SUBMISSION_COUNT_CEILING = 1000;
+
+/** The notice sentence disclosing which submission bodies were cut to fit the response budget. */
+const budgetSentence = (cutIds: readonly number[]) =>
+  `To stay within the ${RESPONSE_BUDGET_TEXT}-byte response budget, the text of ${cutIds.length === 1 ? 'submission' : 'submissions'} ${cutIds.join(', ')} is cut short; hn_get_thread with a cut submission's id returns its full text, and a smaller submissionCount cuts less.`;
+
+const userTrailer = {
+  failedIds: {
+    render: (ids: readonly number[] | undefined) => `**Failed to load:** ${(ids ?? []).join(', ')}`,
+  },
+};
+
+const userOutput = z.object({
+  user: z
+    .object({
+      id: z.string().describe('Username.'),
+      karma: z.number().describe('Karma score.'),
+      created: z.number().describe('Account creation time (Unix timestamp).'),
+      about: z.string().optional().describe('Self-description (HTML stripped).'),
+      totalSubmissions: z.number().describe('Total number of submissions.'),
+    })
+    .describe('User profile.'),
+  submissions: z
+    .array(
+      z
+        .object({
+          id: z.number().describe('Item ID — use with hn_get_thread to read comments.'),
+          type: z.string().describe('Item type (story, comment, job, poll, pollopt).'),
+          parent: z
+            .number()
+            .optional()
+            .describe(
+              'For a comment, the ID of the story or comment it replied to — pass it to hn_get_thread for the context.',
+            ),
+          poll: z.number().optional().describe('For a poll option, the ID of its poll.'),
+          title: z.string().optional().describe('Title (stories/jobs/polls).'),
+          url: z.string().optional().describe('External link URL.'),
+          text: z
+            .string()
+            .optional()
+            .describe(
+              `Body text (HTML stripped). Cut short when the page would otherwise exceed the ${RESPONSE_BUDGET_TEXT}-byte response budget, with textTruncated set.`,
+            ),
+          textTruncated: z
+            .boolean()
+            .optional()
+            .describe(
+              `True when text is a prefix of the body, cut short to keep the page within the ${RESPONSE_BUDGET_TEXT}-byte response budget — hn_get_thread with this id returns it whole. Absent when text is whole.`,
+            ),
+          score: z.number().optional().describe('Score/upvotes.'),
+          time: z.number().optional().describe('Unix timestamp.'),
+          descendants: z
+            .number()
+            .optional()
+            .describe(
+              "HN's count of live comments in the thread (descendants); dead and deleted comments are not counted. Present for stories and polls.",
+            ),
+        })
+        .describe('A single submission by the user (story, comment, job, poll, or poll option).'),
+    )
+    .optional()
+    .describe(
+      'One page of submissions, most recent first, starting at submissionOffset. Absent when includeSubmissions is false or the user has never submitted. Empty when the page holds no live items — either the offset is past the end, or every item in the window was deleted, flagged, or failed to load (failedIds lists the failures).',
+    ),
+});
+
+type UserOutput = z.infer<typeof userOutput>;
+type Submission = NonNullable<UserOutput['submissions']>[number];
+
+function formatUser(result: UserOutput) {
+  const { user } = result;
+  const joined = `${new Date(user.created * 1000).toLocaleDateString('en-US', {
+    month: 'short',
+    year: 'numeric',
+  })} (t:${user.created})`;
+  const lines: string[] = [
+    `## ${user.id}`,
+    `**Karma:** ${user.karma} | **Joined:** ${joined} | **Total submissions:** ${user.totalSubmissions}`,
+  ];
+
+  if (user.about) lines.push(`\n${quoteBody(user.about)}`);
+
+  if (result.submissions?.length) {
+    lines.push('\n### Submissions');
+    for (const [i, s] of result.submissions.entries()) {
+      const title = s.title ? escapeInline(s.title) : `[${s.type}]`;
+      const date = s.time
+        ? `${new Date(s.time * 1000).toISOString().slice(0, 10)} (t:${s.time})`
+        : '';
+      const meta = [
+        `id:${s.id}`,
+        s.parent != null ? `parent:${s.parent}` : null,
+        s.poll != null ? `poll:${s.poll}` : null,
+        s.title ? s.type : null,
+        s.score != null ? `${s.score} pts` : null,
+        s.descendants != null ? `${s.descendants} comments` : null,
+        date,
+      ]
+        .filter(Boolean)
+        .join(' | ');
+      lines.push(`- **${title}** — ${meta}`);
+      if (s.url) lines.push(`  ${s.url}`);
+      if (s.text) lines.push(quoteBody(s.text, '  '));
+      /** A blank line ends the quote, so the pointer is a paragraph of the list item rather than a lazy quote line. */
+      if (s.textTruncated) lines.push('', `  ${cutPointer(s.id)}`);
+      // A blank line ends the quote before the next submission.
+      if ((s.text || s.textTruncated) && i < result.submissions.length - 1) lines.push('');
+    }
+  }
+
+  return [{ type: 'text' as const, text: lines.join('\n') }];
+}
 
 export const getUser = tool('hn_get_user', {
   description:
@@ -106,48 +228,7 @@ export const getUser = tool('hn_get_user', {
         'How many submissions to skip before resolving, counting back from the most recent. Use with submissionCount to page through a long history: request offset 0, then advance by the page size served, and so on. The enrichment block echoes submissionOffset and, when more remain, the offset to send next. Only used when includeSubmissions is true.',
       ),
   }),
-  output: z.object({
-    user: z
-      .object({
-        id: z.string().describe('Username.'),
-        karma: z.number().describe('Karma score.'),
-        created: z.number().describe('Account creation time (Unix timestamp).'),
-        about: z.string().optional().describe('Self-description (HTML stripped).'),
-        totalSubmissions: z.number().describe('Total number of submissions.'),
-      })
-      .describe('User profile.'),
-    submissions: z
-      .array(
-        z
-          .object({
-            id: z.number().describe('Item ID — use with hn_get_thread to read comments.'),
-            type: z.string().describe('Item type (story, comment, job, poll, pollopt).'),
-            parent: z
-              .number()
-              .optional()
-              .describe(
-                'For a comment, the ID of the story or comment it replied to — pass it to hn_get_thread for the context.',
-              ),
-            poll: z.number().optional().describe('For a poll option, the ID of its poll.'),
-            title: z.string().optional().describe('Title (stories/jobs/polls).'),
-            url: z.string().optional().describe('External link URL.'),
-            text: z.string().optional().describe('Body text (HTML stripped).'),
-            score: z.number().optional().describe('Score/upvotes.'),
-            time: z.number().optional().describe('Unix timestamp.'),
-            descendants: z
-              .number()
-              .optional()
-              .describe(
-                "HN's count of live comments in the thread (descendants); dead and deleted comments are not counted. Present for stories and polls.",
-              ),
-          })
-          .describe('A single submission by the user (story, comment, job, poll, or poll option).'),
-      )
-      .optional()
-      .describe(
-        'One page of submissions, most recent first, starting at submissionOffset. Absent when includeSubmissions is false or the user has never submitted. Empty when the page holds no live items — either the offset is past the end, or every item in the window was deleted, flagged, or failed to load (failedIds lists the failures).',
-      ),
-  }),
+  output: userOutput,
 
   enrichment: {
     submissionOffset: z
@@ -168,22 +249,22 @@ export const getUser = tool('hn_get_user', {
       .array(z.number())
       .optional()
       .describe(
-        'Submission IDs in this window whose fetch failed after retries. They are not deleted or missing and may load on a later call: retry with the same submissionOffset, or pass an ID to hn_get_thread to fetch that item alone. Absent when every submission in the window loaded.',
+        `Submission IDs in this window whose fetch failed after retries or ran past the call's ${CALL_BUDGET_MS / 1000}-second time budget. They are not deleted or missing and may load on a later call: retry with the same submissionOffset, or pass an ID to hn_get_thread to fetch that item alone. Absent when every submission in the window loaded.`,
       ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Pagination context — which window of the history this page covers and the submissionOffset to send next, the submission IDs that failed to load and how to retry them, or a warning that the offset is past the end — noting when submissionCount was served at its per-call cap. Absent when the page reaches the end of the history with no failed IDs, or when no submissions were resolved.',
+        `Pagination context — which window of the history this page covers and the submissionOffset to send next, the submission IDs that failed to load and how to retry them, or a warning that the offset is past the end — noting when submissionCount was served at its per-call cap or the call's ${CALL_BUDGET_MS / 1000}-second time budget cut the failed fetches, and closing with the submissions whose text was cut to keep the page within the ${RESPONSE_BUDGET_TEXT}-byte response budget. Absent when the page reaches the end of the history with no failed IDs and no cut text, or when no submissions were resolved.`,
       ),
   },
-  enrichmentTrailer: {
-    failedIds: { render: (ids) => `**Failed to load:** ${(ids ?? []).join(', ')}` },
-  },
+  enrichmentTrailer: userTrailer,
 
   async handler(input, ctx) {
     const hn = getHnService();
-    const user = await hn.fetchUser(input.username, ctx);
+    /** One budget for the user fetch and every submission fetch after it. */
+    const deadline = Date.now() + CALL_BUDGET_MS;
+    const user = await hn.fetchUser(input.username, ctx, deadline);
     if (!user) {
       throw ctx.fail('user_not_found', `User ${input.username} not found`, {
         username: input.username,
@@ -206,9 +287,10 @@ export const getUser = tool('hn_get_user', {
       input.includeSubmissions && user.submitted?.length
         ? user.submitted.slice(offset, pageEnd)
         : undefined;
-    const page = windowIds ? settlePage(await hn.fetchItems(windowIds, ctx)) : undefined;
+    const slots = windowIds ? await hn.fetchItems(windowIds, ctx, deadline) : undefined;
+    const page = slots ? settlePage(slots) : undefined;
 
-    const submissions = page?.items.map((item) => ({
+    const submissions: Submission[] | undefined = page?.items.map((item) => ({
       id: item.id,
       type: item.type,
       ...(item.parent != null && { parent: item.parent }),
@@ -228,83 +310,82 @@ export const getUser = tool('hn_get_user', {
       failed: page?.failedIds.length,
     });
 
-    if (page && windowIds) {
-      const total = profile.totalSubmissions;
-      const { failedIds } = page;
-      const shown = page.items.length;
-      ctx.enrich({ submissionOffset: offset, ...(failedIds.length > 0 && { failedIds }) });
+    if (!(page && slots && submissions)) return { user: profile, submissions };
 
-      const failureMessage =
-        failedIds.length > 0
-          ? `Could not fetch ${failedIds.length} of ${windowIds.length} submissions in this window (id${failedIds.length === 1 ? '' : 's'} ${failedIds.join(', ')}). Retry with submissionOffset: ${offset}, or pass an id as itemId to hn_get_thread to fetch that item alone.`
-          : undefined;
+    const total = profile.totalSubmissions;
+    const { failedIds } = page;
+    const shown = page.items.length;
+    const morePages = offset < total && pageEnd < total;
 
+    const failureMessage =
+      failedIds.length > 0
+        ? `Could not fetch ${failedIds.length} of ${slots.length} submissions in this window (id${failedIds.length === 1 ? '' : 's'} ${failedIds.join(', ')}).${timeBudgetCutSentence(slots)} Retry with submissionOffset: ${offset}, or pass an id as itemId to hn_get_thread to fetch that item alone.`
+        : undefined;
+
+    /** The notice for this page with the bodies of `cutIds` cut to the response budget; the budget sentence comes last. */
+    const noticeFor = (cutIds: readonly number[]) => {
       if (offset >= total) {
-        ctx.enrich.notice(
-          `submissionOffset ${offset} is past the end of ${total.toLocaleString()} submissions. Valid offsets are 0 to ${total - 1}.`,
-        );
-      } else if (pageEnd < total) {
-        ctx.enrich.truncated({ shown, cap: submissionCount });
-        ctx.enrich.notice(
-          [
+        return `submissionOffset ${offset} is past the end of ${total.toLocaleString()} submissions. Valid offsets are 0 to ${total - 1}.`;
+      }
+      const budget = cutIds.length > 0 ? budgetSentence(cutIds) : undefined;
+      const sentences = morePages
+        ? [
             `Showing ${shown} live item${shown === 1 ? '' : 's'} from positions ${(offset + 1).toLocaleString()}–${pageEnd.toLocaleString()} of ${total.toLocaleString()} submissions.`,
             input.submissionCount > SUBMISSION_COUNT_CAP &&
               servedAtCap('submissionCount', input.submissionCount, SUBMISSION_COUNT_CAP),
             failureMessage,
             `Set submissionOffset to ${pageEnd} for the next page.`,
+            budget,
           ]
-            .filter(Boolean)
-            .join(' '),
+        : [failureMessage, budget];
+      return sentences.filter(Boolean).join(' ') || undefined;
+    };
+
+    /** Both surfaces of the page serving `served`, enrichment and trailer included. */
+    const measure = (served: Submission[]) => {
+      const notice = noticeFor(served.filter((s) => s.textTruncated).map((s) => s.id));
+      const result = { user: profile, submissions: served };
+      return measureResponse({
+        content: formatUser(result),
+        result,
+        enrichment: {
+          submissionOffset: offset,
+          ...(failedIds.length > 0 && { failedIds }),
+          ...(morePages && { truncated: true, shown, cap: submissionCount }),
+          ...(notice != null && { notice }),
+        },
+        trailer: userTrailer,
+      });
+    };
+
+    let served = submissions;
+    if (!fitsBudget(measure(submissions))) {
+      /** Cut every body longer than the largest limit they can share; every submission stays. */
+      const bodies = submissions.map((s) => ({ s, bytes: s.text ? byteLength(s.text) : 0 }));
+      const cutAt = (limit: number) =>
+        bodies.map(({ s, bytes }) =>
+          s.text && bytes > limit
+            ? { ...s, text: cutToBytes(s.text, limit), textTruncated: true }
+            : s,
         );
-      } else if (failureMessage) {
-        ctx.enrich.notice(failureMessage);
-      }
+      const limit = largestFittingLimit(
+        bodies.map((body) => body.bytes),
+        (limitBytes) => measure(cutAt(limitBytes)),
+      );
+      served = cutAt(limit);
+      ctx.log.info('Fitted user page to the response budget', {
+        limitBytes: limit,
+        cutIds: served.filter((s) => s.textTruncated).map((s) => s.id),
+      });
     }
 
-    return { user: profile, submissions };
+    ctx.enrich({ submissionOffset: offset, ...(failedIds.length > 0 && { failedIds }) });
+    if (morePages) ctx.enrich.truncated({ shown, cap: submissionCount });
+    const notice = noticeFor(served.filter((s) => s.textTruncated).map((s) => s.id));
+    if (notice) ctx.enrich.notice(notice);
+
+    return { user: profile, submissions: served };
   },
 
-  format: (result) => {
-    const { user } = result;
-    const joined = `${new Date(user.created * 1000).toLocaleDateString('en-US', {
-      month: 'short',
-      year: 'numeric',
-    })} (t:${user.created})`;
-    const lines: string[] = [
-      `## ${user.id}`,
-      `**Karma:** ${user.karma} | **Joined:** ${joined} | **Total submissions:** ${user.totalSubmissions}`,
-    ];
-
-    if (user.about) lines.push(`\n${quoteBody(user.about)}`);
-
-    if (result.submissions?.length) {
-      lines.push('\n### Submissions');
-      for (const [i, s] of result.submissions.entries()) {
-        const title = s.title ? escapeInline(s.title) : `[${s.type}]`;
-        const date = s.time
-          ? `${new Date(s.time * 1000).toISOString().slice(0, 10)} (t:${s.time})`
-          : '';
-        const meta = [
-          `id:${s.id}`,
-          s.parent != null ? `parent:${s.parent}` : null,
-          s.poll != null ? `poll:${s.poll}` : null,
-          s.title ? s.type : null,
-          s.score != null ? `${s.score} pts` : null,
-          s.descendants != null ? `${s.descendants} comments` : null,
-          date,
-        ]
-          .filter(Boolean)
-          .join(' | ');
-        lines.push(`- **${title}** — ${meta}`);
-        if (s.url) lines.push(`  ${s.url}`);
-        if (s.text) {
-          lines.push(quoteBody(s.text, '  '));
-          // A blank line ends the quote before the next submission.
-          if (i < result.submissions.length - 1) lines.push('');
-        }
-      }
-    }
-
-    return [{ type: 'text' as const, text: lines.join('\n') }];
-  },
+  format: formatUser,
 });

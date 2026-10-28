@@ -11,6 +11,7 @@ import {
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { quoteBody } from '@/mcp-server/tools/markdown-escape.js';
 import type { AlgoliaResponse } from '@/services/hn/types.js';
 import { expectLinearCpu } from '../helpers/cpu-time.js';
 
@@ -3052,5 +3053,331 @@ describe('composeSearchNotice — over-cap count', () => {
         STORY_ID_SENTENCE,
       ),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #46 — the full view's 64,000-byte response budget
+// ---------------------------------------------------------------------------
+
+const BUDGET_BYTES = 64_000;
+
+const HIGHLIGHTS_OMITTED_SENTENCE =
+  'To stay within the 64,000-byte response budget, highlights.text is omitted from every hit; matchedWords still lists the matched terms.';
+
+/** The budget sentence for a page whose step 2 cut `ids`, after step 1 dropped highlights.text when `omitted`. */
+const cutSentence = (ids: number[], omitted = true) =>
+  `To stay within the 64,000-byte response budget, ${omitted ? 'highlights.text is omitted from every hit and ' : ''}the text of ${ids.length === 1 ? 'hit' : 'hits'} ${ids.join(', ')} is cut short; hn_get_thread with a cut hit's id returns its full text, and view: "compact" or a smaller count avoids the cut.`;
+
+/** The unquoted line content[] puts after a cut body. */
+const cutLine = (id: number) =>
+  `Text cut short to fit the response budget — hn_get_thread with itemId ${id} returns it whole.`;
+
+describe('composeSearchNotice — response budget', () => {
+  const page = { query: 'lisp', count: 30, shown: 4, page: 0, totalHits: 4, totalPages: 1 };
+
+  it('says nothing about the budget on a page that fit', () => {
+    expect(composeSearchNotice(page)).toBeUndefined();
+  });
+
+  it('names the omitted body highlights when only step 1 ran', () => {
+    expect(
+      composeSearchNotice({ ...page, budget: { highlightsTextOmitted: true, cutIds: [] } }),
+    ).toBe(HIGHLIGHTS_OMITTED_SENTENCE);
+  });
+
+  it('names the cut hits and the levers after step 2', () => {
+    expect(
+      composeSearchNotice({ ...page, budget: { highlightsTextOmitted: true, cutIds: [7, 9] } }),
+    ).toBe(cutSentence([7, 9]));
+    expect(
+      composeSearchNotice({ ...page, budget: { highlightsTextOmitted: false, cutIds: [7] } }),
+    ).toBe(cutSentence([7], false));
+  });
+
+  it('comes after the page-state and cause sentences', () => {
+    expect(
+      composeSearchNotice({
+        ...page,
+        author: 'pg',
+        count: 50,
+        overCap: { count: 100, page: 0 },
+        totalHits: 300,
+        totalPages: 6,
+        budget: { highlightsTextOmitted: true, cutIds: [5] },
+      }),
+    ).toBe(
+      joined(
+        'Showing 4 of 300 hits (page 0 of 6). Pass count: 50, page: 1 for more.',
+        'count 100 is above the per-call cap of 50, so this call served count: 50.',
+        cutSentence([5]),
+      ),
+    );
+  });
+});
+
+describe('hn_search_content response budget', () => {
+  const utf8 = new TextEncoder();
+  const bytes = (text: string) => utf8.encode(text).byteLength;
+
+  type WireHit = Record<string, any> & { id: number; text?: string; textTruncated?: boolean };
+
+  /** Both surfaces of an assembled result, sized as the caller receives them; `sc` is the wire JSON. */
+  function measure(result: ToolResult) {
+    structured(result);
+    const sc = JSON.parse(JSON.stringify(result.structuredContent)) as Record<string, any> & {
+      hits: WireHit[];
+    };
+    const blocks = result.content.filter(
+      (b): b is { type: 'text'; text: string } => b.type === 'text',
+    );
+    return {
+      sc,
+      text: blocks.map((b) => b.text).join(''),
+      contentBytes: blocks.reduce((sum, b) => sum + bytes(b.text), 0),
+      structuredBytes: bytes(JSON.stringify(result.structuredContent)),
+    };
+  }
+
+  /** A comment hit whose body matched the query, so Algolia repeats it in full as the highlight. */
+  function matchedComment(id: number, text: string) {
+    return {
+      ...commentHit,
+      objectID: String(id),
+      comment_text: text,
+      _tags: ['comment', 'author_bob', 'story_123'],
+      _highlightResult: {
+        comment_text: {
+          value: text.replaceAll('lisp', '<em>lisp</em>'),
+          matchLevel: 'full' as const,
+          matchedWords: ['lisp'],
+        },
+        story_title: { value: 'Test Story', matchLevel: 'none' as const, matchedWords: [] },
+      },
+    };
+  }
+
+  /** A story hit whose title matched, with no body. */
+  const titledStory = {
+    ...storyHit,
+    objectID: '900',
+    title: 'Lisp in Small Pieces',
+    _tags: ['story', 'author_alice', 'story_900'],
+    _highlightResult: {
+      title: {
+        value: '<em>Lisp</em> in Small Pieces',
+        matchLevel: 'full' as const,
+        matchedWords: ['lisp'],
+      },
+    },
+  };
+
+  /** A body of `n` UTF-16 units that matches `lisp` once, at its start, so its highlight runs 9 bytes longer. */
+  const body = (n: number, unit = 'macro ') =>
+    `lisp ${unit.repeat(Math.ceil(n / unit.length))}`.slice(0, n);
+
+  function servePage(hits: unknown[], overrides: Partial<AlgoliaResponse> = {}) {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({
+        hits: hits as AlgoliaResponse['hits'],
+        nbHits: hits.length,
+        nbPages: 1,
+        ...overrides,
+      }),
+    );
+  }
+
+  it('leaves a page under budget as it was: whole bodies, body highlights, no flags, no budget sentence', async () => {
+    const text = body(28_000);
+    const highlighted = text.replace('lisp', '<em>lisp</em>');
+    servePage([matchedComment(1, text)]);
+
+    const {
+      sc,
+      text: rendered,
+      contentBytes,
+      structuredBytes,
+    } = measure(await callSearch({ query: 'lisp' }));
+
+    expect(contentBytes).toBeGreaterThan(56_000);
+    expect(contentBytes).toBeLessThan(BUDGET_BYTES);
+    expect(structuredBytes).toBeLessThan(BUDGET_BYTES);
+    expect(sc.hits).toStrictEqual([
+      {
+        id: 1,
+        type: 'comment',
+        author: 'bob',
+        points: 5,
+        createdAt: '2024-01-02T00:00:00Z',
+        storyTitle: 'Test Story',
+        storyId: 123,
+        text,
+        highlights: { text: highlighted, matchedWords: ['lisp'] },
+      },
+    ]);
+    expect(sc).not.toHaveProperty('highlightsTextOmitted');
+    expect(sc).not.toHaveProperty('notice');
+    expect(rendered).toBe(
+      [
+        '## "lisp" — search results',
+        '',
+        '### Comment on "Test Story" (story id:123)',
+        'id:1 | type:comment | bob | 5 pts | 2024-01-02T00:00:00Z',
+        `> ${text}`,
+        '',
+        `> match — terms: lisp | body: ${highlighted}`,
+        '',
+        '**criteria:** sort: relevance | count: 30 | view: full',
+        '**totalHits:** 1',
+        '**page:** 0',
+        '**totalPages:** 1',
+      ].join('\n'),
+    );
+  });
+
+  it('leaves compact pages unchanged, however long the bodies behind them', async () => {
+    servePage([matchedComment(1, body(200_000)), matchedComment(2, body(90_000))]);
+
+    const { sc, text } = measure(await callSearch({ query: 'lisp', view: 'compact' }));
+
+    expect(sc.hits.map((h) => 'text' in h)).toStrictEqual([false, false]);
+    expect(sc.hits.map((h) => h.highlights)).toStrictEqual([
+      { matchedWords: ['lisp'] },
+      { matchedWords: ['lisp'] },
+    ]);
+    expect(sc).not.toHaveProperty('highlightsTextOmitted');
+    expect(sc).not.toHaveProperty('notice');
+    expect(text).not.toContain('Text cut short');
+  });
+
+  it('drops highlights.text from every hit first, keeping matchedWords, the title highlight, and whole bodies', async () => {
+    const long = body(40_000);
+    const short = body(300);
+    servePage([matchedComment(1, long), titledStory, matchedComment(2, short)]);
+
+    const { sc, text, contentBytes, structuredBytes } = measure(
+      await callSearch({ query: 'lisp' }),
+    );
+
+    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(sc.highlightsTextOmitted).toBe(true);
+    expect(sc.hits.map((h) => h.highlights)).toStrictEqual([
+      { matchedWords: ['lisp'] },
+      { title: '<em>Lisp</em> in Small Pieces', matchedWords: ['lisp'] },
+      { matchedWords: ['lisp'] },
+    ]);
+    expect(sc.hits.map((h) => h.text)).toStrictEqual([long, undefined, short]);
+    expect(sc.hits.some((h) => 'textTruncated' in h)).toBe(false);
+    expect(sc.notice).toBe(HIGHLIGHTS_OMITTED_SENTENCE);
+
+    expect(text).not.toContain('<em>lisp</em>');
+    expect(text).not.toContain('Text cut short');
+    expect(text).toContain(`\n> ${long}\n\n> match — terms: lisp\n\n`);
+    expect(text).toContain('> match — title: <em>Lisp</em> in Small Pieces | terms: lisp');
+    expect(text).toContain('**highlightsTextOmitted:** true');
+    expect(text).toContain(`> ${HIGHLIGHTS_OMITTED_SENTENCE}`);
+  });
+
+  it('then cuts the longest bodies to one shared limit, the largest that fits, keeping every hit and the paging fields', async () => {
+    const a = body(60_000);
+    const b = body(45_000, 'lisp\nmacro\n\n[1]: x\n');
+    const short = body(500);
+    servePage(
+      [matchedComment(11, a), titledStory, matchedComment(12, b), matchedComment(13, short)],
+      { nbHits: 120, nbPages: 3 },
+    );
+
+    const { sc, text, contentBytes, structuredBytes } = measure(
+      await callSearch({ query: 'lisp' }),
+    );
+
+    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    /** One byte more for each cut body would not fit: the limit is the largest. */
+    expect(Math.max(contentBytes, structuredBytes)).toBeGreaterThan(BUDGET_BYTES - 64);
+
+    expect(sc.hits.map((h) => h.id)).toStrictEqual([11, 900, 12, 13]);
+    expect(sc).toMatchObject({ page: 0, totalPages: 3, truncated: true, shown: 4, cap: 30 });
+    expect(sc.highlightsTextOmitted).toBe(true);
+    expect(sc.hits.every((h) => h.highlights?.text === undefined)).toBe(true);
+
+    const [cutA, story, cutB, whole] = sc.hits;
+    expect(a.startsWith(cutA!.text!)).toBe(true);
+    expect(b.startsWith(cutB!.text!)).toBe(true);
+    expect(bytes(cutA!.text!)).toBeLessThan(bytes(a));
+    expect(bytes(cutA!.text!)).toBe(bytes(cutB!.text!));
+    expect(bytes(cutA!.text!)).toBeGreaterThan(bytes(short));
+    expect(cutA!.textTruncated).toBe(true);
+    expect(cutB!.textTruncated).toBe(true);
+    expect(whole!.text).toBe(short);
+    expect(whole).not.toHaveProperty('textTruncated');
+    expect(story).not.toHaveProperty('textTruncated');
+
+    expect(sc.notice).toBe(
+      joined(
+        'Showing 4 of 120 hits (page 0 of 3). Pass page: 1 for more, or raise count (max 50).',
+        cutSentence([11, 12]),
+      ),
+    );
+
+    /** content[] carries the same cut prefix, quoted, then the unquoted pointer after a blank line. */
+    expect(text).toContain(
+      `\n${quoteBody(cutA!.text!)}\n\n${cutLine(11)}\n\n> match — terms: lisp\n\n`,
+    );
+    expect(text).toContain(
+      `\n${quoteBody(cutB!.text!)}\n\n${cutLine(12)}\n\n> match — terms: lisp\n\n`,
+    );
+    expect(text).toContain(`\n> ${short}\n\n> match — terms: lisp\n\n`);
+    expect(text).not.toContain(cutLine(13));
+    expect(text).not.toContain(cutLine(900));
+  });
+
+  it('cuts a single hit larger than the budget to fit', async () => {
+    const huge = body(300_000);
+    servePage([matchedComment(5, huge)]);
+
+    const { sc, text, contentBytes, structuredBytes } = measure(
+      await callSearch({ query: 'lisp', count: 1 }),
+    );
+
+    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(Math.max(contentBytes, structuredBytes)).toBeGreaterThan(BUDGET_BYTES - 64);
+    expect(sc.hits[0]!.textTruncated).toBe(true);
+    expect(huge.startsWith(sc.hits[0]!.text!)).toBe(true);
+    expect(sc.notice).toBe(cutSentence([5]));
+    expect(text).toContain(`\n\n${cutLine(5)}\n\n`);
+  });
+
+  it('cuts on a code-point boundary, identically on both surfaces', async () => {
+    const emoji = `lisp ${'😀é'.repeat(25_000)}`;
+    servePage([matchedComment(6, emoji)]);
+
+    const { sc, text, contentBytes, structuredBytes } = measure(
+      await callSearch({ query: 'lisp' }),
+    );
+    const cut = sc.hits[0]!.text!;
+
+    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(cut.length).toBeLessThan(emoji.length);
+    expect(emoji.startsWith(cut)).toBe(true);
+    expect(cut).not.toMatch(/[\uD800-\uDBFF]$/);
+    expect(text).toContain(`\n> ${cut}\n\n${cutLine(6)}`);
+  });
+
+  it('goes straight to cutting when no hit carries a body highlight, and claims no omission', async () => {
+    servePage([{ ...commentHit, objectID: '8', comment_text: body(100_000) }]);
+
+    const { sc, contentBytes, structuredBytes } = measure(
+      await callSearch({ author: 'bob', tags: 'comment' }),
+    );
+
+    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(sc).not.toHaveProperty('highlightsTextOmitted');
+    expect(sc.hits[0]!.textTruncated).toBe(true);
+    expect(sc.notice).toBe(cutSentence([8], false));
   });
 });
