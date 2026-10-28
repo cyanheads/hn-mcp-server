@@ -474,18 +474,18 @@ function prefixPage(items: readonly number[], fixed: number, extra: (index: numb
 describe('longestFittingPrefix', () => {
   it('serves the whole page when it fits, measuring it alone', () => {
     const { measure, measured, pageBytes } = prefixPage([20_000, 20_000, 20_000], 0, () => 3_000);
-    expect(longestFittingPrefix(pageBytes, measure)).toBe(2);
+    expect(longestFittingPrefix(pageBytes.length, measure)).toBe(2);
     expect(measured).toEqual([2]);
   });
 
-  it('drops the items the overflow says must go, in one step', () => {
+  it('drops items from the end until the page fits', () => {
     /** 10 items of 7,000 bytes: prefix i holds 7,000(i + 1), plus 1,500 of enrichment. */
     const { measure, measured, pageBytes } = prefixPage(Array(10).fill(7_000), 0, () => 1_500);
-    const index = longestFittingPrefix(pageBytes, measure);
+    const index = longestFittingPrefix(pageBytes.length, measure);
 
     /** 7,000 × 9 + 1,500 = 64,500 is over; 7,000 × 8 + 1,500 = 57,500 fits. */
     expect(index).toBe(7);
-    expect(measured).toEqual([9, 7]);
+    expect(measured).toEqual([9, 8, 7]);
   });
 
   it('binds on whichever surface overflows', () => {
@@ -497,7 +497,7 @@ describe('longestFittingPrefix', () => {
       contentBytes: pageBytes[index]!.contentBytes + 100,
       structuredBytes: pageBytes[index]!.structuredBytes + 2_000,
     });
-    expect(longestFittingPrefix(pageBytes, measure)).toBe(2);
+    expect(longestFittingPrefix(pageBytes.length, measure)).toBe(2);
   });
 
   it('falls to the first prefix when the enrichment outgrows what each shorter page frees', () => {
@@ -507,48 +507,29 @@ describe('longestFittingPrefix', () => {
       0,
       (i) => (21 - i) * 4_000,
     );
-    expect(longestFittingPrefix(pageBytes, measure)).toBe(0);
-    expect(measured.slice(0, 3)).toEqual([21, 20, 19]);
-    expect(measured).toEqual([...measured].sort((a, b) => b - a));
-    expect(new Set(measured).size).toBe(measured.length);
-    expect(measured).not.toContain(0);
+    expect(longestFittingPrefix(pageBytes.length, measure)).toBe(0);
+    expect(measured).toEqual(Array.from({ length: 21 }, (_, k) => 21 - k));
   });
 
-  it('steps down again when the prefix the skip lands on still overflows', () => {
+  it('finds the longest prefix that fits when the enrichment shrinks with the page', () => {
     /**
-     * Enrichment grows 1,000 per dropped item. Prefix 9 is 70,000 + 6,200 over;
-     * the skip lands on 7: 56,000 + 8,200 = 64,200, still over; then 6:
-     * 49,000 + 9,200 = 58,200 fits.
+     * Each dropped item frees 7,000 bytes and 2,000 of enrichment. Prefix 9 is
+     * 70,000 + 12,000 and prefix 8 63,000 + 10,000, both over; prefix 7 is
+     * 56,000 + 8,000 = 64,000, which fits.
      */
-    const { measure, measured, pageBytes } = prefixPage(
-      Array(10).fill(7_000),
-      0,
-      (i) => 6_200 + (9 - i) * 1_000,
-    );
-    expect(longestFittingPrefix(pageBytes, measure)).toBe(6);
-    expect(measured).toEqual([9, 7, 6]);
+    const { measure, pageBytes } = prefixPage(Array(10).fill(7_000), 0, (i) => 2_000 * (i - 3));
+    expect(longestFittingPrefix(pageBytes.length, measure)).toBe(7);
   });
 
   it('serves the first prefix, unmeasured, when nothing shorter fits', () => {
     const { measure, measured, pageBytes } = prefixPage([90_000, 100], 0, () => 50);
-    expect(longestFittingPrefix(pageBytes, measure)).toBe(0);
+    expect(longestFittingPrefix(pageBytes.length, measure)).toBe(0);
     expect(measured).toEqual([1]);
   });
 
   it('serves a single prefix without measuring it', () => {
     const { measure, measured, pageBytes } = prefixPage([200_000], 0, () => 0);
-    expect(longestFittingPrefix(pageBytes, measure)).toBe(0);
+    expect(longestFittingPrefix(pageBytes.length, measure)).toBe(0);
     expect(measured).toEqual([]);
-  });
-
-  it('measures each prefix at most once when every one overflows by a byte', () => {
-    /** Each dropped item frees 320 bytes and grows the enrichment by as many. */
-    const { measure, measured, pageBytes } = prefixPage(
-      Array(200).fill(320),
-      0,
-      (i) => 64_001 - 320 * (i + 1),
-    );
-    expect(longestFittingPrefix(pageBytes, measure)).toBe(0);
-    expect(measured).toEqual(Array.from({ length: 199 }, (_, k) => 199 - k));
   });
 });

@@ -217,40 +217,24 @@ export function largestFittingLimit(
 }
 
 /**
- * Which of a page's prefixes to serve: the longest found to fit the budget, or
- * the first — the shortest the caller allows, served even over budget — when
- * none does.
+ * Which of a page's `count` prefixes to serve: the longest that fits the
+ * budget, or the first — the shortest the caller allows, served even over
+ * budget — when none does.
  *
- * Prefixes are tried from the longest. One that overflows rules out each
- * shorter prefix whose page, plus the bytes that measurement spent beyond its
- * page, would still overflow, so the next prefix tried is the longest left.
- * That skip holds while those other bytes — the enrichment — do not grow as
- * the page shortens; where they shrink, a skipped prefix might have fit and a
- * shorter one is served. Each prefix is measured at most once, the first never.
+ * Prefixes are measured from the longest down, each at most once and the first
+ * never. A prefix's overflow says nothing about a shorter one: what a response
+ * adds beyond its page, such as a cursor of the entries still unread, can shrink
+ * as the page shortens as well as grow.
  *
- * @param pageBytes Each prefix's page alone, without what `measure` adds, in
- *   prefix order; none smaller than the one before it.
  * @param measure The whole response serving prefix `index`.
  * @returns The index of the prefix to serve.
  */
 export function longestFittingPrefix(
-  pageBytes: readonly ResponseBytes[],
+  count: number,
   measure: (index: number) => ResponseBytes,
 ): number {
-  let index = pageBytes.length - 1;
-  while (index > 0) {
-    const bytes = measure(index);
-    if (fitsBudget(bytes)) return index;
-    const page = pageBytes[index] as ResponseBytes;
-    const extraContent = bytes.contentBytes - page.contentBytes;
-    const extraStructured = bytes.structuredBytes - page.structuredBytes;
-    const fitsWithExtra = ({ contentBytes, structuredBytes }: ResponseBytes) =>
-      fitsBudget({
-        contentBytes: contentBytes + extraContent,
-        structuredBytes: structuredBytes + extraStructured,
-      });
-    do index--;
-    while (index > 0 && !fitsWithExtra(pageBytes[index] as ResponseBytes));
+  for (let index = count - 1; index > 0; index--) {
+    if (fitsBudget(measure(index))) return index;
   }
   return 0;
 }

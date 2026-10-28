@@ -2433,6 +2433,35 @@ describe('hn_get_thread — the response budget on both whole surfaces', () => {
     expect(pages.map(okStructured).flatMap(commentIds)).toEqual([...top, ...replies]);
   });
 
+  it('serves the longest page that fits when each dropped comment also drops the replies it queued', async () => {
+    /**
+     * Eight 9,000-byte top-level comments, each with 600 replies. The walk stops
+     * on size after seven; with the cursor carrying 4,200 queued replies they do
+     * not fit. Dropping a comment drops its 600 replies from the cursor too, so
+     * five comments and 3,000 queued replies fit where seven did not.
+     */
+    const top = Array.from({ length: 8 }, (_, i) => 10 + i);
+    const kidsOf: Record<number, number[]> = { 1: top };
+    for (const [k, id] of top.entries()) kidsOf[id] = scattered(600, k * 1_000);
+    serveItems(
+      storyTree({ 1: top }, withText(top, 'x'.repeat(9_000), kidsOf), { descendants: 4_808 }),
+    );
+
+    const result = await callStubbed({ itemId: 1, depth: 2, maxComments: 50 });
+    const sc = okStructured(result);
+
+    expect(commentIds(sc)).toEqual([10, 11, 12, 13, 14]);
+    expect(sc).toMatchObject({ truncationReason: 'size', shown: 5 });
+    expect(surfaces(result).content).toBeLessThanOrEqual(BUDGET);
+    expect(surfaces(result).structured).toBeLessThanOrEqual(BUDGET);
+    expect(decodeThreadCursor(sc.nextCursor as string, 10)?.frontier.map((e) => e.id)).toEqual([
+      15,
+      16,
+      17,
+      ...top.slice(0, 5).flatMap((id) => kidsOf[id] ?? []),
+    ]);
+  });
+
   it('still returns a first comment larger than the budget whole beside a large cursor', async () => {
     const huge = 'y'.repeat(100_000);
     const unread = scattered(1_700);

@@ -1062,17 +1062,14 @@ export const getThread = tool('hn_get_thread', {
       return at;
     };
     const { page, enrichment } = serve(
-      longestFittingPrefix(
-        [...traversal.marks, traversal.end].map((mark) => mark.pageBytes),
-        (index) => {
-          const { page, enrichment } = serve(index);
-          const added = enrichmentBytes(enrichment, threadTrailer);
-          return {
-            contentBytes: page.pageBytes.contentBytes + added.contentBytes,
-            structuredBytes: page.pageBytes.structuredBytes + added.structuredBytes,
-          };
-        },
-      ),
+      longestFittingPrefix(traversal.marks.length + 1, (index) => {
+        const { page, enrichment } = serve(index);
+        const added = enrichmentBytes(enrichment, threadTrailer);
+        return {
+          contentBytes: page.pageBytes.contentBytes + added.contentBytes,
+          structuredBytes: page.pageBytes.structuredBytes + added.structuredBytes,
+        };
+      }),
     );
 
     ctx.log.info('Resolved thread', {
