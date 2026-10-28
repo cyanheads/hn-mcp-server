@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-10-28
+
+hn_search_content, hn_get_user, and hn_get_thread hold each response surface to 64,000 bytes; hn_get_thread, hn_get_stories, and hn_get_user run under one 50-second time budget; the hn-guide agent skill is served as a skill:// resource.
+
 ## [0.5.22](changelog/0.5.x/0.5.22.md) — 2026-10-18
 
 hn_get_thread returns live replies below dead and deleted comments, marks OP against the story's author on comment roots, and issues packed cursors; hn_search_content discloses estimated totals, echoes its criteria, and types its hits; an over-cap count is served at the cap.
