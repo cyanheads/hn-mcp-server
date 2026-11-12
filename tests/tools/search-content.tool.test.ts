@@ -129,7 +129,12 @@ describe('hn_search_content handler', () => {
       algoliaResponse({
         hits: [
           { ...storyHit, _tags: ['story', 'author_alice', 'story_123'] },
-          { ...commentHit, _tags: ['comment', 'author_bob', 'story_123'] },
+          {
+            ...commentHit,
+            parent_id: 123,
+            story_url: 'https://example.com',
+            _tags: ['comment', 'author_bob', 'story_123'],
+          },
         ],
         nbHits: 100_000,
         nbPages: 34,
@@ -168,6 +173,8 @@ describe('hn_search_content handler', () => {
           createdAt: '2024-01-02T00:00:00Z',
           storyTitle: 'Test Story',
           storyId: 123,
+          parentId: 123,
+          storyUrl: 'https://example.com',
           text: 'This is a comment',
         },
       ],
@@ -539,6 +546,34 @@ describe('hn_search_content view projection', () => {
     expect(rendered).toContain('terms: context, protocol, story');
   });
 
+  it('keeps parentId and storyUrl on both surfaces under view "compact"', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({
+        hits: [
+          {
+            ...longCommentHit,
+            parent_id: 401,
+            story_url: 'https://example.com/spec',
+            _tags: ['comment', 'author_bob', 'story_123'],
+          },
+        ],
+        nbHits: 1,
+        nbPages: 1,
+      }),
+    );
+
+    const result = await callSearch({ query: 'model context protocol', view: 'compact' });
+    const hit = (structured(result).hits as Array<Record<string, unknown>>)[0]!;
+    const text = contentText(result);
+
+    expect(hit).toMatchObject({ parentId: 401, storyUrl: 'https://example.com/spec' });
+    expect(hit.text).toBeUndefined();
+    expect(text).toContain(
+      'id:456 | type:comment | parent:401 | bob | 5 pts | 2024-01-02T00:00:00Z\nhttps://example.com/spec\n\n> match — terms: context, protocol, story',
+    );
+    expect(text).not.toContain('worth reading end to end');
+  });
+
   it('keeps the title highlight under view "compact"', async () => {
     mockSearch.mockResolvedValue(
       algoliaResponse({
@@ -734,6 +769,73 @@ describe('hn_search_content format', () => {
     expect(text).toContain('id:456 | bob | 10 pts | 2024-03-20');
     expect(text).toContain('I think Rust is the best choice for systems programming.');
   });
+
+  it('puts parent:<id> after type:comment, and storyUrl on its own line before the quoted body', () => {
+    const content = searchHn.format!({
+      hits: [
+        {
+          id: 456,
+          type: 'comment',
+          author: 'bob',
+          points: 10,
+          createdAt: '2024-03-20T08:00:00Z',
+          storyTitle: 'Rust in production',
+          storyId: 100,
+          parentId: 401,
+          storyUrl: 'https://example.com/rust_in*prod',
+          text: 'We run it everywhere.',
+        },
+      ],
+      query: 'rust',
+    });
+
+    expect(firstText(content)).toBe(
+      [
+        '## "rust" — search results',
+        '',
+        '### Comment on "Rust in production" (story id:100)',
+        'id:456 | type:comment | parent:401 | bob | 10 pts | 2024-03-20T08:00:00Z',
+        'https://example.com/rust_in*prod',
+        '> We run it everywhere.',
+      ].join('\n'),
+    );
+  });
+
+  it.each([
+    [
+      'a comment',
+      { type: 'comment', storyTitle: 'Rust', storyId: 100 },
+      '### Comment on "Rust" (story id:100)',
+    ],
+    ['a titled hit', { type: 'story', title: 'Rust' }, '### Rust'],
+    ['a poll option', { type: 'pollopt' }, '### Poll option by bob'],
+  ] as const)(
+    'renders parent:<id> after the type, then the hit url before storyUrl, on %s',
+    (_label, shape, heading) => {
+      const content = searchHn.format!({
+        hits: [
+          {
+            id: 456,
+            author: 'bob',
+            createdAt: '2024-03-20T08:00:00Z',
+            parentId: 401,
+            url: 'https://example.com/own',
+            storyUrl: 'https://example.com/story',
+            ...shape,
+          },
+        ],
+      });
+
+      expect(firstText(content)).toContain(
+        [
+          heading,
+          `id:456 | type:${shape.type} | parent:401 | bob | 2024-03-20T08:00:00Z`,
+          'https://example.com/own',
+          'https://example.com/story',
+        ].join('\n'),
+      );
+    },
+  );
 
   it('renders full comment text without truncation', () => {
     const longText = 'a'.repeat(250);
@@ -1459,6 +1561,192 @@ describe('hn_search_content minPoints on unscored types', () => {
     expect(description).toMatch(/comments/i);
     expect(description).toMatch(/jobs/i);
     expect(description).toMatch(/no points/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #54 — minComments, the comment-count floor
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content minComments', () => {
+  /** The params object the handler handed to hn.search on its one call. */
+  const sentParams = () => mockSearch.mock.calls[0]![0] as Record<string, unknown>;
+
+  it('accepts 0 and larger integers, rejects negatives and fractions, and sets no cap', () => {
+    expect(searchHn.input.parse({ minComments: 0 }).minComments).toBe(0);
+    expect(searchHn.input.parse({ minComments: 300 }).minComments).toBe(300);
+    for (const minComments of [-1, 1.5, true]) {
+      expect(() => searchHn.input.parse({ minComments })).toThrow();
+    }
+    const schema = inputProperty('minComments') as SchemaNode & {
+      minimum?: number;
+      maximum?: number;
+    };
+    expect(schema.minimum).toBe(0);
+    /** `.int()` advertises the safe-integer bound; no tighter cap is set. */
+    expect(schema.maximum ?? Number.MAX_SAFE_INTEGER).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it('sends minComments to the service with the dateRange of the issue example', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await callSearch({
+      query: '"postgres"',
+      tags: 'story',
+      dateRange: { start: '2026-01-01' },
+      minComments: 300,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams()).toMatchObject({
+      query: '"postgres"',
+      tags: 'story',
+      dateRange: { start: '2026-01-01' },
+      minComments: 300,
+    });
+  });
+
+  it.each(['comment', 'job'])(
+    'fails tags %j with minComments before any upstream call, on both surfaces',
+    async (tags) => {
+      for (const minComments of [0, 300]) {
+        const result = await callSearch({ query: 'rust', tags, minComments });
+        const error = wireError(result);
+
+        expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(error.data?.reason).toBe('min_comments_unscored_type');
+        expect(error.message).toBe(
+          `minComments cannot match tags "${tags}": ${tags} records carry no comment count, so any minComments excludes every one.`,
+        );
+        expect(error.data?.recovery?.hint).toMatch(/drop minComments/i);
+        expect(contentText(result)).toContain('min_comments_unscored_type');
+        expect(contentText(result)).toContain(error.message);
+        expect(contentText(result)).toContain(error.data!.recovery!.hint!);
+      }
+      expect(mockSearch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('points a min_comments_unscored_type caller at the types that carry a comment count', async () => {
+    const result = await callSearch({ query: 'rust', tags: 'job', minComments: 300 });
+    const hint = wireError(result).data?.recovery?.hint;
+
+    expect(hint).toBe(
+      'Drop minComments to search comments or jobs, or search a type with a comment count (story, poll, ask_hn, show_hn, front_page) to filter by comments.',
+    );
+    expect(contentText(result)).toContain(hint!);
+  });
+
+  it.each(['comment', 'job'])(
+    'fails tags %j with minPoints and minComments as min_points_unscored_type, unchanged',
+    async (tags) => {
+      const result = await callSearch({ tags, minPoints: 10, minComments: 300 });
+      const error = wireError(result);
+      const declared = searchHn.errors!.find((e) => e.reason === 'min_points_unscored_type');
+
+      expect(error.data?.reason).toBe('min_points_unscored_type');
+      expect(error.message).toBe(
+        `minPoints cannot match tags "${tags}": ${tags} records carry no points, so any minPoints excludes every one.`,
+      );
+      expect(error.data?.recovery?.hint).toBe(declared!.recovery);
+      expect(declared!.recovery).toBe(
+        'Drop minPoints to search comments or jobs, or search a scored type (story, poll, ask_hn, show_hn, front_page) to filter by points.',
+      );
+      expect(mockSearch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([['story'], ['poll'], ['ask_hn'], ['show_hn'], ['front_page'], [undefined]])(
+    'still sends minComments for tags %j',
+    async (tags) => {
+      mockSearch.mockResolvedValue(algoliaResponse());
+
+      const result = await callSearch({ query: 'rust', ...(tags && { tags }), minComments: 0 });
+
+      expect(result.isError).toBeFalsy();
+      expect(sentParams().minComments).toBe(0);
+    },
+  );
+
+  it('runs { minComments: 300 } alone as a filter-only search, naming it among the filters to relax', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await callSearch({ minComments: 300 });
+    const sc = structured(result);
+
+    expect(mockSearch).toHaveBeenCalledTimes(1);
+    expect(sentParams()).not.toHaveProperty('query');
+    expect(sentParams().minComments).toBe(300);
+    expect(sc.notice).toBe('No items matched these filters: minComments. Relax or change them.');
+    expect(contentText(result)).toContain(sc.notice as string);
+  });
+
+  it('names minComments right after minPoints in the relax sentence', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await callSearch({
+      query: 'postgres',
+      tags: 'story',
+      minPoints: 10,
+      minComments: 300,
+      dateRange: { start: '2026-01-01' },
+    });
+
+    expect(structured(result).notice).toBe(
+      'Try broader keywords, or relax these filters: tags, minPoints, minComments, dateRange.',
+    );
+  });
+
+  it('echoes minComments in criteria after minPoints, on both surfaces, as sent', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse({ hits: [storyHit], nbHits: 1, nbPages: 1 }));
+
+    const result = await callSearch({ tags: 'story', minPoints: 10, minComments: 300 });
+    const criteria = structured(result).criteria as Record<string, unknown>;
+
+    expect(criteria).toStrictEqual({
+      tags: 'story',
+      minPoints: 10,
+      minComments: 300,
+      sort: 'relevance',
+      count: 30,
+      view: 'full',
+    });
+    expect(Object.keys(criteria).indexOf('minComments')).toBe(
+      Object.keys(criteria).indexOf('minPoints') + 1,
+    );
+    expect(criteria.minComments).toBe(sentParams().minComments);
+    expect(contentText(result)).toContain(
+      '**criteria:** tags: story | minPoints: 10 | minComments: 300 | sort: relevance | count: 30 | view: full',
+    );
+  });
+
+  it('echoes minComments: 0 rather than dropping it as unset', async () => {
+    mockSearch.mockResolvedValue(algoliaResponse());
+
+    const result = await callSearch({ minComments: 0 });
+
+    expect(structured(result).criteria).toMatchObject({ minComments: 0 });
+    expect(contentText(result)).toContain('**criteria:** minComments: 0 | sort: relevance');
+  });
+
+  it('describes where minComments applies and what any value excludes', () => {
+    const { description } = inputProperty('minComments');
+
+    expect(description).toMatch(/stories and polls/);
+    expect(description).toMatch(/ask_hn, show_hn, and front_page/);
+    expect(description).toMatch(/comments, jobs, and poll options/);
+    expect(description).toMatch(/excludes/);
+    expect(description).toMatch(/"comment" or "job" is rejected/);
+  });
+
+  it('names minComments wherever the filters are listed', () => {
+    const recovery = searchHn.errors!.find((e) => e.reason === 'missing_query_or_filter')!.recovery;
+
+    expect(recovery).toContain('minPoints, minComments, or a dateRange bound');
+    expect(inputProperty('query').description).toContain(
+      'tags, author, storyId, minPoints, minComments, or a dateRange bound',
+    );
+    expect(searchHn.description).toMatch(/minimum comment count/);
   });
 });
 
@@ -2815,6 +3103,112 @@ describe('hn_search_content hit types', () => {
 });
 
 // ---------------------------------------------------------------------------
+// #53 — a comment hit names the item it replied to and its story's link
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content comment parentId and storyUrl', () => {
+  /** Shaped like hit 50349000: a top-level comment on Ask HN text post 50338728, whose record has no story_url. */
+  const topLevelComment = {
+    ...commentHit,
+    objectID: '50349000',
+    parent_id: 50338728,
+    story_id: 50338728,
+    story_title: 'Ask HN: A text post',
+    _tags: ['comment', 'author_bob', 'story_50338728'],
+  };
+  /** A reply to that comment, in a thread whose story links out. */
+  const nestedReply = {
+    ...commentHit,
+    objectID: '50349100',
+    parent_id: 50349000,
+    story_id: 50338728,
+    story_title: 'Ask HN: A text post',
+    story_url: 'https://example.com/post',
+    _tags: ['comment', 'author_bob', 'story_50338728'],
+  };
+
+  const hitsOf = async (hits: unknown[], input: Record<string, unknown> = { tags: 'comment' }) => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: hits as never, nbHits: hits.length, nbPages: 1 }),
+    );
+    const result = await callSearch(input);
+    return {
+      hits: structured(result).hits as Array<Record<string, unknown>>,
+      text: contentText(result),
+    };
+  };
+
+  it('gives hit 50349000 parentId 50338728 and no storyUrl, on both surfaces', async () => {
+    const { hits, text } = await hitsOf([topLevelComment], {
+      query: 'remote rust',
+      storyId: 50338728,
+      tags: 'comment',
+    });
+
+    expect(hits[0]).toMatchObject({ id: 50349000, parentId: 50338728, storyId: 50338728 });
+    expect(hits[0]).not.toHaveProperty('storyUrl');
+    expect(text).toContain(
+      'id:50349000 | type:comment | parent:50338728 | bob | 5 pts | 2024-01-02T00:00:00Z\n> This is a comment',
+    );
+  });
+
+  it("names a nested reply's parent comment as its parentId, not its storyId", async () => {
+    const { hits, text } = await hitsOf([nestedReply]);
+
+    expect(hits[0]).toMatchObject({ parentId: 50349000, storyId: 50338728 });
+    expect(text).toContain('id:50349100 | type:comment | parent:50349000 | bob |');
+    expect(text).not.toContain('parent:50338728');
+  });
+
+  it("puts storyUrl on its own line under the meta line, trimmed as a story hit's url is", async () => {
+    const { hits, text } = await hitsOf([
+      { ...nestedReply, story_url: '  https://example.com/post  ' },
+    ]);
+
+    expect(hits[0]!.storyUrl).toBe('https://example.com/post');
+    expect(text).toContain(
+      'parent:50349000 | bob | 5 pts | 2024-01-02T00:00:00Z\nhttps://example.com/post\n> This is a comment',
+    );
+  });
+
+  it.each([
+    ['absent', {}],
+    ['an empty string', { story_url: '' }],
+    ['whitespace', { story_url: '   ' }],
+    ['null', { story_url: null }],
+  ])('leaves storyUrl off both surfaces when story_url is %s', async (_label, storyUrl) => {
+    const { hits, text } = await hitsOf([{ ...topLevelComment, ...storyUrl }]);
+
+    expect(hits[0]).not.toHaveProperty('storyUrl');
+    expect(hits[0]!.parentId).toBe(50338728);
+    expect(text).not.toContain('http');
+  });
+
+  it('leaves parentId off both surfaces when parent_id is null', async () => {
+    const { hits, text } = await hitsOf([{ ...nestedReply, parent_id: null }]);
+
+    expect(hits[0]).not.toHaveProperty('parentId');
+    expect(hits[0]!.storyUrl).toBe('https://example.com/post');
+    expect(text).not.toContain('parent:');
+  });
+
+  it.each([
+    ['story', ['story', 'author_a', 'story_123']],
+    ['poll', ['poll', 'author_a']],
+    ['job', ['job', 'author_a']],
+    ['pollopt', ['pollopt', 'author_a']],
+  ])('carries neither field on a %s hit, whose record has neither', async (_label, _tags) => {
+    const { hits, text } = await hitsOf([{ ...storyHit, story_id: 123, _tags }], {
+      author: 'a',
+    });
+
+    expect(hits[0]).not.toHaveProperty('parentId');
+    expect(hits[0]).not.toHaveProperty('storyUrl');
+    expect(text).not.toContain('parent:');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // #45 — count above the per-call cap is served at the cap, not rejected
 // ---------------------------------------------------------------------------
 
@@ -3122,6 +3516,9 @@ describe('hn_search_content response budget', () => {
 
   type WireHit = Record<string, any> & { id: number; text?: string; textTruncated?: boolean };
 
+  /** The link of story 123, which every matched comment below belongs to. */
+  const STORY_URL = 'https://example.com/lisp';
+
   /** Both surfaces of an assembled result, sized as the caller receives them; `sc` is the wire JSON. */
   function measure(result: ToolResult) {
     structured(result);
@@ -3145,6 +3542,8 @@ describe('hn_search_content response budget', () => {
       ...commentHit,
       objectID: String(id),
       comment_text: text,
+      parent_id: 123,
+      story_url: STORY_URL,
       _tags: ['comment', 'author_bob', 'story_123'],
       _highlightResult: {
         comment_text: {
@@ -3211,6 +3610,8 @@ describe('hn_search_content response budget', () => {
         createdAt: '2024-01-02T00:00:00Z',
         storyTitle: 'Test Story',
         storyId: 123,
+        parentId: 123,
+        storyUrl: STORY_URL,
         text,
         highlights: { text: highlighted, matchedWords: ['lisp'] },
       },
@@ -3222,7 +3623,8 @@ describe('hn_search_content response budget', () => {
         '## "lisp" — search results',
         '',
         '### Comment on "Test Story" (story id:123)',
-        'id:1 | type:comment | bob | 5 pts | 2024-01-02T00:00:00Z',
+        'id:1 | type:comment | parent:123 | bob | 5 pts | 2024-01-02T00:00:00Z',
+        STORY_URL,
         `> ${text}`,
         '',
         `> match — terms: lisp | body: ${highlighted}`,
@@ -3379,5 +3781,43 @@ describe('hn_search_content response budget', () => {
     expect(sc).not.toHaveProperty('highlightsTextOmitted');
     expect(sc.hits[0]!.textTruncated).toBe(true);
     expect(sc.notice).toBe(cutSentence([8], false));
+  });
+
+  it('measures parentId and storyUrl on both surfaces, and neither step cuts or drops them', async () => {
+    /**
+     * Ten 3,000-byte bodies fit with room to spare on their own; ten copies of a
+     * 4,000-byte story link push the page over the budget even once step 1 has
+     * dropped the body highlights, so step 2 must cut the bodies around them.
+     */
+    const longUrl = `https://example.com/lisp?ref=${'a'.repeat(3_971)}`;
+    const ids = Array.from({ length: 10 }, (_, i) => 31 + i);
+    servePage(
+      ids.map((id) => ({
+        ...matchedComment(id, body(3_000)),
+        parent_id: id - 1,
+        story_url: longUrl,
+      })),
+    );
+
+    const { sc, text, contentBytes, structuredBytes } = measure(
+      await callSearch({ query: 'lisp' }),
+    );
+
+    expect(longUrl).toHaveLength(4_000);
+    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
+    /** The links are counted once each, not missed or double-counted: the cut is the largest that fits. */
+    expect(Math.max(contentBytes, structuredBytes)).toBeGreaterThan(BUDGET_BYTES - 64);
+
+    expect(sc.highlightsTextOmitted).toBe(true);
+    expect(sc.notice).toBe(cutSentence(ids));
+    expect(sc.hits.map((h) => [h.id, h.parentId, h.storyUrl, h.textTruncated])).toStrictEqual(
+      ids.map((id) => [id, id - 1, longUrl, true]),
+    );
+    for (const id of ids) {
+      expect(text).toContain(
+        `id:${id} | type:comment | parent:${id - 1} | bob | 5 pts | 2024-01-02T00:00:00Z\n${longUrl}\n> lisp`,
+      );
+    }
   });
 });

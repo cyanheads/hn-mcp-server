@@ -152,6 +152,7 @@ const searchCriteria = z
     author: z.string().optional().describe('Author filter — the username matched, trimmed.'),
     storyId: z.number().optional().describe('Discussion filter: a story or poll root id.'),
     minPoints: z.number().optional().describe('Minimum score.'),
+    minComments: z.number().optional().describe('Minimum comment count.'),
     dateRange: z
       .object({
         start: z
@@ -196,6 +197,7 @@ function renderCriteria(c: SearchCriteria): string {
     c.author != null ? `author: "${escapeQuoted(c.author)}"` : null,
     c.storyId != null ? `storyId: ${c.storyId}` : null,
     c.minPoints != null ? `minPoints: ${c.minPoints}` : null,
+    c.minComments != null ? `minComments: ${c.minComments}` : null,
     bounds ? `dateRange: ${bounds.filter(Boolean).join(', ')}` : null,
     `sort: ${c.sort}`,
     `count: ${c.count}`,
@@ -206,13 +208,17 @@ function renderCriteria(c: SearchCriteria): string {
 
 /** The filters a caller set, in the order notices name them. `sort`, `count`, `page`, and `view` are not filters. */
 function appliedFilters(
-  input: Pick<SearchNoticeFacts, 'tags' | 'author' | 'storyId' | 'minPoints' | 'dateRange'>,
+  input: Pick<
+    SearchNoticeFacts,
+    'tags' | 'author' | 'storyId' | 'minPoints' | 'minComments' | 'dateRange'
+  >,
 ): string[] {
   const filters: string[] = [];
   if (input.tags) filters.push('tags');
   if (input.author) filters.push('author');
   if (input.storyId != null) filters.push('storyId');
   if (input.minPoints != null) filters.push('minPoints');
+  if (input.minComments != null) filters.push('minComments');
   if (input.dateRange?.start || input.dateRange?.end) filters.push('dateRange');
   return filters;
 }
@@ -226,6 +232,7 @@ export interface SearchNoticeFacts {
   dateRange?: { start?: string | undefined; end?: string | undefined } | undefined;
   /** The URL prefix dropped from the caller's query before searching. */
   droppedPrefix?: string | undefined;
+  minComments?: number | undefined;
   minPoints?: number | undefined;
   /**
    * The caller's count and page when count was above the per-call cap. The
@@ -457,6 +464,18 @@ const searchHit = z
       .describe(
         "Parent story ID for comment hits; equals `id` for story hits. Absent for polls, poll options, and jobs — a poll's own `id` is its discussion root.",
       ),
+    parentId: z
+      .number()
+      .optional()
+      .describe(
+        "The item a comment hit replies to: its story's id for a top-level comment, otherwise the parent comment's id — hn_get_thread with this id reads it. Present on comment hits only.",
+      ),
+    storyUrl: z
+      .string()
+      .optional()
+      .describe(
+        "External link URL of a comment hit's story. Absent when that story is a text post with no link, and on every hit that is not a comment.",
+      ),
     text: z
       .string()
       .optional()
@@ -507,6 +526,7 @@ function projectHit(hit: AlgoliaHit, text: boolean, bodyHighlight: boolean): Sea
   const rawText = text ? (hit.comment_text ?? hit.story_text ?? hit.job_text) : undefined;
   const url = normalizeUrl(hit.url);
   const domain = extractDomain(url);
+  const storyUrl = normalizeUrl(hit.story_url);
   const highlights = extractHighlights(hit, bodyHighlight);
   const type = hitType(hit._tags);
   return {
@@ -521,6 +541,8 @@ function projectHit(hit: AlgoliaHit, text: boolean, bodyHighlight: boolean): Sea
     createdAt: hit.created_at,
     storyTitle: hit.story_title != null ? decodeHtmlEntities(hit.story_title) : undefined,
     storyId: hit.story_id ?? undefined,
+    ...(hit.parent_id != null && { parentId: hit.parent_id }),
+    ...(storyUrl && { storyUrl }),
     text: rawText ? stripHtml(rawText) || undefined : undefined,
     ...(highlights && { highlights }),
   };
@@ -563,6 +585,30 @@ function renderBody(h: SearchHit): string {
   return h.textTruncated ? `${text}\n\n${cutPointer(h.id)}` : text;
 }
 
+/**
+ * A hit's meta line: id, type, and the item a comment replies to, in the order
+ * `hn_get_thread` opens its meta line with, then author, score, comment count,
+ * and time. Each field renders when present, whatever the hit's type.
+ */
+function metaLine(h: SearchHit): string {
+  return [
+    `id:${h.id}`,
+    h.type ? `type:${h.type}` : null,
+    h.parentId != null ? `parent:${h.parentId}` : null,
+    h.author,
+    h.points != null ? `${h.points} pts` : null,
+    h.numComments != null ? `${h.numComments} comments` : null,
+    h.createdAt,
+  ]
+    .filter(Boolean)
+    .join(' | ');
+}
+
+/** The hit's own link, then its story's, each on a line of its own under the meta line. */
+function renderLinks(h: SearchHit): string {
+  return [h.url, h.storyUrl].map((link) => (link ? `\n${link}` : '')).join('');
+}
+
 function formatSearch(result: SearchOutput) {
   if (result.hits.length === 0) {
     return [
@@ -575,20 +621,12 @@ function formatSearch(result: SearchOutput) {
   }
 
   const lines = result.hits.map((h) => {
-    const typeToken = h.type ? `type:${h.type}` : null;
+    const meta = metaLine(h);
+    const links = renderLinks(h);
     const hlLine = h.highlights ? renderHighlights(h.highlights) : '';
     if (h.type === 'pollopt') {
       // A poll option's search record carries no text and no poll; hn_get_thread has both.
-      const meta = [
-        `id:${h.id}`,
-        typeToken,
-        h.author,
-        h.points != null ? `${h.points} pts` : null,
-        h.createdAt,
-      ]
-        .filter(Boolean)
-        .join(' | ');
-      return `### Poll option by ${h.author}\n${meta}\nOption text and its poll: hn_get_thread with itemId ${h.id}${hlLine}`;
+      return `### Poll option by ${h.author}\n${meta}${links}\nOption text and its poll: hn_get_thread with itemId ${h.id}${hlLine}`;
     }
     if (h.title) {
       // Story result — Algolia returns storyId === id for stories, so suppress the parent ref unless it actually differs or a parent title is set.
@@ -596,31 +634,11 @@ function formatSearch(result: SearchOutput) {
         (h.storyId != null && h.storyId !== h.id) || h.storyTitle
           ? ` | story:"${escapeQuoted(h.storyTitle ?? '?')}"#${h.storyId ?? '?'}`
           : '';
-      const meta = [
-        `id:${h.id}`,
-        typeToken,
-        h.author,
-        h.points != null ? `${h.points} pts` : null,
-        h.numComments != null ? `${h.numComments} comments` : null,
-        h.createdAt,
-      ]
-        .filter(Boolean)
-        .join(' | ');
       const domain = h.domain ? ` (${h.domain})` : '';
-      const url = h.url ? `\n${h.url}` : '';
-      return `### ${escapeInline(h.title)}${domain}\n${meta}${parentRef}${url}${renderBody(h)}${hlLine}`;
+      return `### ${escapeInline(h.title)}${domain}\n${meta}${parentRef}${links}${renderBody(h)}${hlLine}`;
     }
     // Comment result — parent context in heading.
-    const meta = [
-      `id:${h.id}`,
-      typeToken,
-      h.author,
-      h.points != null ? `${h.points} pts` : null,
-      h.createdAt,
-    ]
-      .filter(Boolean)
-      .join(' | ');
-    return `### Comment on "${escapeQuoted(h.storyTitle ?? 'unknown')}" (story id:${h.storyId ?? '?'})\n${meta}${renderBody(h)}${hlLine}`;
+    return `### Comment on "${escapeQuoted(h.storyTitle ?? 'unknown')}" (story id:${h.storyId ?? '?'})\n${meta}${links}${renderBody(h)}${hlLine}`;
   });
 
   const header =
@@ -632,7 +650,7 @@ function formatSearch(result: SearchOutput) {
 
 export const searchHn = tool('hn_search_content', {
   description:
-    'Search Hacker News stories, comments, polls, and jobs via Algolia — by keyword, by filters alone, or both. Filterable by content type, author, parent story, date range, and minimum points.',
+    'Search Hacker News stories, comments, polls, and jobs via Algolia — by keyword, by filters alone, or both. Filterable by content type, author, parent story, date range, minimum points, and minimum comment count.',
   annotations: { readOnlyHint: true },
   errors: [
     {
@@ -640,7 +658,7 @@ export const searchHn = tool('hn_search_content', {
       code: JsonRpcErrorCode.InvalidParams,
       when: 'Neither a query nor any filter was supplied, so there is nothing to search by.',
       recovery:
-        'Pass a query, or at least one filter: tags, author, storyId, minPoints, or a dateRange bound. sort, count, page, and view do not count as filters.',
+        'Pass a query, or at least one filter: tags, author, storyId, minPoints, minComments, or a dateRange bound. sort, count, page, and view do not count as filters.',
       severity: 'notice',
     },
     {
@@ -657,6 +675,14 @@ export const searchHn = tool('hn_search_content', {
       when: 'minPoints was combined with tags "comment" or "job", record types Algolia stores without points.',
       recovery:
         'Drop minPoints to search comments or jobs, or search a scored type (story, poll, ask_hn, show_hn, front_page) to filter by points.',
+      severity: 'notice',
+    },
+    {
+      reason: 'min_comments_unscored_type',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'minComments was combined with tags "comment" or "job", record types Algolia stores without a comment count.',
+      recovery:
+        'Drop minComments to search comments or jobs, or search a type with a comment count (story, poll, ask_hn, show_hn, front_page) to filter by comments.',
       severity: 'notice',
     },
     {
@@ -718,7 +744,7 @@ export const searchHn = tool('hn_search_content', {
       )
       .optional()
       .describe(
-        'Search terms. Supports simple keywords — Algolia handles stemming and relevance, and a hit must contain every term. Matching is typo-tolerant and the last term also matches as a prefix (zig matches Zigbee); wrap a term in double quotes to match it exactly ("zig"), or put - before one to exclude it ("zig" -devlog). Trimmed before searching; blank or whitespace-only input is rejected. To find discussions of a page, pass its URL alone: a query with no spaces that starts with http://, https://, or www. is searched without that prefix, so submissions under either scheme, with or without www., all match. Omit for a filter-only search, which needs at least one of tags, author, storyId, minPoints, or a dateRange bound.',
+        'Search terms. Supports simple keywords — Algolia handles stemming and relevance, and a hit must contain every term. Matching is typo-tolerant and the last term also matches as a prefix (zig matches Zigbee); wrap a term in double quotes to match it exactly ("zig"), or put - before one to exclude it ("zig" -devlog). Trimmed before searching; blank or whitespace-only input is rejected. To find discussions of a page, pass its URL alone: a query with no spaces that starts with http://, https://, or www. is searched without that prefix, so submissions under either scheme, with or without www., all match. Omit for a filter-only search, which needs at least one of tags, author, storyId, minPoints, minComments, or a dateRange bound.',
       ),
     tags: z
       .enum(SEARCH_TAGS)
@@ -767,6 +793,14 @@ export const searchHn = tool('hn_search_content', {
       .describe(
         'Minimum score. Applies to stories and polls, including the ask_hn, show_hn, and front_page subsets. Comments and jobs carry no points in the search index, so any minPoints excludes them — combining it with tags "comment" or "job" is rejected.',
       ),
+    minComments: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe(
+        'Minimum comment count. Applies to stories and polls, including the ask_hn, show_hn, and front_page subsets. Any minComments, 0 included, excludes comments, jobs, and poll options, which carry no comment count in the search index, so an untagged search returns only stories and polls — combining it with tags "comment" or "job" is rejected.',
+      ),
     count: z
       .number()
       .int()
@@ -786,7 +820,7 @@ export const searchHn = tool('hn_search_content', {
       .enum(['full', 'compact'])
       .default('full')
       .describe(
-        `How much of each hit to return. "full" includes every field, within a ${RESPONSE_BUDGET_TEXT}-byte budget on each response surface: a page over it drops highlights.text from every hit (highlightsTextOmitted), and if still over, cuts the longest text bodies to one shared length (textTruncated) — every hit stays on the page. "compact" omits the two body-text fields — \`text\` and \`highlights.text\` — which together can repeat a long comment twice per hit; everything else (id, title, url, domain, author, points, comment count, timestamp, parent story, title highlight, matchedWords) is unchanged. Use "compact" to scan many results, then pass a hit id to hn_get_thread to read the body you skipped.`,
+        `How much of each hit to return. "full" includes every field, within a ${RESPONSE_BUDGET_TEXT}-byte budget on each response surface: a page over it drops highlights.text from every hit (highlightsTextOmitted), and if still over, cuts the longest text bodies to one shared length (textTruncated) — every hit stays on the page. "compact" omits the two body-text fields — \`text\` and \`highlights.text\` — which together can repeat a long comment twice per hit; everything else (id, title, url, domain, author, points, comment count, timestamp, parent story, parentId, storyUrl, title highlight, matchedWords) is unchanged. Use "compact" to scan many results, then pass a hit id to hn_get_thread to read the body you skipped.`,
       ),
   }),
   output: searchOutput,
@@ -870,6 +904,13 @@ export const searchHn = tool('hn_search_content', {
       );
     }
 
+    if (input.minComments != null && (input.tags === 'comment' || input.tags === 'job')) {
+      throw ctx.fail(
+        'min_comments_unscored_type',
+        `minComments cannot match tags "${input.tags}": ${input.tags} records carry no comment count, so any minComments excludes every one.`,
+      );
+    }
+
     const filters = appliedFilters(input);
     if (input.query == null && filters.length === 0) {
       throw ctx.fail(
@@ -921,6 +962,7 @@ export const searchHn = tool('hn_search_content', {
         ...(params.author != null && { author: params.author }),
         ...(params.storyId != null && { storyId: params.storyId }),
         ...(params.minPoints != null && { minPoints: params.minPoints }),
+        ...(params.minComments != null && { minComments: params.minComments }),
         ...((bounds.start != null || bounds.end != null) && {
           dateRange: {
             ...(bounds.start != null && { start: isoSeconds(bounds.start) }),
