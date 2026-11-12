@@ -69,6 +69,24 @@ export const getStories = tool('hn_get_stories', {
       retryable: true,
       thrownBy: 'service',
     },
+    {
+      reason: 'upstream_no_response',
+      code: JsonRpcErrorCode.Timeout,
+      when: `Every item on the page failed, none with HTTP 429, and no answer from the HN API was the most common failure — timed out after retries, could not connect, or ran past this call's ${CALL_BUDGET_MS / 1000}-second time budget.`,
+      recovery:
+        'Retry the same call after a short delay; when the time budget cut any of the items, pass a smaller count so fewer items share it.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'retry_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      when: `The HN API was too slow to return the feed: its retries ran past this call's ${CALL_BUDGET_MS / 1000}-second time budget.`,
+      recovery:
+        "Retry the same call after a short delay; the HN API answered too slowly to finish within this call's time budget.",
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
   input: z.object({
     feed: z

@@ -35,7 +35,13 @@ vi.mock('@/services/hn/hn-service.js', async (importOriginal) => ({
 import { getStories } from '@/mcp-server/tools/definitions/get-stories.tool.js';
 import { getHnService, HnService, type ItemSlot } from '@/services/hn/hn-service.js';
 import type { HnItem } from '@/services/hn/types.js';
-import { httpStatus, rejectUnmockedFetch, stall, stubHnApi } from '../helpers/hn-api-stub.js';
+import {
+  httpStatus,
+  rejectUnmockedFetch,
+  stall,
+  stubHangAroundRateLimit,
+  stubHnApi,
+} from '../helpers/hn-api-stub.js';
 
 rejectUnmockedFetch();
 
@@ -1098,6 +1104,29 @@ describe('getStories — the per-call time budget', () => {
     );
   });
 
+  /**
+   * Over the installed stub: the feed's first `hungAttempts` attempts never
+   * answer, and the next one does. Returns the feed's attempt count.
+   */
+  function slowFeed(hungAttempts: number): () => number {
+    const inner = globalThis.fetch;
+    let feedAttempts = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).endsWith('/topstories.json') && ++feedAttempts <= hungAttempts) {
+          return new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+          });
+        }
+        return inner(input, init);
+      }),
+    );
+    return () => feedAttempts;
+  }
+
   it.each([
     [
       [505],
@@ -1111,29 +1140,15 @@ describe('getStories — the per-call time budget', () => {
     'bounds a slow feed and the items after it by one budget (hung %j), naming the budget',
     async (hung, notice) => {
       const { requested } = topFeed(30, hung);
-      const inner = globalThis.fetch;
-      let feedAttempts = 0;
       /** The feed's first three attempts never answer; the fourth, sent at 37 s, does. */
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-          if (String(input).endsWith('/topstories.json') && ++feedAttempts <= 3) {
-            return new Promise<Response>((_, reject) => {
-              init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
-                once: true,
-              });
-            });
-          }
-          return inner(input, init);
-        }),
-      );
+      const feedAttempts = slowFeed(3);
 
       const { result, settledAfter } = await timedCall({ feed: 'top', count: 30 });
       const sc = structured(result);
 
       /** Unbounded: 37 s of feed, then 505's own 47-second ladder — 84 s. */
       expect(settledAfter).toBe(50_000);
-      expect(feedAttempts).toBe(4);
+      expect(feedAttempts()).toBe(4);
       expect(requested().filter((p) => p === '/item/505.json').length).toBeGreaterThan(0);
       expect(storyIds(sc)).toEqual(ids(30).filter((id) => !hung.includes(id)));
       expect(sc.failedIds).toEqual(hung);
@@ -1160,18 +1175,126 @@ describe('getStories — the per-call time budget', () => {
     );
   });
 
-  it('fails with Timeout at the budget when every story hangs, starting nothing past it', async () => {
-    const { requested } = topFeed(100, ids(100));
-
-    const { result, settledAfter } = await timedCall({ feed: 'top', count: 100 });
-    const error = (result.structuredContent as { error: { code: number } }).error;
-
-    /** Unbounded: ten rounds of ten 47-second ladders — 470 s. */
-    expect(settledAfter).toBe(50_000);
+  /** The structuredContent error of a failed call. */
+  const wireError = (result: ToolResult) => {
     expect(result.isError).toBe(true);
+    return (
+      result.structuredContent as {
+        error: { code: number; message: string; data: Record<string, unknown> };
+      }
+    ).error;
+  };
+
+  const NO_RESPONSE_RECOVERY =
+    'Retry the same call after a short delay; when the time budget cut any of the items, pass a smaller count so fewer items share it.';
+
+  it('fails upstream_no_response at the budget when every story hangs, starting nothing past it', async () => {
+    const { requested } = topFeed(30, ids(30));
+
+    const { result, settledAfter } = await timedCall({ feed: 'top', count: 30 });
+    const error = wireError(result);
+
+    /** Unbounded: three rounds of ten 47-second ladders — 141 s. */
+    expect(settledAfter).toBe(50_000);
     expect(error.code).toBe(JsonRpcErrorCode.Timeout);
-    /** 501–510 ran full ladders, 511–520 started at 47 s; 521 onward never started. */
+    /** 501–510 ran full ladders, 511–520 started at 47 s and were cut; 521 onward never started. */
     expect(requested()).not.toContain('/item/521.json');
+    expect(error.message).toBe(
+      "The HN API did not answer for any item on this page (30 items, 20 cut by this call's 50-second time budget).",
+    );
+    expect(error.data).toMatchObject({
+      reason: 'upstream_no_response',
+      itemCount: 30,
+      budgetCut: 20,
+      recovery: { hint: NO_RESPONSE_RECOVERY },
+    });
+    const text = contentText(result);
+    expect(text).toContain(error.message);
+    expect(text).toContain(`Recovery: ${NO_RESPONSE_RECOVERY}`);
+    expect(text).toContain('(reason upstream_no_response');
+  });
+
+  it('fails upstream_no_response, never a deadline reason, when a slow feed leaves every story cut', async () => {
+    topFeed(30, ids(30));
+    /** The feed's first attempt never answers; the second, sent at 11 s, does. */
+    slowFeed(1);
+
+    const { result, settledAfter } = await timedCall({ feed: 'top', count: 30 });
+    const error = wireError(result);
+
+    /** 501–510 start at 11 s and are cut at 50 s; 511–530 never start. */
+    expect(settledAfter).toBe(50_000);
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(error.data).toMatchObject({
+      reason: 'upstream_no_response',
+      itemCount: 30,
+      budgetCut: 30,
+    });
+  });
+
+  it('fails upstream_no_response with no budget cut when every story of a short page hangs', async () => {
+    topFeed(5, ids(5));
+
+    const { result, settledAfter } = await timedCall({ feed: 'top', count: 5 });
+    const error = wireError(result);
+
+    expect(settledAfter).toBe(47_000);
+    expect(error.data).toMatchObject({
+      reason: 'upstream_no_response',
+      itemCount: 5,
+      budgetCut: 0,
+    });
+  });
+
+  it('declares upstream_no_response with the code the service throws, retryable, at error severity', async () => {
+    topFeed(5, ids(5));
+
+    const { result } = await timedCall({ feed: 'top', count: 5 });
+    const error = wireError(result);
+    const declared = getStories.errors?.find((e) => e.reason === 'upstream_no_response');
+
+    expect(error.data.reason).toBe('upstream_no_response');
+    expect(declared).toMatchObject({ code: error.code, retryable: true });
+    /** An upstream fault: no severity, so the framework logs it at error like the other upstream_* reasons. */
+    expect(declared).not.toHaveProperty('severity');
+  });
+
+  it('surfaces the rate limit that stopped the batch, not the hung story ahead of it', async () => {
+    vi.mocked(getHnService).mockReturnValue(new HnService(2));
+    stubHnApi({
+      '/topstories.json': ids(5),
+      '/item/501.json': HUNG,
+      ...Object.fromEntries(
+        ids(5)
+          .slice(1)
+          .map((id) => [`/item/${id}.json`, httpStatus(429, { 'Retry-After': '120' })]),
+      ),
+    });
+
+    const { result } = await timedCall({ feed: 'top', count: 5 });
+    const error = wireError(result);
+
+    expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(error.data).toMatchObject({ reason: 'upstream_rate_limited', retryAfter: '120' });
+  });
+
+  it('declares retry_deadline_exceeded for a feed fetch whose Retry-After wait runs past the budget', async () => {
+    /** Attempt 1 hangs to its 10 s timeout, 2 answers 429 Retry-After: 30, and 3, sent at 41 s, hangs. */
+    const feedAttempts = stubHangAroundRateLimit();
+
+    const { result, settledAfter } = await timedCall({ feed: 'top', count: 3 });
+    const error = wireError(result);
+    const recovery =
+      "Retry the same call after a short delay; the HN API answered too slowly to finish within this call's time budget.";
+
+    expect(settledAfter).toBe(50_000);
+    expect(feedAttempts()).toBe(3);
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(error.data).toMatchObject({
+      reason: 'retry_deadline_exceeded',
+      recovery: { hint: recovery },
+    });
+    expect(contentText(result)).toContain(`Recovery: ${recovery}`);
   });
 
   it('propagates a cancellation that lands while an item fetch is in flight', async () => {

@@ -195,6 +195,24 @@ export const getUser = tool('hn_get_user', {
       retryable: true,
       thrownBy: 'service',
     },
+    {
+      reason: 'upstream_no_response',
+      code: JsonRpcErrorCode.Timeout,
+      when: `Every submission in the window failed, none with HTTP 429, and no answer from the HN API was the most common failure — timed out after retries, could not connect, or ran past this call's ${CALL_BUDGET_MS / 1000}-second time budget.`,
+      recovery:
+        'Retry the same call after a short delay; when the time budget cut any of the submissions, pass a smaller submissionCount so fewer share it.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'retry_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      when: `The HN API was too slow to return the user profile: its retries ran past this call's ${CALL_BUDGET_MS / 1000}-second time budget.`,
+      recovery:
+        "Retry the same call after a short delay; the HN API answered too slowly to finish within this call's time budget.",
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
   input: z.object({
     username: z
@@ -255,7 +273,7 @@ export const getUser = tool('hn_get_user', {
       .string()
       .optional()
       .describe(
-        `Pagination context — which window of the history this page covers and the submissionOffset to send next, the submission IDs that failed to load and how to retry them, or a warning that the offset is past the end — noting when submissionCount was served at its per-call cap or the call's ${CALL_BUDGET_MS / 1000}-second time budget cut the failed fetches, and closing with the submissions whose text was cut to keep the page within the ${RESPONSE_BUDGET_TEXT}-byte response budget. Absent when the page reaches the end of the history with no failed IDs and no cut text, or when no submissions were resolved.`,
+        `Pagination context — which window of the history this page covers and the submissionOffset to send next, the submission IDs that failed to load and how to retry them, why a final window came back empty (every item in it deleted or flagged), or a warning that the offset is past the end — noting when submissionCount was served at its per-call cap or the call's ${CALL_BUDGET_MS / 1000}-second time budget cut the failed fetches, and closing with the submissions whose text was cut to keep the page within the ${RESPONSE_BUDGET_TEXT}-byte response budget. Absent when the page reaches the end of the history with at least one live submission, no failed IDs, and no cut text, or when no submissions were resolved.`,
       ),
   },
   enrichmentTrailer: userTrailer,
@@ -321,6 +339,7 @@ export const getUser = tool('hn_get_user', {
       failedIds.length > 0
         ? `Could not fetch ${failedIds.length} of ${slots.length} submissions in this window (id${failedIds.length === 1 ? '' : 's'} ${failedIds.join(', ')}).${timeBudgetCutSentence(slots)} Retry with submissionOffset: ${offset}, or pass an id as itemId to hn_get_thread to fetch that item alone.`
         : undefined;
+    const emptyWindowMessage = `No live submissions in this window (submissionOffset:${offset}, total:${total}). Items may have been deleted or flagged.`;
 
     /** The notice for this page with the bodies of `cutIds` cut to the response budget; the budget sentence comes last. */
     const noticeFor = (cutIds: readonly number[]) => {
@@ -337,7 +356,7 @@ export const getUser = tool('hn_get_user', {
             `Set submissionOffset to ${pageEnd} for the next page.`,
             budget,
           ]
-        : [failureMessage, budget];
+        : [failureMessage ?? (shown === 0 ? emptyWindowMessage : undefined), budget];
       return sentences.filter(Boolean).join(' ') || undefined;
     };
 

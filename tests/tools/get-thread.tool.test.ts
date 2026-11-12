@@ -35,7 +35,13 @@ import {
   normalizeUrl,
   stripHtml,
 } from '@/services/hn/hn-service.js';
-import { httpStatus, rejectUnmockedFetch, stall, stubHnApi } from '../helpers/hn-api-stub.js';
+import {
+  httpStatus,
+  rejectUnmockedFetch,
+  stall,
+  stubHangAroundRateLimit,
+  stubHnApi,
+} from '../helpers/hn-api-stub.js';
 
 rejectUnmockedFetch();
 
@@ -3844,6 +3850,25 @@ describe('hn_get_thread — the per-call time budget', () => {
 
     expect(settledAfter).toBe(47_000);
     expect(wireError(result).code).toBe(JsonRpcErrorCode.Timeout);
+  });
+
+  it('declares retry_deadline_exceeded for a root fetch whose Retry-After wait runs past the budget', async () => {
+    /** Attempt 1 hangs to its 10 s timeout, 2 answers 429 Retry-After: 30, and 3, sent at 41 s, hangs. */
+    const rootAttempts = stubHangAroundRateLimit();
+    const recovery =
+      "Retry the same call after a short delay; the HN API answered too slowly to finish within this call's time budget.";
+
+    const { result, settledAfter } = await timedCall({ itemId: 1, depth: 2 });
+    const error = wireError(result);
+
+    expect(settledAfter).toBe(50_000);
+    expect(rootAttempts()).toBe(3);
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(error.data).toMatchObject({
+      reason: 'retry_deadline_exceeded',
+      recovery: { hint: recovery },
+    });
+    expect(allText(result)).toContain(`Recovery: ${recovery}`);
   });
 
   it('propagates a cancellation that lands during a budget-bounded walk', async () => {

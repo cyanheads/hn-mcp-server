@@ -24,7 +24,13 @@ vi.mock('@/services/hn/hn-service.js', async (importOriginal) => ({
 import { getUser } from '@/mcp-server/tools/definitions/get-user.tool.js';
 import { quoteBody } from '@/mcp-server/tools/markdown-escape.js';
 import { getHnService, HnService, type ItemSlot, stripHtml } from '@/services/hn/hn-service.js';
-import { httpStatus, rejectUnmockedFetch, stall, stubHnApi } from '../helpers/hn-api-stub.js';
+import {
+  httpStatus,
+  rejectUnmockedFetch,
+  stall,
+  stubHangAroundRateLimit,
+  stubHnApi,
+} from '../helpers/hn-api-stub.js';
 
 rejectUnmockedFetch();
 
@@ -915,6 +921,45 @@ describe('hn_get_user — partial submission failures', () => {
     expect(sc.submissions).toEqual([]);
     expect(sc.failedIds).toEqual([301]);
     expect(sc.notice).toMatch(/^Could not fetch 1 of 2 submissions in this window \(id 301\)/);
+    expect(sc.notice).not.toMatch(/deleted or flagged/);
+  });
+
+  it('explains a final window left empty by dead, deleted, and absent submissions, on both surfaces', async () => {
+    stubHnApi({
+      '/user/pg.json': { id: 'pg', karma: 1, created: 1600000000, submitted: [301, 302, 303] },
+      '/item/301.json': { id: 301, type: 'story', dead: true },
+      '/item/302.json': { id: 302, type: 'comment', deleted: true },
+      '/item/303.json': null,
+    });
+
+    const result = await call({});
+    const sc = structured(result);
+    const notice =
+      'No live submissions in this window (submissionOffset:0, total:3). Items may have been deleted or flagged.';
+
+    expect(sc.submissions).toEqual([]);
+    expect(sc).not.toHaveProperty('failedIds');
+    expect(sc.notice).toBe(notice);
+    expect(contentText(result)).toContain(notice);
+  });
+
+  it("names the window's offset and the whole history's total when a later final window is empty", async () => {
+    /** Five submissions; the final window of three, from offset 2, holds only dead, deleted, and absent ones. */
+    stubHnApi({
+      '/user/pg.json': { id: 'pg', karma: 1, created: 1600000000, submitted: range(301, 5) },
+      '/item/303.json': { id: 303, type: 'story', dead: true },
+      '/item/304.json': { id: 304, type: 'comment', deleted: true },
+      '/item/305.json': null,
+    });
+
+    const result = await call({ submissionCount: 3, submissionOffset: 2 });
+    const sc = structured(result);
+    const notice =
+      'No live submissions in this window (submissionOffset:2, total:5). Items may have been deleted or flagged.';
+
+    expect(sc.submissions).toEqual([]);
+    expect(sc.notice).toBe(notice);
+    expect(contentText(result)).toContain(notice);
   });
 
   it('throws the classified upstream error, Retry-After included, when every submission failed', async () => {
@@ -1056,19 +1101,78 @@ describe('hn_get_user — the per-call time budget', () => {
     );
   });
 
-  it('fails with Timeout at the budget when all 50 submissions hang, starting nothing past it', async () => {
-    const { requested } = history(50, ids(50));
-
-    const { result, settledAfter } = await timedCall({ submissionCount: 50 });
-    const error = (result.structuredContent as { error: { code: number } }).error;
-
-    /** Unbounded: five rounds of ten 47-second ladders — 235 s. */
-    expect(settledAfter).toBe(50_000);
+  /** The structuredContent error of a failed call. */
+  const wireError = (result: ToolResult) => {
     expect(result.isError).toBe(true);
+    return (
+      result.structuredContent as {
+        error: { code: number; message: string; data: Record<string, unknown> };
+      }
+    ).error;
+  };
+
+  it('fails upstream_no_response at the budget when every submission hangs, starting nothing past it', async () => {
+    const { requested } = history(30, ids(30));
+    const recovery =
+      'Retry the same call after a short delay; when the time budget cut any of the submissions, pass a smaller submissionCount so fewer share it.';
+
+    const { result, settledAfter } = await timedCall({ submissionCount: 30 });
+    const error = wireError(result);
+
+    /** Unbounded: three rounds of ten 47-second ladders — 141 s. */
+    expect(settledAfter).toBe(50_000);
     expect(error.code).toBe(JsonRpcErrorCode.Timeout);
-    /** 501–510 ran full ladders, 511–520 started at 47 s; 521 onward never started. */
+    /** 501–510 ran full ladders, 511–520 started at 47 s and were cut; 521 onward never started. */
     expect(requested()).toContain('/item/520.json');
     expect(requested()).not.toContain('/item/521.json');
+    expect(error.message).toBe(
+      "The HN API did not answer for any item on this page (30 items, 20 cut by this call's 50-second time budget).",
+    );
+    expect(error.data).toMatchObject({
+      reason: 'upstream_no_response',
+      itemCount: 30,
+      budgetCut: 20,
+      recovery: { hint: recovery },
+    });
+    const text = contentText(result);
+    expect(text).toContain(error.message);
+    expect(text).toContain(`Recovery: ${recovery}`);
+  });
+
+  it('declares upstream_no_response with the code the service throws, retryable, at error severity', async () => {
+    history(5, ids(5));
+
+    const { result } = await timedCall({ submissionCount: 5 });
+    const error = wireError(result);
+    const declared = getUser.errors?.find((e) => e.reason === 'upstream_no_response');
+
+    expect(error.data).toMatchObject({
+      reason: 'upstream_no_response',
+      itemCount: 5,
+      budgetCut: 0,
+    });
+    expect(declared).toMatchObject({ code: error.code, retryable: true });
+    /** An upstream fault: no severity, so the framework logs it at error like the other upstream_* reasons. */
+    expect(declared).not.toHaveProperty('severity');
+  });
+
+  it('declares retry_deadline_exceeded for a user fetch whose Retry-After wait runs past the budget', async () => {
+    /** Attempt 1 hangs to its 10 s timeout, 2 answers 429 Retry-After: 30, and 3, sent at 41 s, hangs. */
+    const userAttempts = stubHangAroundRateLimit();
+    const recovery =
+      "Retry the same call after a short delay; the HN API answered too slowly to finish within this call's time budget.";
+
+    const { result, settledAfter } = await timedCall({});
+    const error = wireError(result);
+
+    expect(settledAfter).toBe(50_000);
+    expect(userAttempts()).toBe(3);
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(error.data).toMatchObject({
+      reason: 'retry_deadline_exceeded',
+      recovery: { hint: recovery },
+    });
+    expect(contentText(result)).toContain(`Recovery: ${recovery}`);
   });
 
   /**

@@ -701,6 +701,15 @@ export const getThread = tool('hn_get_thread', {
       retryable: true,
       thrownBy: 'service',
     },
+    {
+      reason: 'retry_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      when: `The HN API was too slow to return the item: its retries ran past this call's ${CALL_BUDGET_MS / 1000}-second time budget.`,
+      recovery:
+        "Retry the same call after a short delay; the HN API answered too slowly to finish within this call's time budget.",
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
   input: z.object({
     itemId: z
