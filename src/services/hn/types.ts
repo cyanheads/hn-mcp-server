@@ -79,10 +79,14 @@ export interface AlgoliaHit {
   job_text?: string | null;
   num_comments?: number | null;
   objectID: string;
+  /** A comment's parent: its story's id for a top-level comment, otherwise the comment it replies to. Comment records only. */
+  parent_id?: number | null;
   points?: number | null;
   story_id?: number | null;
   story_text?: string | null;
   story_title?: string | null;
+  /** The link of a comment's story; absent or `""` when the story is a text post. Comment records only. */
+  story_url?: string | null;
   title?: string | null;
   url?: string | null;
 }

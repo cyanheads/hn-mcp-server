@@ -3,6 +3,7 @@
  * @module services/hn/hn-service.test
  */
 
+import { readFileSync } from 'node:fs';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1078,11 +1079,165 @@ describe('settlePage', () => {
     });
   });
 
-  it('throws the first failure when every slot failed', () => {
-    const first = new McpError(JsonRpcErrorCode.RateLimited, 'HN API returned HTTP 429.', {
-      reason: 'upstream_rate_limited',
+  it('returns an empty page, not a throw, when every slot is absent', () => {
+    expect(
+      settlePage([
+        { kind: 'absent', id: 1 },
+        { kind: 'absent', id: 2 },
+      ]),
+    ).toEqual({ items: [], failedIds: [] });
+  });
+
+  describe('when every slot failed', () => {
+    /** The shapes the fetch path leaves on a failed slot. */
+    const hung = new McpError(
+      JsonRpcErrorCode.Timeout,
+      'fetch GET … timed out. (failed after 4 attempts)',
+      { errorSource: 'FetchTimeout', retryAttempts: 4 },
+    );
+    const retryCut = new McpError(
+      JsonRpcErrorCode.Timeout,
+      'hn.fetchItem exceeded its retry deadline.',
+      { reason: 'retry_deadline_exceeded' },
+    );
+    const unstarted = new McpError(JsonRpcErrorCode.Timeout, 'The time budget ran out.', {
+      reason: 'deadline_exceeded',
     });
-    expect(() => settlePage([failed(1, first), failed(2), failed(3)])).toThrow(first);
+    const unreachable = new McpError(
+      JsonRpcErrorCode.ServiceUnavailable,
+      'Network error during fetch GET …: fetch failed (failed after 4 attempts)',
+      { errorSource: 'FetchNetworkErrorWrapper' },
+    );
+    const limited = new McpError(JsonRpcErrorCode.RateLimited, 'HN API returned HTTP 429.', {
+      reason: 'upstream_rate_limited',
+      retryAfter: '120',
+    });
+    const down = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'HN API returned HTTP 500.', {
+      reason: 'upstream_unavailable',
+      status: 500,
+    });
+    const html = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'HN API returned HTML.', {
+      reason: 'upstream_html',
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    /** The value `settlePage` throws for a page whose slots failed with `errors`, in order. */
+    function thrownFor(errors: readonly unknown[]): unknown {
+      try {
+        settlePage(errors.map((error, i) => failed(i + 1, error)));
+      } catch (error) {
+        return error;
+      }
+      throw new Error('settlePage returned instead of throwing');
+    }
+
+    it('throws a rate-limited slot unchanged wherever it sits, over more frequent causes', () => {
+      expect(thrownFor([hung, hung, hung, limited, down])).toBe(limited);
+    });
+
+    it('throws the earliest of several rate-limited slots, whose Retry-After the batch stopped on', () => {
+      /** A fetch already in flight when the batch stopped can settle on a 429 of its own. */
+      const limitedLater = new McpError(JsonRpcErrorCode.RateLimited, 'HN API returned HTTP 429.', {
+        reason: 'upstream_rate_limited',
+        retryAfter: '30',
+      });
+      expect(thrownFor([hung, limited, limitedLater, limitedLater])).toBe(limited);
+    });
+
+    it.each([
+      ['the most frequent declared reason', [down, down, hung], down],
+      ['the most frequent declared reason after a less frequent cause', [hung, down, down], down],
+      ['the earlier of two declared reasons tied for most frequent', [html, down], html],
+      ['a declared reason tied with no answer and ahead of it', [down, unreachable], down],
+    ])('throws %s unchanged', (_label, errors, expected) => {
+      expect(thrownFor(errors)).toBe(expected);
+    });
+
+    it("throws the earliest slot's error of the winning declared reason, not a later one", () => {
+      /** The same reason on a different status: which slot's error is thrown shows on `data.status`. */
+      const down503 = new McpError(
+        JsonRpcErrorCode.ServiceUnavailable,
+        'HN API returned HTTP 503.',
+        { reason: 'upstream_unavailable', status: 503 },
+      );
+      expect(thrownFor([hung, down, down503, down503])).toBe(down);
+    });
+
+    it.each([
+      ['every fetch timed out after its retries', [hung, hung], 0],
+      ['every fetch failed to connect', [unreachable], 0],
+      ['the budget cut or left unstarted some of them', [hung, retryCut, unstarted, unstarted], 3],
+      ['no answer outnumbers a declared reason', [hung, retryCut, unreachable, down], 1],
+      ['no answer comes first in a tie with a declared reason', [unstarted, down], 1],
+    ])('throws upstream_no_response when %s', (_label, errors, budgetCut) => {
+      const error = thrownFor(errors) as McpError;
+
+      expect(error).toBeInstanceOf(McpError);
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.data).toEqual({
+        reason: 'upstream_no_response',
+        itemCount: errors.length,
+        budgetCut,
+      });
+      /** The first slot that got no answer rides the cause chain into the server log. */
+      expect(error.cause).toBe(errors[0]);
+    });
+
+    it.each([
+      [
+        [hung, hung, hung],
+        "The HN API did not answer for any item on this page (3 items, 0 cut by this call's 50-second time budget).",
+      ],
+      [
+        [retryCut],
+        "The HN API did not answer for any item on this page (1 item, 1 cut by this call's 50-second time budget).",
+      ],
+      /** Slot 4 answered HTTP 500, so the message counts only the three that got no answer. */
+      [
+        [hung, retryCut, unreachable, down],
+        "The HN API did not answer for 3 of the 4 items on this page and answered the rest with an error (1 cut by this call's 50-second time budget).",
+      ],
+      [
+        [down, unstarted, html, unstarted, unstarted],
+        "The HN API did not answer for 3 of the 5 items on this page and answered the rest with an error (3 cut by this call's 50-second time budget).",
+      ],
+    ])('names the item count and the budget cut in the message (case %#)', (errors, message) => {
+      expect((thrownFor(errors) as McpError).message).toBe(message);
+    });
+
+    it.each([
+      ['a thrown value that is not an McpError', new TypeError('unexpected item shape')],
+      [
+        'a reason-less McpError of a code other than Timeout or ServiceUnavailable',
+        new McpError(JsonRpcErrorCode.InternalError, 'item parse failed'),
+      ],
+    ])('throws %s unchanged, never as upstream_no_response', (_label, unknown) => {
+      expect(thrownFor([unknown, unknown, hung])).toBe(unknown);
+    });
+
+    it('reads the connection failure the real fetch path leaves as no answer', async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => {
+          throw new TypeError('fetch failed');
+        }),
+      );
+
+      const pending = new HnService(2).fetchItems([1, 2], createMockContext());
+      await vi.advanceTimersByTimeAsync(120_000);
+      const slots = await pending;
+
+      expect(slots.map((s) => s.kind)).toEqual(['failed', 'failed']);
+      expect(thrownFor(slots.map((s) => (s as { error: unknown }).error))).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'upstream_no_response', itemCount: 2, budgetCut: 0 },
+      });
+    });
   });
 });
 
@@ -1148,6 +1303,69 @@ describe('HnService.fetchUser URL construction', () => {
     await new HnService(1).fetchUser('PaulGraham', createMockContext());
 
     expect(new URL(firstUrl()).pathname).toBe('/v0/user/PaulGraham.json');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HnService — the User-Agent every request sends
+// ---------------------------------------------------------------------------
+
+describe('HnService User-Agent', () => {
+  const { version } = JSON.parse(
+    readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'),
+  ) as { version: string };
+  const userAgent = `hn-mcp-server/${version} (+https://github.com/cyanheads/hn-mcp-server)`;
+
+  /** The User-Agent of every request the stubbed fetch received, in call order. */
+  const sentUserAgents = () =>
+    vi
+      .mocked(globalThis.fetch)
+      .mock.calls.map(([, init]) => new Headers(init?.headers).get('user-agent'));
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ['fetchItem', (svc: HnService) => svc.fetchItem(1, createMockContext())],
+    ['fetchFeed', (svc: HnService) => svc.fetchFeed('top', createMockContext())],
+    ['fetchUser', (svc: HnService) => svc.fetchUser('pg', createMockContext())],
+    [
+      'search',
+      (svc: HnService) =>
+        svc.search({ query: 'x', sort: 'relevance', count: 10, page: 0 }, createMockContext()),
+    ],
+  ])('%s names this server and its version', async (_name, run) => {
+    stubHnApi({
+      '/item/1.json': { id: 1, type: 'story' },
+      '/topstories.json': [1],
+      '/user/pg.json': { id: 'pg', karma: 1, created: 1600000000 },
+      '/api/v1/search': { hits: [], nbHits: 0, nbPages: 0, page: 0, hitsPerPage: 10 },
+    });
+
+    await run(new HnService(1));
+
+    expect(sentUserAgents()).toEqual([userAgent]);
+  });
+
+  it('sends it on every retry attempt too', async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
+        ++attempts === 1
+          ? new Response('upstream error', { status: 503 })
+          : Response.json({ id: 1, type: 'story' }),
+      ),
+    );
+
+    const pending = new HnService(1).fetchItem(1, createMockContext());
+    await vi.advanceTimersByTimeAsync(120_000);
+    await pending;
+
+    expect(sentUserAgents()).toEqual([userAgent, userAgent]);
   });
 });
 
@@ -1299,6 +1517,34 @@ describe('HnService.search URL construction', () => {
     expect(url.searchParams.get('numericFilters')).toBe(
       'points>=100,created_at_i>1704067200,created_at_i<1735603200',
     );
+  });
+
+  it('sends minComments as num_comments>=N ahead of the created_at_i bounds', async () => {
+    const url = await requestedUrl({
+      query: '"postgres"',
+      tags: 'story',
+      minComments: 300,
+      dateRange: { start: '2026-01-01' },
+    });
+    expect(url.searchParams.get('numericFilters')).toBe(
+      'num_comments>=300,created_at_i>1767225600',
+    );
+  });
+
+  it('orders points, then num_comments, then the created_at_i bounds', async () => {
+    const url = await requestedUrl({
+      minPoints: 10,
+      minComments: 300,
+      dateRange: { start: '2026-01-01' },
+    });
+    expect(url.searchParams.get('numericFilters')).toBe(
+      'points>=10,num_comments>=300,created_at_i>1767225600',
+    );
+  });
+
+  it('sends minComments: 0 rather than dropping it as unset', async () => {
+    const url = await requestedUrl({ minComments: 0 });
+    expect(url.searchParams.get('numericFilters')).toBe('num_comments>=0');
   });
 
   it('omits numericFilters when no filters are set', async () => {

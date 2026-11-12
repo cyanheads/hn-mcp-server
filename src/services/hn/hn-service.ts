@@ -4,6 +4,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
+import { config } from '@cyanheads/mcp-ts-core/config';
 import {
   invalidParams,
   JsonRpcErrorCode,
@@ -299,26 +300,87 @@ export type ItemSlot =
   | { kind: 'absent'; id: number }
   | { kind: 'failed'; id: number; error: unknown };
 
+type FailedSlot = Extract<ItemSlot, { kind: 'failed' }>;
+
 /**
  * Settle one page of a batch for the paged tools: the live items in input
  * order, and the IDs whose fetch failed. Dead, deleted, and absent slots drop
- * out of both. When every slot failed, throws the first failure's classified
- * error, since an empty success would read as a page with nothing on it.
+ * out of both. When every slot failed, throws the page's dominant cause
+ * ({@link pageFailure}), since an empty success would read as a page with
+ * nothing on it.
  */
 export function settlePage(slots: readonly ItemSlot[]): { items: HnItem[]; failedIds: number[] } {
   const items: HnItem[] = [];
-  const failedIds: number[] = [];
-  let firstFailure: { error: unknown } | undefined;
+  const failed: FailedSlot[] = [];
   for (const slot of slots) {
     if (slot.kind === 'failed') {
-      failedIds.push(slot.id);
-      firstFailure ??= slot;
+      failed.push(slot);
     } else if (slot.kind === 'item' && !slot.item.deleted && !slot.item.dead) {
       items.push(slot.item);
     }
   }
-  if (firstFailure && failedIds.length === slots.length) throw firstFailure.error;
-  return { items, failedIds };
+  if (failed.length > 0 && failed.length === slots.length) throw pageFailure(failed);
+  return { items, failedIds: failed.map((slot) => slot.id) };
+}
+
+/** The cause of a fetch the upstream never answered. */
+const NO_ANSWER = Symbol('no answer');
+
+/**
+ * What a failed slot says about the upstream: the contract reason it answered
+ * with (`upstream_unavailable`, `upstream_html`, …), or {@link NO_ANSWER} for a
+ * `Timeout` — an exhausted ladder, or a fetch the deadline cut or left
+ * unstarted — and for the reason-less `ServiceUnavailable` a connection failure
+ * leaves. Any other value is a cause of its own.
+ */
+function causeOf(error: unknown): unknown {
+  if (!(error instanceof McpError)) return error;
+  if (error.code === JsonRpcErrorCode.Timeout) return NO_ANSWER;
+  const reason = error.data?.reason;
+  if (typeof reason === 'string') return reason;
+  return error.code === JsonRpcErrorCode.ServiceUnavailable ? NO_ANSWER : error;
+}
+
+/**
+ * The error a page whose every slot failed throws: its dominant cause. A
+ * rate-limited slot comes first — the batch stopped on it, and its `retryAfter`
+ * is the caller's next move. Otherwise the most frequent cause wins, ties going
+ * to the earliest slot's: a declared upstream reason throws that slot's error
+ * unchanged, and no answer throws `upstream_no_response` (`Timeout`), carrying
+ * the items on the page and how many of them the call's time budget cut or left
+ * unstarted. Its recovery comes from each tool's contract, which names that
+ * tool's own page-size input.
+ */
+function pageFailure(failed: readonly FailedSlot[]): unknown {
+  const rateLimit = failed.find((slot) => isRateLimited(slot.error));
+  if (rateLimit) return rateLimit.error;
+
+  const causes = new Map<unknown, { count: number; first: unknown }>();
+  for (const { error } of failed) {
+    const key = causeOf(error);
+    const cause = causes.get(key);
+    if (cause) cause.count++;
+    else causes.set(key, { count: 1, first: error });
+  }
+  /** A map iterates in first-seen order, so the strict comparison keeps the earliest of a tie. */
+  const [key, { count, first }] = [...causes].reduce((best, entry) =>
+    entry[1].count > best[1].count ? entry : best,
+  );
+  if (key !== NO_ANSWER) return first;
+
+  const itemCount = failed.length;
+  const budgetCut = failed.filter((slot) => isDeadlineCut(slot.error)).length;
+  const budget = `${budgetCut} cut by this call's ${CALL_BUDGET_MS / 1000}-second time budget`;
+  /** No answer can win while other slots answered with an error; the message then counts only the unanswered ones. */
+  const message =
+    count === itemCount
+      ? `The HN API did not answer for any item on this page (${itemCount} item${itemCount === 1 ? '' : 's'}, ${budget}).`
+      : `The HN API did not answer for ${count} of the ${itemCount} items on this page and answered the rest with an error (${budget}).`;
+  return timeout(
+    message,
+    { reason: 'upstream_no_response', itemCount, budgetCut },
+    { cause: first },
+  );
 }
 
 /** True for the classified 429 `getJson` throws once retries are spent or the wait outlasts them. */
@@ -495,6 +557,13 @@ async function withUpstreamHttpErrors<T>(upstream: string, fn: () => Promise<T>)
 export class HnService {
   private readonly concurrencyLimit: number;
 
+  /**
+   * Names this server, at the version it advertises, to the HN API and
+   * Algolia, in place of the runtime's default client string.
+   */
+  private readonly userAgent =
+    `hn-mcp-server/${config.mcpServerVersion} (+https://github.com/cyanheads/hn-mcp-server)`;
+
   constructor(concurrencyLimit: number) {
     this.concurrencyLimit = concurrencyLimit;
   }
@@ -502,7 +571,8 @@ export class HnService {
   /**
    * GET a JSON document from an upstream, with retries around the full
    * fetch-and-parse pipeline and both failure shapes — non-2xx status and
-   * HTML-instead-of-JSON — classified onto a contract reason.
+   * HTML-instead-of-JSON — classified onto a contract reason. Every attempt
+   * sends this server's `User-Agent`.
    *
    * `deadline`, a `Date.now()` instant, bounds every attempt and backoff
    * together; past it the call fails with a `Timeout` whose `data.reason` is
@@ -523,7 +593,10 @@ export class HnService {
     return withUpstreamHttpErrors(upstream, () =>
       withRetry(
         async ({ signal }) => {
-          const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS, ctx, { signal });
+          const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS, ctx, {
+            signal,
+            headers: { 'User-Agent': this.userAgent },
+          });
           return parseJsonBody<T>(await res.text(), upstream);
         },
         {
@@ -659,6 +732,7 @@ export class HnService {
       sort: 'relevance' | 'date';
       dateRange?: { start?: string | undefined; end?: string | undefined } | undefined;
       minPoints?: number | undefined;
+      minComments?: number | undefined;
       count: number;
       page: number;
     },
@@ -679,6 +753,7 @@ export class HnService {
 
     const numericFilters: string[] = [];
     if (params.minPoints != null) numericFilters.push(`points>=${params.minPoints}`);
+    if (params.minComments != null) numericFilters.push(`num_comments>=${params.minComments}`);
     const bounds = params.dateRange ? dateRangeToEpochSeconds(params.dateRange) : {};
     if (bounds.start != null) numericFilters.push(`created_at_i>${bounds.start}`);
     if (bounds.end != null) numericFilters.push(`created_at_i<${bounds.end}`);

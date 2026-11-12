@@ -144,3 +144,25 @@ export function stubHnApi(
     requested: (): string[] => fetchMock.mock.calls.map(([input]) => routeOf(input)),
   };
 }
+
+/**
+ * Install a fetch stub for one upstream fetch whose second attempt answers HTTP
+ * 429 with `Retry-After: 30` and whose every other attempt hangs until aborted.
+ * Returns the number of requests received so far. Undo with
+ * `vi.unstubAllGlobals()`.
+ */
+export function stubHangAroundRateLimit(): () => number {
+  let attempts = 0;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      if (++attempts === 2) {
+        return new Response('slow down', { status: 429, headers: { 'Retry-After': '30' } });
+      }
+      return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    }),
+  );
+  return () => attempts;
+}
