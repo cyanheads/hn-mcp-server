@@ -1,6 +1,8 @@
 /**
  * @fileoverview Tests the agent-doc selector shared by the bundle cleaner and the packaging
- * linter: package-root agent trees are stripped, runtime modules that share their names are kept.
+ * linter: package-root agent trees and agent files are stripped, runtime modules that share
+ * their names are kept. The MCP SDK's `dist/ext/skills/` modules load at startup, so a selector
+ * that strips them ships a bundle that cannot start.
  * @module tests/scripts/bundle-agent-docs.test
  */
 
@@ -9,16 +11,7 @@ import {
   AGENT_DOC_ENTRY as CLEANER_ENTRY,
   filterAgentDocEntries,
 } from '../../scripts/clean-mcpb.js';
-
-/**
- * `scripts/lint-packaging.ts` ends in a repo-only `import('../src/mcp-server/skills.js')`
- * fallback, so a static import would pull it into the `tsc` program and fail the typecheck
- * (cyanheads/mcp-ts-core#797). Loading it by URL at run time keeps it out of the program.
- */
-const lintPackagingUrl = new URL('../../scripts/lint-packaging.ts', import.meta.url).href;
-const { AGENT_DOC_ENTRY: LINTER_ENTRY } = (await import(lintPackagingUrl)) as {
-  AGENT_DOC_ENTRY: RegExp;
-};
+import { AGENT_DOC_ENTRY as LINTER_ENTRY } from '../../scripts/lint-packaging.js';
 
 const stripped = [
   'node_modules/@cyanheads/mcp-ts-core/framework-skills/add-tool/SKILL.md',
@@ -31,6 +24,9 @@ const stripped = [
   'node_modules/outer/node_modules/inner/skills/a/b.md',
   'node_modules/@a/outer/node_modules/@b/inner/.claude/x.json',
   'node_modules/any/deep/dir/SKILL.md',
+  'node_modules/thread-stream/AGENTS.md',
+  'node_modules/@cyanheads/mcp-ts-core/CLAUDE.md',
+  'node_modules/outer/node_modules/inner/CLAUDE.md',
 ];
 
 const kept = [
@@ -42,7 +38,9 @@ const kept = [
   'node_modules/skills/index.js',
   'node_modules/@cyanheads/mcp-ts-core/dist/mcp-server/skills.js',
   'node_modules/pkg/lib/.claude/not-root.json',
+  'node_modules/pkg/docs/AGENTS.md',
   'skills/published-skill/SKILL.md',
+  'CLAUDE.md',
   'dist/index.js',
 ];
 
