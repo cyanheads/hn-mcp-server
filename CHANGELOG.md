@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-11-12
+
+hn_search_content gains a minComments filter and parentId and storyUrl on comment hits; a stories or user page on which every item failed throws its dominant cause, with a new upstream_no_response reason when the HN API gave no answer.
+
 ## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-10-28
 
 hn_search_content, hn_get_user, and hn_get_thread hold each response surface to 64,000 bytes; hn_get_thread, hn_get_stories, and hn_get_user run under one 50-second time budget; the hn-guide agent skill is served as a skill:// resource.
