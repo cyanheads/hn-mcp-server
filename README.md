@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.6.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/hn-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/hn-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/hn-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun->=1.4.0-f9f1e1.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.6.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/hn-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/hn-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/hn-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun->=1.4.4-f9f1e1.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -38,7 +38,7 @@ Hacker News feeds, threads, and profiles. Browse ranked feeds, read full comment
 | `hn_get_stories` | Fetch stories from an HN feed (top, new, best, ask, show, jobs), with title, URL, score, author, and comment count |
 | `hn_get_thread` | Get an item and its comment tree as a threaded discussion, with depth and comment-count controls and a cursor to page through long threads |
 | `hn_get_user` | Fetch a user profile with karma, about, and optionally a page of resolved submissions |
-| `hn_search_content` | Search stories, comments, polls, and jobs via Algolia by keyword, by filters alone, or both — type, author, parent story, date range, and minimum points |
+| `hn_search_content` | Search stories, comments, polls, and jobs via Algolia by keyword, by filters alone, or both — type, author, parent story, date range, minimum points, and minimum comment count |
 
 ### Agent skill
 
@@ -53,7 +53,7 @@ Hacker News feeds, threads, and profiles. Browse ranked feeds, read full comment
 - Six feed types: `top`, `new`, `best`, `ask`, `show`, `jobs`; `count` (default 30) and `offset` for pagination. One call serves at most 100 stories; a `count` up to 1,000 is served at 100, with a `notice` naming the next `offset`
 - Returns id, type, title, url, domain, score, author, timestamp, comment count, and body text — each field omitted (not null) when HN doesn't provide it
 - Enrichment reports `total`, `offset`, and `hasMore`; while more stories remain, `truncated` is set and `notice` names the next `offset`, and a `notice` explains empty pages (empty feed, offset past end, or every item on the page deleted/flagged). The last page carries no truncation
-- Items whose fetch failed after retries, or ran past the call's 50-second time budget, are listed in `failedIds` with a `notice` naming the retry; a page where every item failed returns the classified upstream error instead of an empty list
+- Items whose fetch failed after retries, or ran past the call's 50-second time budget, are listed in `failedIds` with a `notice` naming the retry; a page where every item failed returns the classified error of its dominant cause instead of an empty list: `upstream_rate_limited` when any item was rate-limited, otherwise the most frequent declared upstream reason, or `upstream_no_response` (`Timeout`) when no answer from the HN API at all was the most common failure
 
 ---
 
@@ -75,19 +75,22 @@ Hacker News feeds, threads, and profiles. Browse ranked feeds, read full comment
 - Profile includes karma, creation date, and about text (HTML stripped); submissions filter out dead/deleted items
 - A comment submission carries its `parent` and a poll-option submission its `poll`, so either links back to what it answered
 - Enrichment echoes `submissionOffset` and the offset to send next, or a notice when the requested offset is past the end of the history
-- Submissions whose fetch failed after retries, or that the call's 50-second time budget cut, are listed in `failedIds` with a `notice` naming the retry (and the budget, when it cut them); a window where every submission failed returns the classified upstream error — `Timeout` when the budget cut them all
+- Submissions whose fetch failed after retries, or that the call's 50-second time budget cut, are listed in `failedIds` with a `notice` naming the retry (and the budget, when it cut them); a window where every submission failed returns the classified error of its dominant cause, as `hn_get_stories` does, with `upstream_no_response` (`Timeout`) when no answer was the most common failure, the budget cutting them all included
+- A final window whose submissions are all dead, deleted, or absent gets a `notice` saying so, with the `submissionOffset` and `total`
 - Each response surface is held to a fixed 64,000-byte budget: an over-budget page keeps every submission and cuts the longest bodies to one shared length, flagging each with `textTruncated` and pointing to `hn_get_thread` for the whole text
 
 ---
 
 ### `hn_search_content` <sub>tool</sub>
 
-- Free-text `query` — typo-tolerant, with the last term also matching as a prefix; wrap a term in double quotes to match it exactly and put `-` before one to exclude it — plus `tags` (`story`/`comment`/`poll`/`job`/`ask_hn`/`show_hn`/`front_page`), `author` (the exact, case-sensitive username), `storyId`, `dateRange`, and `minPoints` filters; `sort` by relevance or date; `count` (default 30) and `page` for pagination. One call serves at most 50 hits; a `count` up to 1,000 is served as the page of 50 starting at the requested page's first hit, with a `notice` naming the `count: 50` page to pass next; a non-zero `page` whose first hit begins no page of 50 fails with `count_page_unaligned`, naming a `count` and `page` that start there and, when that count is under 25, the page of 50 that holds that hit
+- Free-text `query` — typo-tolerant, with the last term also matching as a prefix; wrap a term in double quotes to match it exactly and put `-` before one to exclude it — plus `tags` (`story`/`comment`/`poll`/`job`/`ask_hn`/`show_hn`/`front_page`), `author` (the exact, case-sensitive username), `storyId`, `dateRange`, `minPoints`, and `minComments` filters; `sort` by relevance or date; `count` (default 30) and `page` for pagination. One call serves at most 50 hits; a `count` up to 1,000 is served as the page of 50 starting at the requested page's first hit, with a `notice` naming the `count: 50` page to pass next; a non-zero `page` whose first hit begins no page of 50 fails with `count_page_unaligned`, naming a `count` and `page` that start there and, when that count is under 25, the page of 50 that holds that hit
 - `tags: "front_page"` is the front page right now (about 30 stories), never past front pages; for an earlier window, use `tags: "story"` with `dateRange` and `minPoints`
 - `query` is optional when a filter is set — list Ask HN, Show HN, polls, or jobs on their own, or pass a story's `storyId` with `tags: "comment"` to search within one thread. No query and no filter fails with `missing_query_or_filter`
 - To check whether a page was discussed, pass its URL alone as `query`: the leading `http://`, `https://`, or `www.` is dropped before searching, so submissions under either scheme, with or without `www.`, all match. The output `query` and the notice show what was searched
 - `dateRange` bounds take ISO 8601 (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or a date-time with optional offset), read as UTC and both exclusive; an empty or out-of-order range fails with `invalid_date_range`
 - `minPoints` applies to stories and polls — comments and jobs carry no points, so pairing it with `tags: "comment"` or `"job"` fails with `min_points_unscored_type`
+- `minComments` applies to stories and polls the same way: any value, 0 included, excludes comments, jobs, and poll options, so an untagged search returns only stories and polls, and pairing it with `tags: "comment"` or `"job"` fails with `min_comments_unscored_type`. It filters; it does not sort
+- A comment hit carries `parentId` (its story's id for a top-level comment, otherwise the parent comment's id, which `hn_get_thread` reads) and, when its story links out, `storyUrl`; in `content[]` the meta line shows `parent:<id>` and the story link sits on its own line
 - `view: "compact"` drops the two body-text fields (`text`, `highlights.text`), which otherwise repeat a long comment twice per hit — pass a hit id to `hn_get_thread` to read the body. In `full`, a page over 64,000 bytes per response surface drops `highlights.text` from every hit (`highlightsTextOmitted`), then cuts the longest bodies to one shared length (`textTruncated`, with an `hn_get_thread` pointer) — every hit stays
 - Each hit carries its `type` (`story`, `comment`, `poll`, `pollopt`, `job`) when Algolia records one. Untagged searches also return poll options, which carry only an id, author, vote count, and date — `hn_get_thread` reads an option's text and poll. A poll hit has no `storyId`; its own `id` is the discussion root
 - Job descriptions come back as `text`, though keywords don't search them
@@ -105,7 +108,7 @@ HN-specific:
 - Concurrent batch fetching with configurable parallelism for item resolution (`HN_CONCURRENCY_LIMIT`)
 - HTML bodies stripped to plain text — entities decoded once, code blocks kept verbatim, each link rendered once as its full URL — while titles, which are not HTML though some carry entities, are entity-decoded and never tag-stripped
 - Server-level `instructions` forwarded to LLM clients on `initialize` — item types, ID reuse across tools, case-sensitive usernames, field sparsity
-- No API keys required — both upstream APIs are public
+- No API keys required — both upstream APIs are public; every request identifies itself with a `User-Agent` of `hn-mcp-server/<version>` and the repository URL
 
 Agent-friendly output:
 
@@ -190,7 +193,7 @@ Or with Docker:
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js >= 24)
+- [Bun v1.4.4](https://bun.sh/) or higher (or Node.js >= 24)
 
 ### Installation
 
