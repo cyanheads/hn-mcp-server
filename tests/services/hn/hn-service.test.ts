@@ -13,11 +13,13 @@ import {
   dateBoundToEpochSeconds,
   dateRangeToEpochSeconds,
   decodeHtmlEntities,
+  describeOmitted,
   extractDomain,
   HnService,
   type ItemSlot,
   isDeadlineCut,
   normalizeUrl,
+  omittedSentence,
   settlePage,
   stripHtml,
   stripHtmlPreservingEm,
@@ -1061,21 +1063,41 @@ describe('settlePage', () => {
       failed(9),
     ]);
 
-    expect(page).toEqual({ items: [live, b], failedIds: [7, 9] });
+    expect(page).toEqual({
+      items: [live, b],
+      live: [
+        { item: live, slot: 0 },
+        { item: b, slot: 4 },
+      ],
+      failedIds: [7, 9],
+      omitted: { deleted: 1, dead: 1, missing: 1 },
+    });
   });
 
   it('returns no failed ids when nothing failed', () => {
-    expect(settlePage([item(live), item(dead)])).toEqual({ items: [live], failedIds: [] });
+    expect(settlePage([item(live), item(dead)])).toEqual({
+      items: [live],
+      live: [{ item: live, slot: 0 }],
+      failedIds: [],
+      omitted: { deleted: 0, dead: 1, missing: 0 },
+    });
   });
 
   it('returns an empty page for an empty batch without throwing', () => {
-    expect(settlePage([])).toEqual({ items: [], failedIds: [] });
+    expect(settlePage([])).toEqual({
+      items: [],
+      live: [],
+      failedIds: [],
+      omitted: { deleted: 0, dead: 0, missing: 0 },
+    });
   });
 
   it('returns an empty page, not a throw, when the non-failed slots are all dead or absent', () => {
     expect(settlePage([failed(1), item(dead), { kind: 'absent', id: 4 }])).toEqual({
       items: [],
+      live: [],
       failedIds: [1],
+      omitted: { deleted: 0, dead: 1, missing: 1 },
     });
   });
 
@@ -1085,7 +1107,74 @@ describe('settlePage', () => {
         { kind: 'absent', id: 1 },
         { kind: 'absent', id: 2 },
       ]),
-    ).toEqual({ items: [], failedIds: [] });
+    ).toEqual({
+      items: [],
+      live: [],
+      failedIds: [],
+      omitted: { deleted: 0, dead: 0, missing: 2 },
+    });
+  });
+
+  describe('live slots and omitted counts', () => {
+    const b: HnItem = { id: 20, type: 'story' };
+    const both: HnItem = { id: 5, type: 'story', dead: true, deleted: true };
+    const absent = (id: number): ItemSlot => ({ kind: 'absent', id });
+    const none = { deleted: 0, dead: 0, missing: 0 };
+
+    /**
+     * Each live item's index in the slots passed, counted before anything
+     * drops; and the dropped slots by kind. A failed slot keeps its index (the
+     * next live item's index skips it) and is in no count.
+     */
+    it.each<[string, ItemSlot[], number[], typeof none]>([
+      ['every slot live', [item(live), item(b)], [0, 1], none],
+      [
+        'a dead slot between live ones',
+        [item(live), item(dead), item(b)],
+        [0, 2],
+        { ...none, dead: 1 },
+      ],
+      [
+        'a deleted slot first',
+        [item(deleted), item(live), item(b)],
+        [1, 2],
+        { ...none, deleted: 1 },
+      ],
+      ['an absent slot last', [item(live), item(b), absent(9)], [0, 1], { ...none, missing: 1 }],
+      ['a failed slot between live ones', [item(live), failed(7), item(b)], [0, 2], none],
+      [
+        'an item flagged both deleted and dead, counted once as deleted',
+        [item(both), item(live)],
+        [1],
+        { ...none, deleted: 1 },
+      ],
+      [
+        'several of each kind',
+        [
+          item(dead),
+          item(deleted),
+          absent(8),
+          item(live),
+          item(both),
+          failed(7),
+          item(dead),
+          absent(9),
+          item(b),
+        ],
+        [3, 8],
+        { deleted: 2, dead: 2, missing: 2 },
+      ],
+    ])('%s', (_label, slots, liveSlots, omitted) => {
+      const page = settlePage(slots);
+      const liveItems = liveSlots.map((i) => (slots[i] as { item: HnItem }).item);
+
+      expect(page.live).toEqual(liveSlots.map((slot, i) => ({ item: liveItems[i], slot })));
+      expect(page.items).toEqual(liveItems);
+      expect(page.omitted).toEqual(omitted);
+      /** Every slot is live, omitted, or failed, exactly once. */
+      const { deleted: d, dead: k, missing: m } = page.omitted;
+      expect(page.items.length + d + k + m + page.failedIds.length).toBe(slots.length);
+    });
   });
 
   describe('when every slot failed', () => {
@@ -1238,6 +1327,79 @@ describe('settlePage', () => {
         data: { reason: 'upstream_no_response', itemCount: 2, budgetCut: 0 },
       });
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// describeOmitted
+// ---------------------------------------------------------------------------
+
+describe('describeOmitted', () => {
+  it.each([
+    [{ deleted: 2, dead: 1, missing: 0 }, 3, '2 deleted, 1 dead'],
+    [{ deleted: 1, dead: 1, missing: 1 }, 3, '1 deleted, 1 dead, 1 missing'],
+    [{ deleted: 0, dead: 1, missing: 0 }, 1, '1 dead'],
+    [{ deleted: 0, dead: 0, missing: 4 }, 4, '4 missing'],
+    [{ deleted: 0, dead: 2, missing: 1 }, 3, '2 dead, 1 missing'],
+    [{ deleted: 3, dead: 0, missing: 2 }, 5, '3 deleted, 2 missing'],
+  ])('words %o as %i omitted: "%s"', (omitted, total, kinds) => {
+    expect(describeOmitted(omitted)).toEqual({ total, kinds });
+  });
+
+  it('returns undefined when nothing was omitted', () => {
+    expect(describeOmitted({ deleted: 0, dead: 0, missing: 0 })).toBeUndefined();
+  });
+
+  it("words the counts settlePage returns for a page's dropped slots", () => {
+    const page = settlePage([
+      { kind: 'item', id: 101, item: { id: 101, type: 'story' } },
+      { kind: 'item', id: 102, item: { id: 102, type: 'story', dead: true } },
+      { kind: 'item', id: 103, item: { id: 103, type: 'story', deleted: true } },
+      { kind: 'absent', id: 104 },
+      { kind: 'failed', id: 105, error: new Error('down') },
+    ]);
+    expect(describeOmitted(page.omitted)).toEqual({
+      total: 3,
+      kinds: '1 deleted, 1 dead, 1 missing',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// omittedSentence
+// ---------------------------------------------------------------------------
+
+describe('omittedSentence', () => {
+  it.each([
+    [
+      { deleted: 0, dead: 1, missing: 0 },
+      1,
+      'item',
+      'on this page',
+      '1 of the 1 item on this page is omitted: 1 dead.',
+    ],
+    [
+      { deleted: 0, dead: 1, missing: 0 },
+      5,
+      'item',
+      'on this page',
+      '1 of the 5 items on this page is omitted: 1 dead.',
+    ],
+    [
+      { deleted: 2, dead: 1, missing: 0 },
+      4,
+      'submission',
+      'in this window',
+      '3 of the 4 submissions in this window are omitted: 2 deleted, 1 dead.',
+    ],
+  ])('words %o over %i slots', (omitted, slotCount, unit, place, expected) => {
+    expect(omittedSentence(omitted, slotCount, unit, place)).toBe(expected);
+  });
+
+  it('returns undefined when nothing was omitted', () => {
+    expect(
+      omittedSentence({ deleted: 0, dead: 0, missing: 0 }, 5, 'item', 'on this page'),
+    ).toBeUndefined();
   });
 });
 

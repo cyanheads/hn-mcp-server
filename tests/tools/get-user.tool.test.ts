@@ -218,7 +218,7 @@ describe('hn_get_user handler', () => {
     expect(enrichment.notice).toBeUndefined();
   });
 
-  it('does not emit notice when all submitted IDs were fetched but some were dead/deleted', async () => {
+  it('counts the dead and deleted submissions of a final window, with no pagination hint', async () => {
     const ctx = createMockContext({ errors: getUser.errors });
     // User has 3 submissions total, all fetched (submissionCount=10 > 3), but 2 are dead/deleted
     mockFetchUser.mockResolvedValue({ ...baseUser, submitted: [100, 102, 103] });
@@ -226,9 +226,54 @@ describe('hn_get_user handler', () => {
 
     await getUser.handler(parse({ includeSubmissions: true, submissionCount: 10 }), ctx);
 
-    // submissions.length (1) < totalSubmissions (3) but we already fetched all IDs — not a pagination gap
+    /** submissions.length (1) < totalSubmissions (3), but every ID was fetched: a drop, not a pagination gap. */
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.notice).toBeUndefined();
+    expect(enrichment.notice).toBe(
+      '2 of the 3 submissions in this window are omitted: 1 deleted, 1 dead.',
+    );
+    expect(enrichment.truncated).toBeUndefined();
+    expect(enrichment.shown).toBeUndefined();
+    expect(enrichment.cap).toBeUndefined();
+  });
+
+  it('describes the omitted count on notice and on an empty submissions page', () => {
+    const output = z.toJSONSchema(getUser.output) as unknown as {
+      properties: { submissions: { description?: string } };
+    };
+
+    expect(getUser.enrichment?.notice?.description).toMatch(
+      /how many submissions in the window were omitted as deleted, dead, or missing/,
+    );
+    expect(getUser.enrichment?.notice?.description).toMatch(
+      /Absent when the page reaches the end of the history with every submission in its window live and loaded/,
+    );
+    expect(output.properties.submissions.description).toMatch(
+      /every item in the window was deleted, dead, missing, or failed to load \(the notice counts the omitted ones by kind; failedIds lists the failures\)/,
+    );
+  });
+
+  it.each([
+    {
+      label: 'a one-submission window',
+      submitted: [102],
+      slots: slotsOf([deadItem]),
+      notice:
+        'No live submissions in this window (submissionOffset:0, total:1). 1 of the 1 submission in this window is omitted: 1 dead.',
+    },
+    {
+      label: 'one omission in a larger window',
+      submitted: [100, 101, 104],
+      slots: [...slotsOf([storyItem, commentItem]), { kind: 'absent', id: 104 } as const],
+      notice: '1 of the 3 submissions in this window is omitted: 1 missing.',
+    },
+  ])('agrees noun and verb with the counts on $label', async ({ submitted, slots, notice }) => {
+    const ctx = createMockContext({ errors: getUser.errors });
+    mockFetchUser.mockResolvedValue({ ...baseUser, submitted });
+    mockFetchItems.mockResolvedValue(slots);
+
+    await getUser.handler(parse({ includeSubmissions: true }), ctx);
+
+    expect(getEnrichment(ctx).notice).toBe(notice);
   });
 });
 
@@ -354,9 +399,14 @@ describe('hn_get_user submission pagination', () => {
     expect(result.submissions?.map((s) => s.id)).toEqual([206]);
 
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.notice).toMatch(/Showing 1 live item from positions 6–8 of 25 submissions/);
-    /** The next offset advances by the window, not the live count — otherwise dead items are re-fetched forever. */
-    expect(enrichment.notice).toMatch(/Set submissionOffset to 8 for the next page/);
+    /**
+     * The count sits between the page-state and next-offset sentences, and the
+     * next offset advances by the window, not the live count — otherwise dead
+     * items are re-fetched forever.
+     */
+    expect(enrichment.notice).toBe(
+      'Showing 1 live item from positions 6–8 of 25 submissions. 2 of the 3 submissions in this window are omitted: 1 deleted, 1 dead. Set submissionOffset to 8 for the next page.',
+    );
     expect(enrichment.shown).toBe(1);
     expect(enrichment.cap).toBe(3);
   });
@@ -459,6 +509,25 @@ describe('hn_get_user — submissionCount above the per-call cap', () => {
     expect(sc).toMatchObject({ submissionOffset: 60, shown: 50, cap: 50 });
     expect(sc.notice).toBe(
       'Showing 50 live items from positions 61–110 of 120 submissions. submissionCount 1000 is above the per-call cap of 50, so this call served submissionCount: 50. Set submissionOffset to 110 for the next page.',
+    );
+    expect(contentText(result)).toContain(sc.notice as string);
+  });
+
+  it('orders every sentence: page state, omitted count, over-cap, failure, next offset', async () => {
+    mockFetchItems.mockImplementation(async (ids) => [
+      { kind: 'failed', id: ids[0]!, error: new Error('upstream down') },
+      ...slotsOf([{ id: ids[1]!, type: 'story', deleted: true }]),
+      ...slotsOf(
+        ids.slice(2).map((id) => ({ id, type: 'story', by: 'testuser', title: `Post ${id}` })),
+      ),
+    ]);
+
+    const result = await call({ submissionCount: 51 });
+    const sc = structured(result);
+
+    expect(sc.failedIds).toEqual([1001]);
+    expect(sc.notice).toBe(
+      'Showing 48 live items from positions 1–50 of 120 submissions. 1 of the 50 submissions in this window is omitted: 1 deleted. submissionCount 51 is above the per-call cap of 50, so this call served submissionCount: 50. Could not fetch 1 of 50 submissions in this window (id 1001). Retry with submissionOffset: 0, or pass an id as itemId to hn_get_thread to fetch that item alone. Set submissionOffset to 50 for the next page.',
     );
     expect(contentText(result)).toContain(sc.notice as string);
   });
@@ -787,43 +856,107 @@ describe('hn_get_user — security and edge cases', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Blank-after-trim username message
+// The username as typed: a leading @, a display name, blank input
 // ---------------------------------------------------------------------------
 
-describe('hn_get_user blank username message', () => {
-  it.each(['', '  ', '\t\n'])(
-    'names the trimmed-blank username and the fix (%j)',
-    async (username) => {
-      const result = await runToolContract(getUser, { username } as never, {
-        context: { errors: getUser.errors },
-      });
-      const error = (
-        result.structuredContent as {
-          error: { code: number; data?: { reason?: string; recovery?: { hint?: string } } };
-        }
-      ).error;
-      const text = result.content
-        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n');
+describe('hn_get_user username: handles, display names, and blank input', () => {
+  type ToolResult = Awaited<ReturnType<typeof runToolContract>>;
 
-      expect(result.isError).toBe(true);
+  function callWith(username: string): Promise<ToolResult> {
+    return runToolContract(getUser, { username } as never, {
+      context: { errors: getUser.errors },
+    });
+  }
+
+  /** The wire error and the joined `content[]` text of a failed call. */
+  function failure(result: ToolResult) {
+    expect(result.isError).toBe(true);
+    const error = (
+      result.structuredContent as {
+        error: {
+          code: number;
+          message: string;
+          data?: { reason?: string; recovery?: { hint?: string } };
+        };
+      }
+    ).error;
+    const text = result.content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    return { error, text };
+  }
+
+  it('looks up @pg as pg', async () => {
+    mockFetchUser.mockResolvedValue({ id: 'pg', karma: 1, created: 1600000000 });
+
+    const result = await callWith('@pg');
+
+    expect(result.isError).toBeFalsy();
+    expect(mockFetchUser).toHaveBeenCalledTimes(1);
+    expect(mockFetchUser).toHaveBeenCalledWith('pg', expect.anything(), expect.any(Number));
+    expect((result.structuredContent as { user: { id: string } }).user.id).toBe('pg');
+  });
+
+  it('names the account as looked up when @pg misses', async () => {
+    mockFetchUser.mockResolvedValue(null);
+
+    const { error, text } = failure(await callWith('@pg'));
+
+    expect(error.data?.reason).toBe('user_not_found');
+    expect(error.message).toBe('User pg not found');
+    expect(text).toContain('User pg not found');
+    expect(text).not.toContain('@pg');
+  });
+
+  it('rejects a display name with the whitespace message on both surfaces, before any upstream call', async () => {
+    const message =
+      'contains whitespace — HN usernames have none; pass the account name from a by or author field, not a display name.';
+
+    const { error, text } = failure(await callWith('Paul Graham'));
+
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.data?.reason).toBe('invalid_arguments');
+    expect(error.data?.recovery?.hint).toContain(`username: ${message}`);
+    expect(text).toContain(`username: ${message}`);
+    expect(mockFetchUser).not.toHaveBeenCalled();
+  });
+
+  it.each(['', '  ', '\t\n', '@', ' @ '])(
+    'names both steps that left the username blank, and the fix (%j)',
+    async (username) => {
+      const message = 'blank after trimming whitespace and a leading @ — pass an HN username.';
+
+      const { error, text } = failure(await callWith(username));
+
       expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
       expect(error.data?.reason).toBe('invalid_arguments');
-      expect(error.data?.recovery?.hint).toContain(
-        'blank after trimming whitespace — pass an HN username',
-      );
-      expect(text).toContain('username: blank after trimming whitespace — pass an HN username');
+      expect(error.data?.recovery?.hint).toContain(`username: ${message}`);
+      expect(text).toContain(`username: ${message}`);
       expect(text).not.toContain('Too small');
       expect(mockFetchUser).not.toHaveBeenCalled();
     },
   );
 
-  it('still advertises minLength 1 on username', () => {
+  it('still advertises username as a string with minLength 1 and no pattern', () => {
     const schema = z.toJSONSchema(getUser.input) as {
-      properties: Record<string, { minLength?: number }>;
+      properties: Record<string, Record<string, unknown>>;
     };
-    expect(schema.properties.username?.minLength).toBe(1);
+    const { type, minLength, pattern } = schema.properties.username ?? {};
+    expect({ type, minLength, pattern }).toStrictEqual({
+      type: 'string',
+      minLength: 1,
+      pattern: undefined,
+    });
+  });
+
+  it('describes the @ strip and the display-name rejection on username', () => {
+    const schema = z.toJSONSchema(getUser.input) as {
+      properties: Record<string, { description?: string }>;
+    };
+    expect(schema.properties.username?.description).toBe(
+      'HN username. Case-sensitive. Trimmed, and one leading @ is dropped, so @pg looks up pg. Blank input is rejected, as is a name with whitespace inside it — a display name such as "Paul Graham", not an account name.',
+    );
   });
 });
 
@@ -920,8 +1053,58 @@ describe('hn_get_user — partial submission failures', () => {
 
     expect(sc.submissions).toEqual([]);
     expect(sc.failedIds).toEqual([301]);
-    expect(sc.notice).toMatch(/^Could not fetch 1 of 2 submissions in this window \(id 301\)/);
+    /** No page-state sentence on a window the failure explains, so the count leads; the failed id is not in it. */
+    expect(sc.notice).toBe(
+      '1 of the 2 submissions in this window is omitted: 1 deleted. Could not fetch 1 of 2 submissions in this window (id 301). Retry with submissionOffset: 0, or pass an id as itemId to hn_get_thread to fetch that item alone.',
+    );
     expect(sc.notice).not.toMatch(/deleted or flagged/);
+  });
+
+  it('accounts for the whole window on a final page with a failure and a drop: live + omitted + failed', async () => {
+    user(range(301, 4), { 302: httpStatus(500), 303: { id: 303, type: 'comment', dead: true } });
+
+    const result = await call({});
+    const sc = structured(result);
+    const notice =
+      '1 of the 4 submissions in this window is omitted: 1 dead. Could not fetch 1 of 4 submissions in this window (id 302). Retry with submissionOffset: 0, or pass an id as itemId to hn_get_thread to fetch that item alone.';
+
+    expect((sc.submissions as Array<{ id: number }>).map((s) => s.id)).toEqual([301, 304]);
+    expect(sc.failedIds).toEqual([302]);
+    expect(sc.notice).toBe(notice);
+    expect(contentText(result)).toContain(notice);
+    /** A drop is not a pagination gap. */
+    expect(sc).not.toHaveProperty('truncated');
+    expect(sc).not.toHaveProperty('shown');
+    expect(sc).not.toHaveProperty('cap');
+  });
+
+  it('counts the drops of a 40-submission history on its final windows, with no pagination hint, on both surfaces', async () => {
+    /** Positions 3 and 15 deleted, 14 dead: the shape of simpsoka's history. */
+    const history = range(9001, 40);
+    user(history, {
+      9003: { id: 9003, type: 'comment', deleted: true },
+      9014: { id: 9014, type: 'comment', by: 'pg', dead: true },
+      9015: { id: 9015, type: 'story', deleted: true },
+    });
+
+    const whole = await call({ submissionCount: 50 });
+    const wholeSc = structured(whole);
+    const wholeNotice = '3 of the 40 submissions in this window are omitted: 2 deleted, 1 dead.';
+
+    expect((wholeSc.submissions as unknown[]).length).toBe(37);
+    expect(wholeSc.notice).toBe(wholeNotice);
+    expect(contentText(whole)).toContain(wholeNotice);
+    expect(contentText(whole)).not.toMatch(/Set submissionOffset/);
+    for (const field of ['truncated', 'shown', 'cap']) expect(wholeSc).not.toHaveProperty(field);
+
+    const tail = await call({ submissionOffset: 10, submissionCount: 30 });
+    const tailSc = structured(tail);
+    const tailNotice = '2 of the 30 submissions in this window are omitted: 1 deleted, 1 dead.';
+
+    expect((tailSc.submissions as unknown[]).length).toBe(28);
+    expect(tailSc.notice).toBe(tailNotice);
+    expect(contentText(tail)).toContain(tailNotice);
+    for (const field of ['truncated', 'shown', 'cap']) expect(tailSc).not.toHaveProperty(field);
   });
 
   it('explains a final window left empty by dead, deleted, and absent submissions, on both surfaces', async () => {
@@ -935,7 +1118,7 @@ describe('hn_get_user — partial submission failures', () => {
     const result = await call({});
     const sc = structured(result);
     const notice =
-      'No live submissions in this window (submissionOffset:0, total:3). Items may have been deleted or flagged.';
+      'No live submissions in this window (submissionOffset:0, total:3). 3 of the 3 submissions in this window are omitted: 1 deleted, 1 dead, 1 missing.';
 
     expect(sc.submissions).toEqual([]);
     expect(sc).not.toHaveProperty('failedIds');
@@ -955,7 +1138,7 @@ describe('hn_get_user — partial submission failures', () => {
     const result = await call({ submissionCount: 3, submissionOffset: 2 });
     const sc = structured(result);
     const notice =
-      'No live submissions in this window (submissionOffset:2, total:5). Items may have been deleted or flagged.';
+      'No live submissions in this window (submissionOffset:2, total:5). 3 of the 3 submissions in this window are omitted: 1 deleted, 1 dead, 1 missing.';
 
     expect(sc.submissions).toEqual([]);
     expect(sc.notice).toBe(notice);
@@ -1311,33 +1494,12 @@ describe('hn_get_user — the per-call time budget', () => {
 });
 
 // ---------------------------------------------------------------------------
-// #49 — the 64,000-byte response budget
+// Whole submission text at every submissionCount up to the cap
 // ---------------------------------------------------------------------------
 
-describe('hn_get_user — the 64,000-byte response budget', () => {
+describe('hn_get_user — whole submission text at every submissionCount', () => {
   type ToolResult = Awaited<ReturnType<typeof runToolContract>>;
-  type WireSubmission = Record<string, any> & {
-    id: number;
-    text?: string;
-    textTruncated?: boolean;
-  };
-
-  const BUDGET_BYTES = 64_000;
-  const utf8 = new TextEncoder();
-  const bytes = (text: string) => utf8.encode(text).byteLength;
-
-  /** The line content[] puts after a cut body, outside its quote. */
-  const cutLine = (id: number) =>
-    `Text cut short to fit the response budget — hn_get_thread with itemId ${id} returns it whole.`;
-
-  /** The notice sentence for a page whose bodies `cutIds` were cut. */
-  const cutSentence = (cutIds: number[]) =>
-    `To stay within the 64,000-byte response budget, the text of ${cutIds.length === 1 ? 'submission' : 'submissions'} ${cutIds.join(', ')} is cut short; hn_get_thread with a cut submission's id returns its full text, and a smaller submissionCount cuts less.`;
-
-  const joined = new Date(1600000000 * 1000).toLocaleDateString('en-US', {
-    month: 'short',
-    year: 'numeric',
-  });
+  type WireSubmission = Record<string, unknown> & { id: number; text?: string };
 
   /** `n` UTF-16 units of `unit` repeated. */
   const body = (n: number, unit = 'macro ') => unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
@@ -1350,20 +1512,22 @@ describe('hn_get_user — the 64,000-byte response budget', () => {
     parent: 9,
     time: 1600000000,
   });
-  const story = (id: number): HnItem => ({
-    id,
-    type: 'story',
-    by: 'pg',
-    title: `Post ${id}`,
-    score: 3,
-    time: 1600000000,
-  });
 
-  /** User `pg` with `submitted` as their history, and `slots` as the window's fetch result. */
-  function serve(submitted: number[], slots: ItemSlot[]) {
-    mockFetchUser.mockResolvedValue({ id: 'pg', karma: 1, created: 1600000000, submitted });
-    mockFetchItems.mockResolvedValue(slots);
-  }
+  /** 120 submissions, 1001…1120; each window resolves as comments about the size of an average long-history body (3.4 KB). */
+  const history = Array.from({ length: 120 }, (_, i) => 1001 + i);
+  const heavyBody = (id: number) => body(3_400, `${id} words `);
+
+  beforeEach(() => {
+    mockFetchUser.mockResolvedValue({
+      id: 'pg',
+      karma: 1,
+      created: 1600000000,
+      submitted: history,
+    });
+    mockFetchItems.mockImplementation(async (ids) =>
+      slotsOf(ids.map((id) => comment(id, heavyBody(id)))),
+    );
+  });
 
   function callUser(input: Record<string, unknown> = {}): Promise<ToolResult> {
     return runToolContract(
@@ -1373,201 +1537,135 @@ describe('hn_get_user — the 64,000-byte response budget', () => {
     );
   }
 
-  /** Both surfaces of an assembled result, sized as the caller receives them; `sc` is the wire JSON. */
-  function measure(result: ToolResult) {
+  /** Both surfaces of a successful call: the wire JSON and the `content[]` text blocks as one string. */
+  function surfaces(result: ToolResult) {
     expect(result.isError).toBeFalsy();
     const sc = JSON.parse(JSON.stringify(result.structuredContent)) as Record<string, any> & {
       submissions: WireSubmission[];
+      notice?: string;
     };
-    const blocks = result.content.filter(
-      (b): b is { type: 'text'; text: string } => b.type === 'text',
-    );
-    return {
-      sc,
-      text: blocks.map((b) => b.text).join(''),
-      contentBytes: blocks.reduce((sum, b) => sum + bytes(b.text), 0),
-      structuredBytes: bytes(JSON.stringify(result.structuredContent)),
-    };
+    const text = result.content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map((b) => b.text)
+      .join('');
+    return { sc, text };
   }
 
-  it('leaves a page under budget as it was on both surfaces: whole bodies, no flag, no budget sentence', async () => {
-    const long = body(55_000);
-    serve([1, 2], slotsOf([comment(1, long), story(2)]));
+  it('keeps every submission of a heavy window and its paging fields, at the cap and past it', async () => {
+    const first = surfaces(await callUser({ submissionCount: 51 }));
+    const firstPage =
+      'Showing 50 live items from positions 1–50 of 120 submissions. submissionCount 51 is above the per-call cap of 50, so this call served submissionCount: 50. Set submissionOffset to 50 for the next page.';
 
-    const { sc, text, contentBytes, structuredBytes } = measure(await callUser());
+    expect(first.sc.submissions.map((s) => s.id)).toStrictEqual(history.slice(0, 50));
+    expect(first.sc.user.totalSubmissions).toBe(120);
+    expect(first.sc).toMatchObject({ submissionOffset: 0, truncated: true, shown: 50, cap: 50 });
+    expect(first.sc.notice?.slice(0, firstPage.length)).toBe(firstPage);
 
-    expect(contentBytes).toBeGreaterThan(55_000);
-    expect(contentBytes).toBeLessThan(BUDGET_BYTES);
-    expect(structuredBytes).toBeLessThan(BUDGET_BYTES);
-    expect(sc).toStrictEqual({
-      user: { id: 'pg', karma: 1, created: 1600000000, totalSubmissions: 2 },
-      submissions: [
-        { id: 1, type: 'comment', parent: 9, text: long, time: 1600000000 },
-        { id: 2, type: 'story', title: 'Post 2', score: 3, time: 1600000000 },
-      ],
-      submissionOffset: 0,
-    });
-    expect(text).toBe(
-      [
-        '## pg',
-        `**Karma:** 1 | **Joined:** ${joined} (t:1600000000) | **Total submissions:** 2`,
-        '',
-        '### Submissions',
-        '- **[comment]** — id:1 | parent:9 | 2020-09-13 (t:1600000000)',
-        `  > ${long}`,
-        '',
-        '- **Post 2** — id:2 | story | 3 pts | 2020-09-13 (t:1600000000)',
-        '',
-        '**submissionOffset:** 0',
-      ].join('\n'),
-    );
+    const later = surfaces(await callUser({ submissionCount: 50, submissionOffset: 60 }));
+    const laterPage =
+      'Showing 50 live items from positions 61–110 of 120 submissions. Set submissionOffset to 110 for the next page.';
+
+    expect(later.sc.submissions.map((s) => s.id)).toStrictEqual(history.slice(60, 110));
+    expect(later.sc.user.totalSubmissions).toBe(120);
+    expect(later.sc).toMatchObject({ submissionOffset: 60, truncated: true, shown: 50, cap: 50 });
+    expect(later.sc.notice?.slice(0, laterPage.length)).toBe(laterPage);
+
+    /** Every body whole on both surfaces, and the notice the page sentences alone. */
+    for (const [{ sc, text }, notice] of [
+      [first, firstPage],
+      [later, laterPage],
+    ] as const) {
+      expect(sc.notice).toBe(notice);
+      expect(text).toContain(`> ${notice}`);
+      for (const s of sc.submissions) {
+        expect(s).toStrictEqual({
+          id: s.id,
+          type: 'comment',
+          parent: 9,
+          text: heavyBody(s.id),
+          time: 1600000000,
+        });
+        expect(text).toContain(`\n${quoteBody(heavyBody(s.id), '  ')}\n`);
+      }
+      expect(text).not.toMatch(/cut short/i);
+    }
   });
 
-  it('cuts the longest bodies to one shared limit, the largest that fits, keeping every submission and the paging fields', async () => {
-    const a = body(40_000, 'lorem ipsum dolor\n\n');
-    const b = body(35_000, 'sit amet ');
-    const short = body(500);
-    serve(
-      Array.from({ length: 10 }, (_, i) => i + 1),
-      slotsOf([comment(1, a), story(2), comment(3, b), comment(4, short)]),
-    );
-
-    const { sc, text, contentBytes, structuredBytes } = measure(
-      await callUser({ submissionCount: 4 }),
-    );
-
-    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    /** One byte more for each cut body would not fit: the limit is the largest. */
-    expect(Math.max(contentBytes, structuredBytes)).toBeGreaterThan(BUDGET_BYTES - 64);
-
-    expect(sc.submissions.map((s) => s.id)).toStrictEqual([1, 2, 3, 4]);
-    expect(sc).toMatchObject({ submissionOffset: 0, truncated: true, shown: 4, cap: 4 });
-    const [cutA, post, cutB, whole] = sc.submissions;
-    expect(a.startsWith(cutA!.text!)).toBe(true);
-    expect(b.startsWith(cutB!.text!)).toBe(true);
-    expect(bytes(cutA!.text!)).toBeLessThan(bytes(b));
-    expect(bytes(cutA!.text!)).toBe(bytes(cutB!.text!));
-    expect(bytes(cutA!.text!)).toBeGreaterThan(bytes(short));
-    expect(cutA!.textTruncated).toBe(true);
-    expect(cutB!.textTruncated).toBe(true);
-    expect(whole!.text).toBe(short);
-    expect(whole).not.toHaveProperty('textTruncated');
-    expect(post).not.toHaveProperty('textTruncated');
-
-    expect(sc.notice).toBe(
-      `Showing 4 live items from positions 1–4 of 10 submissions. Set submissionOffset to 4 for the next page. ${cutSentence([1, 3])}`,
-    );
-
-    /** content[] carries the same cut prefix, quoted, then the pointer after a blank line, inside the list item. */
-    expect(text).toContain(
-      `\n${quoteBody(cutA!.text!, '  ')}\n\n  ${cutLine(1)}\n\n- **Post 2** — id:2 |`,
-    );
-    expect(text).toContain(
-      `\n${quoteBody(cutB!.text!, '  ')}\n\n  ${cutLine(3)}\n\n- **[comment]** — id:4 |`,
-    );
-    expect(text).toContain(`\n  > ${short}\n\n**submissionOffset:** 0`);
-    expect(text).not.toContain(cutLine(2));
-    expect(text).not.toContain(cutLine(4));
-    expect(text).toContain(`> ${sc.notice}`);
-  });
-
-  it('cuts a single submission larger than the budget to fit, the budget sentence the whole notice', async () => {
+  it('serves a 300,000-character body whole on both surfaces, with no notice on a final page', async () => {
     const huge = body(300_000);
-    serve([5], slotsOf([comment(5, huge)]));
+    mockFetchUser.mockResolvedValue({ id: 'pg', karma: 1, created: 1600000000, submitted: [5] });
+    mockFetchItems.mockResolvedValue(slotsOf([comment(5, huge)]));
 
-    const { sc, text, contentBytes, structuredBytes } = measure(await callUser());
+    const { sc, text } = surfaces(await callUser());
 
-    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(Math.max(contentBytes, structuredBytes)).toBeGreaterThan(BUDGET_BYTES - 64);
-    expect(sc.submissions[0]!.textTruncated).toBe(true);
-    expect(huge.startsWith(sc.submissions[0]!.text!)).toBe(true);
+    expect(sc.submissions).toStrictEqual([
+      { id: 5, type: 'comment', parent: 9, text: huge, time: 1600000000 },
+    ]);
+    expect(sc).not.toHaveProperty('notice');
     expect(sc).not.toHaveProperty('truncated');
-    expect(sc.notice).toBe(cutSentence([5]));
-    expect(text).toContain(`\n\n  ${cutLine(5)}\n\n**submissionOffset:** 0`);
+    expect(text).toContain(`\n  > ${huge}\n\n**submissionOffset:** 0`);
   });
 
-  it('follows the failed-IDs sentence with the budget sentence, and fits with failedIds in the trailer', async () => {
-    serve(
-      [1, 2, 3],
-      [
-        { kind: 'item', id: 1, item: comment(1, body(100_000)) },
-        { kind: 'failed', id: 2, error: new Error('upstream failure') },
-        { kind: 'item', id: 3, item: story(3) },
-      ],
-    );
+  it('keeps multi-byte bodies whole, identically on both surfaces', async () => {
+    const emoji = '😀é'.repeat(30_000);
+    mockFetchUser.mockResolvedValue({ id: 'pg', karma: 1, created: 1600000000, submitted: [6] });
+    mockFetchItems.mockResolvedValue(slotsOf([comment(6, emoji)]));
 
-    const { sc, text, contentBytes, structuredBytes } = measure(await callUser());
+    const { sc, text } = surfaces(await callUser());
 
-    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(sc.submissions.map((s) => s.id)).toStrictEqual([1, 3]);
+    expect(sc.submissions[0]?.text).toBe(emoji);
+    expect(text).toContain(`\n  > ${emoji}\n`);
+  });
+
+  it('closes the notice with the failed-IDs sentence, a long body whole beside the failure', async () => {
+    const long = body(100_000);
+    mockFetchUser.mockResolvedValue({
+      id: 'pg',
+      karma: 1,
+      created: 1600000000,
+      submitted: [1, 2, 3],
+    });
+    mockFetchItems.mockResolvedValue([
+      { kind: 'item', id: 1, item: comment(1, long) },
+      { kind: 'failed', id: 2, error: new Error('upstream failure') },
+      { kind: 'item', id: 3, item: comment(3, 'short') },
+    ]);
+
+    const { sc, text } = surfaces(await callUser());
+
+    expect(sc.submissions.map((s) => [s.id, s.text])).toStrictEqual([
+      [1, long],
+      [3, 'short'],
+    ]);
     expect(sc.failedIds).toStrictEqual([2]);
     expect(sc.notice).toBe(
-      `Could not fetch 1 of 3 submissions in this window (id 2). Retry with submissionOffset: 0, or pass an id as itemId to hn_get_thread to fetch that item alone. ${cutSentence([1])}`,
+      'Could not fetch 1 of 3 submissions in this window (id 2). Retry with submissionOffset: 0, or pass an id as itemId to hn_get_thread to fetch that item alone.',
     );
+    expect(text).toContain(`\n  > ${long}\n\n- **[comment]** — id:3`);
     expect(text).toContain('**Failed to load:** 2');
-    expect(text).toContain(`\n\n  ${cutLine(1)}\n\n- **Post 3**`);
   });
 
-  it('cuts on a code-point boundary, identically on both surfaces', async () => {
-    const emoji = '😀é'.repeat(30_000);
-    serve([6], slotsOf([comment(6, emoji)]));
-
-    const { sc, text, contentBytes, structuredBytes } = measure(await callUser());
-    const cut = sc.submissions[0]!.text!;
-
-    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(cut.length).toBeLessThan(emoji.length);
-    expect(emoji.startsWith(cut)).toBe(true);
-    expect(cut).not.toMatch(/[\uD800-\uDBFF]$/);
-    expect(text).toContain(`\n  > ${cut}\n\n  ${cutLine(6)}`);
-  });
-
-  it('keeps all 50 submissions of a capped page, cutting every body when all share one length', async () => {
-    const history = Array.from({ length: 60 }, (_, i) => i + 1);
-    serve(
-      history,
-      slotsOf(history.slice(0, 50).map((id) => comment(id, body(2_000, `${id} words `)))),
-    );
-
-    const { sc, contentBytes, structuredBytes } = measure(await callUser({ submissionCount: 51 }));
-
-    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(sc.submissions.map((s) => s.id)).toStrictEqual(history.slice(0, 50));
-    expect(sc.submissions.every((s) => s.textTruncated === true)).toBe(true);
-    expect(new Set(sc.submissions.map((s) => bytes(s.text!))).size).toBe(1);
-    expect(sc).toMatchObject({ truncated: true, shown: 50, cap: 50 });
-    expect(sc.notice).toBe(
-      `Showing 50 live items from positions 1–50 of 60 submissions. submissionCount 51 is above the per-call cap of 50, so this call served submissionCount: 50. Set submissionOffset to 50 for the next page. ${cutSentence(history.slice(0, 50))}`,
-    );
-  });
-
-  it('format() puts the pointer after a cut body even when the cut left no text', () => {
-    const blocks = getUser.format!({
-      user: { id: 'pg', karma: 1, created: 1600000000, totalSubmissions: 2 },
-      submissions: [
-        { id: 7, type: 'comment', text: '', textTruncated: true },
-        { id: 8, type: 'comment', text: 'whole' },
-      ],
-    } as never);
-    const text = (blocks[0] as { text: string }).text;
-
-    expect(text).toContain(`- **[comment]** — id:7\n\n  ${cutLine(7)}\n\n- **[comment]** — id:8`);
-  });
-
-  it('describes the cut on text, textTruncated, and notice', () => {
+  it('declares no cut flag on a submission and names no byte cut in its descriptions', () => {
     const output = z.toJSONSchema(getUser.output) as unknown as {
       properties: {
         submissions: { items: { properties: Record<string, { description?: string }> } };
       };
     };
     const submission = output.properties.submissions.items.properties;
-    expect(submission.text?.description).toMatch(/64,000-byte response budget/);
-    expect(submission.textTruncated?.description).toMatch(/hn_get_thread with this id/);
-    expect(getUser.enrichment?.notice?.description).toMatch(/64,000-byte response budget/);
+
+    expect(Object.keys(submission)).toStrictEqual([
+      'id',
+      'type',
+      'parent',
+      'poll',
+      'title',
+      'url',
+      'text',
+      'score',
+      'time',
+      'descendants',
+    ]);
+    expect(submission.text?.description).toBe('Body text (HTML stripped).');
+    expect(getUser.enrichment?.notice?.description).not.toMatch(/byte|cut text|cut short/i);
   });
 });

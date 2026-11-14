@@ -13,6 +13,7 @@ import {
   extractDomain,
   getHnService,
   normalizeUrl,
+  omittedSentence,
   settlePage,
   stripHtml,
   timeBudgetCutSentence,
@@ -117,6 +118,11 @@ export const getStories = tool('hn_get_stories', {
       .array(
         z
           .object({
+            rank: z
+              .number()
+              .describe(
+                "1-based position in the feed's ranking when fetched: offset plus the story's slot on this page, counted before omitted or failed items drop out. A gap between consecutive ranks marks an item omitted as deleted, dead, or missing, or one in failedIds.",
+              ),
             id: z.number().describe('Item ID — use with hn_get_thread to read comments.'),
             type: z.string().describe('Item type (story, job).'),
             title: z
@@ -193,7 +199,7 @@ export const getStories = tool('hn_get_stories', {
       .string()
       .optional()
       .describe(
-        `Agent guidance: the offset to pass for the next page while more stories remain, the IDs that failed to load and how to retry them (naming the call's ${CALL_BUDGET_MS / 1000}-second time budget when it cut them), or why a page came back empty — offset past the end of the feed, an empty feed, or every item on the page deleted or flagged — noting when count was served at its per-call cap. Absent on the last page of a non-empty result with no failed IDs.`,
+        `Agent guidance: the offset to pass for the next page while more stories remain; how many items on this page were omitted, by kind (deleted, dead, missing); the IDs that failed to load and how to retry them (naming the call's ${CALL_BUDGET_MS / 1000}-second time budget when it cut them); why a page came back empty (an empty feed, or offset past its end); and when count was served at its per-call cap. Absent on the last page of a non-empty result when nothing on it was omitted or failed.`,
       ),
   },
   enrichmentTrailer: {
@@ -208,12 +214,13 @@ export const getStories = tool('hn_get_stories', {
     const count = Math.min(input.count, COUNT_CAP);
     const sliced = feedIds.slice(input.offset, input.offset + count);
     const slots = await hn.fetchItems(sliced, ctx, deadline);
-    const { items, failedIds } = settlePage(slots);
+    const { live, failedIds, omitted } = settlePage(slots);
 
-    const stories = items.map((item) => {
+    const stories = live.map(({ item, slot }) => {
       const url = normalizeUrl(item.url);
       const domain = extractDomain(url);
       return {
+        rank: input.offset + slot + 1,
         id: item.id,
         type: item.type,
         ...(item.title && { title: decodeHtmlEntities(item.title) }),
@@ -231,6 +238,7 @@ export const getStories = tool('hn_get_stories', {
       feed: input.feed,
       count: stories.length,
       failed: failedIds.length,
+      omitted,
     });
 
     const total = feedIds.length;
@@ -243,37 +251,41 @@ export const getStories = tool('hn_get_stories', {
       ...(failedIds.length > 0 && { failedIds }),
     });
 
-    const deadPageMessage = `No live stories on this page of the ${input.feed} feed (offset:${input.offset}, total:${total}). Items may have been deleted or flagged.`;
     const failureMessage =
       failedIds.length > 0
         ? `Could not fetch ${failedIds.length} of ${sliced.length} items on this page (id${failedIds.length === 1 ? '' : 's'} ${failedIds.join(', ')}).${timeBudgetCutSentence(slots)} Retry with offset: ${input.offset}, or pass an id as itemId to hn_get_thread to fetch that story alone.`
         : undefined;
+    /** A page with nothing live and nothing failed: every slot on it was omitted, which the next sentence counts. */
+    const emptyPage =
+      stories.length === 0 && !failureMessage
+        ? `No live stories on this page of the ${input.feed} feed (offset:${input.offset}, total:${total}).`
+        : undefined;
+    const omittedMessage = omittedSentence(omitted, sliced.length, 'item', 'on this page');
 
     if (hasMore) {
       const raiseCount = input.count < COUNT_CAP ? `, or raise count (max ${COUNT_CAP})` : '';
       const nextPage = `Pass offset: ${nextOffset} for the next page${raiseCount}.`;
       const pageStatus =
-        stories.length === 0 && !failureMessage
-          ? deadPageMessage
-          : `Showing items ${input.offset + 1}–${nextOffset} of ${total} in the ${input.feed} feed.`;
+        emptyPage ??
+        `Showing items ${input.offset + 1}–${nextOffset} of ${total} in the ${input.feed} feed.`;
       const overCap = input.count > COUNT_CAP ? servedAtCap('count', input.count, COUNT_CAP) : '';
       ctx.enrich.truncated({
         shown: stories.length,
         cap: count,
-        guidance: [pageStatus, overCap, failureMessage, nextPage].filter(Boolean).join(' '),
+        guidance: [pageStatus, omittedMessage, overCap, failureMessage, nextPage]
+          .filter(Boolean)
+          .join(' '),
       });
-    } else if (stories.length === 0) {
-      if (total === 0) {
-        ctx.enrich.notice(`${input.feed} feed is empty.`);
-      } else if (input.offset >= total) {
-        ctx.enrich.notice(
-          `Offset ${input.offset} is past the end of the ${input.feed} feed (${total} item${total === 1 ? '' : 's'}). Reset offset below ${total}.`,
-        );
-      } else {
-        ctx.enrich.notice(failureMessage ?? deadPageMessage);
-      }
-    } else if (failureMessage) {
-      ctx.enrich.notice(failureMessage);
+    } else if (total === 0) {
+      ctx.enrich.notice(`${input.feed} feed is empty.`);
+    } else if (input.offset >= total) {
+      ctx.enrich.notice(
+        `Offset ${input.offset} is past the end of the ${input.feed} feed (${total} item${total === 1 ? '' : 's'}). Reset offset below ${total}.`,
+      );
+    } else {
+      /** The final page: a drop or a failure is not a pagination gap, so nothing here names a next offset. */
+      const notice = [emptyPage, omittedMessage, failureMessage].filter(Boolean).join(' ');
+      if (notice) ctx.enrich.notice(notice);
     }
 
     return {
@@ -287,8 +299,7 @@ export const getStories = tool('hn_get_stories', {
       return [{ type: 'text' as const, text: `${result.feed} feed — no stories` }];
     }
 
-    const lines = result.stories.map((s, i) => {
-      const rank = i + 1;
+    const lines = result.stories.map((s) => {
       const date =
         s.time != null
           ? `${new Date(s.time * 1000).toISOString().slice(0, 10)} (t:${s.time})`
@@ -307,7 +318,7 @@ export const getStories = tool('hn_get_stories', {
       const text = s.text ? `\n${quoteBody(s.text)}` : '';
       const title = s.title ? escapeInline(s.title) : `[${s.type}]`;
       const domain = s.domain ? ` (${s.domain})` : '';
-      return `[${rank}] ${title}${domain}\n${meta}${url}${text}`;
+      return `[${s.rank}] ${title}${domain}\n${meta}${url}${text}`;
     });
 
     const header = `## ${result.feed} stories`;

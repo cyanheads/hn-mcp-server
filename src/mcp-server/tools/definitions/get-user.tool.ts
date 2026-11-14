@@ -6,21 +6,14 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeInline, quoteBody } from '@/mcp-server/tools/markdown-escape.js';
-import {
-  byteLength,
-  cutPointer,
-  cutToBytes,
-  fitsBudget,
-  largestFittingLimit,
-  measureResponse,
-  RESPONSE_BUDGET_TEXT,
-} from '@/mcp-server/tools/response-budget.js';
 import { servedAtCap } from '@/mcp-server/tools/served-at-cap.js';
+import { usernameInput } from '@/mcp-server/tools/username-input.js';
 import {
   CALL_BUDGET_MS,
   decodeHtmlEntities,
   getHnService,
   normalizeUrl,
+  omittedSentence,
   settlePage,
   stripHtml,
   timeBudgetCutSentence,
@@ -31,16 +24,6 @@ const SUBMISSION_COUNT_CAP = 50;
 
 /** Largest `submissionCount` accepted; anything above it is rejected. */
 const SUBMISSION_COUNT_CEILING = 1000;
-
-/** The notice sentence disclosing which submission bodies were cut to fit the response budget. */
-const budgetSentence = (cutIds: readonly number[]) =>
-  `To stay within the ${RESPONSE_BUDGET_TEXT}-byte response budget, the text of ${cutIds.length === 1 ? 'submission' : 'submissions'} ${cutIds.join(', ')} is cut short; hn_get_thread with a cut submission's id returns its full text, and a smaller submissionCount cuts less.`;
-
-const userTrailer = {
-  failedIds: {
-    render: (ids: readonly number[] | undefined) => `**Failed to load:** ${(ids ?? []).join(', ')}`,
-  },
-};
 
 const userOutput = z.object({
   user: z
@@ -67,18 +50,7 @@ const userOutput = z.object({
           poll: z.number().optional().describe('For a poll option, the ID of its poll.'),
           title: z.string().optional().describe('Title (stories/jobs/polls).'),
           url: z.string().optional().describe('External link URL.'),
-          text: z
-            .string()
-            .optional()
-            .describe(
-              `Body text (HTML stripped). Cut short when the page would otherwise exceed the ${RESPONSE_BUDGET_TEXT}-byte response budget, with textTruncated set.`,
-            ),
-          textTruncated: z
-            .boolean()
-            .optional()
-            .describe(
-              `True when text is a prefix of the body, cut short to keep the page within the ${RESPONSE_BUDGET_TEXT}-byte response budget — hn_get_thread with this id returns it whole. Absent when text is whole.`,
-            ),
+          text: z.string().optional().describe('Body text (HTML stripped).'),
           score: z.number().optional().describe('Score/upvotes.'),
           time: z.number().optional().describe('Unix timestamp.'),
           descendants: z
@@ -92,7 +64,7 @@ const userOutput = z.object({
     )
     .optional()
     .describe(
-      'One page of submissions, most recent first, starting at submissionOffset. Absent when includeSubmissions is false or the user has never submitted. Empty when the page holds no live items — either the offset is past the end, or every item in the window was deleted, flagged, or failed to load (failedIds lists the failures).',
+      'One page of submissions, most recent first, starting at submissionOffset. Absent when includeSubmissions is false or the user has never submitted. Empty when the page holds no live items — either the offset is past the end, or every item in the window was deleted, dead, missing, or failed to load (the notice counts the omitted ones by kind; failedIds lists the failures).',
     ),
 });
 
@@ -133,10 +105,8 @@ function formatUser(result: UserOutput) {
       lines.push(`- **${title}** — ${meta}`);
       if (s.url) lines.push(`  ${s.url}`);
       if (s.text) lines.push(quoteBody(s.text, '  '));
-      /** A blank line ends the quote, so the pointer is a paragraph of the list item rather than a lazy quote line. */
-      if (s.textTruncated) lines.push('', `  ${cutPointer(s.id)}`);
       // A blank line ends the quote before the next submission.
-      if ((s.text || s.textTruncated) && i < result.submissions.length - 1) lines.push('');
+      if (s.text && i < result.submissions.length - 1) lines.push('');
     }
   }
 
@@ -215,13 +185,9 @@ export const getUser = tool('hn_get_user', {
     },
   ],
   input: z.object({
-    username: z
-      .string()
-      .trim()
-      .min(1, 'blank after trimming whitespace — pass an HN username.')
-      .describe(
-        'HN username. Case-sensitive. Trimmed; blank or whitespace-only input is rejected.',
-      ),
+    username: usernameInput('pass an HN username.').describe(
+      'HN username. Case-sensitive. Trimmed, and one leading @ is dropped, so @pg looks up pg. Blank input is rejected, as is a name with whitespace inside it — a display name such as "Paul Graham", not an account name.',
+    ),
     includeSubmissions: z
       .boolean()
       .default(false)
@@ -273,10 +239,12 @@ export const getUser = tool('hn_get_user', {
       .string()
       .optional()
       .describe(
-        `Pagination context — which window of the history this page covers and the submissionOffset to send next, the submission IDs that failed to load and how to retry them, why a final window came back empty (every item in it deleted or flagged), or a warning that the offset is past the end — noting when submissionCount was served at its per-call cap or the call's ${CALL_BUDGET_MS / 1000}-second time budget cut the failed fetches, and closing with the submissions whose text was cut to keep the page within the ${RESPONSE_BUDGET_TEXT}-byte response budget. Absent when the page reaches the end of the history with at least one live submission, no failed IDs, and no cut text, or when no submissions were resolved.`,
+        `Pagination context — which window of the history this page covers and the submissionOffset to send next, how many submissions in the window were omitted as deleted, dead, or missing, by kind, on every page that drops any, the submission IDs that failed to load and how to retry them, or a warning that the offset is past the end — noting when submissionCount was served at its per-call cap or the call's ${CALL_BUDGET_MS / 1000}-second time budget cut the failed fetches. Absent when the page reaches the end of the history with every submission in its window live and loaded, or when no submissions were resolved.`,
       ),
   },
-  enrichmentTrailer: userTrailer,
+  enrichmentTrailer: {
+    failedIds: { render: (ids) => `**Failed to load:** ${(ids ?? []).join(', ')}` },
+  },
 
   async handler(input, ctx) {
     const hn = getHnService();
@@ -339,71 +307,42 @@ export const getUser = tool('hn_get_user', {
       failedIds.length > 0
         ? `Could not fetch ${failedIds.length} of ${slots.length} submissions in this window (id${failedIds.length === 1 ? '' : 's'} ${failedIds.join(', ')}).${timeBudgetCutSentence(slots)} Retry with submissionOffset: ${offset}, or pass an id as itemId to hn_get_thread to fetch that item alone.`
         : undefined;
-    const emptyWindowMessage = `No live submissions in this window (submissionOffset:${offset}, total:${total}). Items may have been deleted or flagged.`;
+    const omittedMessage = omittedSentence(
+      page.omitted,
+      slots.length,
+      'submission',
+      'in this window',
+    );
 
-    /** The notice for this page with the bodies of `cutIds` cut to the response budget; the budget sentence comes last. */
-    const noticeFor = (cutIds: readonly number[]) => {
-      if (offset >= total) {
-        return `submissionOffset ${offset} is past the end of ${total.toLocaleString()} submissions. Valid offsets are 0 to ${total - 1}.`;
-      }
-      const budget = cutIds.length > 0 ? budgetSentence(cutIds) : undefined;
-      const sentences = morePages
+    /** The page-state sentence leads, the omitted count follows it (or leads when there is none), and the rest keep their order. */
+    const sentences =
+      offset >= total
         ? [
-            `Showing ${shown} live item${shown === 1 ? '' : 's'} from positions ${(offset + 1).toLocaleString()}–${pageEnd.toLocaleString()} of ${total.toLocaleString()} submissions.`,
-            input.submissionCount > SUBMISSION_COUNT_CAP &&
-              servedAtCap('submissionCount', input.submissionCount, SUBMISSION_COUNT_CAP),
-            failureMessage,
-            `Set submissionOffset to ${pageEnd} for the next page.`,
-            budget,
+            `submissionOffset ${offset} is past the end of ${total.toLocaleString()} submissions. Valid offsets are 0 to ${total - 1}.`,
           ]
-        : [failureMessage ?? (shown === 0 ? emptyWindowMessage : undefined), budget];
-      return sentences.filter(Boolean).join(' ') || undefined;
-    };
-
-    /** Both surfaces of the page serving `served`, enrichment and trailer included. */
-    const measure = (served: Submission[]) => {
-      const notice = noticeFor(served.filter((s) => s.textTruncated).map((s) => s.id));
-      const result = { user: profile, submissions: served };
-      return measureResponse({
-        content: formatUser(result),
-        result,
-        enrichment: {
-          submissionOffset: offset,
-          ...(failedIds.length > 0 && { failedIds }),
-          ...(morePages && { truncated: true, shown, cap: submissionCount }),
-          ...(notice != null && { notice }),
-        },
-        trailer: userTrailer,
-      });
-    };
-
-    let served = submissions;
-    if (!fitsBudget(measure(submissions))) {
-      /** Cut every body longer than the largest limit they can share; every submission stays. */
-      const bodies = submissions.map((s) => ({ s, bytes: s.text ? byteLength(s.text) : 0 }));
-      const cutAt = (limit: number) =>
-        bodies.map(({ s, bytes }) =>
-          s.text && bytes > limit
-            ? { ...s, text: cutToBytes(s.text, limit), textTruncated: true }
-            : s,
-        );
-      const limit = largestFittingLimit(
-        bodies.map((body) => body.bytes),
-        (limitBytes) => measure(cutAt(limitBytes)),
-      );
-      served = cutAt(limit);
-      ctx.log.info('Fitted user page to the response budget', {
-        limitBytes: limit,
-        cutIds: served.filter((s) => s.textTruncated).map((s) => s.id),
-      });
-    }
+        : morePages
+          ? [
+              `Showing ${shown} live item${shown === 1 ? '' : 's'} from positions ${(offset + 1).toLocaleString()}–${pageEnd.toLocaleString()} of ${total.toLocaleString()} submissions.`,
+              omittedMessage,
+              input.submissionCount > SUBMISSION_COUNT_CAP &&
+                servedAtCap('submissionCount', input.submissionCount, SUBMISSION_COUNT_CAP),
+              failureMessage,
+              `Set submissionOffset to ${pageEnd} for the next page.`,
+            ]
+          : [
+              shown === 0 &&
+                !failureMessage &&
+                `No live submissions in this window (submissionOffset:${offset}, total:${total}).`,
+              omittedMessage,
+              failureMessage,
+            ];
+    const notice = sentences.filter(Boolean).join(' ');
 
     ctx.enrich({ submissionOffset: offset, ...(failedIds.length > 0 && { failedIds }) });
     if (morePages) ctx.enrich.truncated({ shown, cap: submissionCount });
-    const notice = noticeFor(served.filter((s) => s.textTruncated).map((s) => s.id));
     if (notice) ctx.enrich.notice(notice);
 
-    return { user: profile, submissions: served };
+    return { user: profile, submissions };
   },
 
   format: formatUser,

@@ -217,7 +217,7 @@ describe('hn_get_thread — upstream text in content[]', () => {
     expect(text).toBe(
       [
         '## The \\<Dialog> Element',
-        'id:34759527 | type:story | 339 pts | by cardamomo | 152 comments | 2023-02-12 (t:1676173889)',
+        'id:34759527 | type:story | 339 pts | by cardamomo | 152 comments | 1 replies | 2023-02-12 (t:1676173889)',
         'https://developer.mozilla.org/en-US/docs/Web/HTML/Element/dialog',
       ].join('\n'),
     );
@@ -273,7 +273,7 @@ describe('hn_get_thread — upstream text in content[]', () => {
     expect(text).toBe(
       [
         '## T',
-        'id:100 | type:story | by op',
+        'id:100 | type:story | by op | 1 replies',
         '',
         '---',
         '',
@@ -321,7 +321,7 @@ describe('hn_get_thread — upstream text in content[]', () => {
     expect(text).toBe(
       [
         '## Rendering \\*test\\*',
-        `id:1 | type:story | 7 pts | by op | 3 comments | ${DAY}`,
+        `id:1 | type:story | 7 pts | by op | 3 comments | 1 replies | ${DAY}`,
         'https://x.test/a_b*c',
         ...quoted('', BODY_RENDERED),
         '',
@@ -427,7 +427,33 @@ describe('hn_get_thread — upstream text in content[]', () => {
     expect(text).toBe(
       [
         '## Comment by snake_user',
-        'id:7 | type:comment | parent:3 | story:3 | by snake_user',
+        'id:7 | type:comment | parent:3 | story:"Story"#3 | by snake_user',
+        '> a_b *c*',
+      ].join('\n'),
+    );
+  });
+
+  it('escapes a comment root’s story title inside story:"…" and puts the story link on its own line', async () => {
+    serve({
+      3: {
+        id: 3,
+        type: 'story',
+        by: 'op',
+        title: 'Say &quot;hi&quot; to **you** <em>x</em> [x](https://y.test) `c` \\',
+        url: 'https://x.test/a_b*c',
+      },
+      7: { id: 7, type: 'comment', by: 'snake_user', parent: 3, text: 'a_b *c*' },
+    });
+
+    const { sc, text } = await call(getThread, { itemId: 7, depth: 0 });
+
+    expect(sc.item.storyTitle).toBe('Say "hi" to **you** <em>x</em> [x](https://y.test) `c` \\');
+    expect(sc.item.storyUrl).toBe('https://x.test/a_b*c');
+    expect(text).toBe(
+      [
+        '## Comment by snake_user',
+        'id:7 | type:comment | parent:3 | story:"Say \\"hi\\" to \\*\\*you\\*\\* \\<em>x\\</em> [x\\](https://y.test) \\`c\\` \\\\"#3 | by snake_user',
+        'https://x.test/a_b*c',
         '> a_b *c*',
       ].join('\n'),
     );
@@ -750,6 +776,35 @@ describe('hn_search_content — upstream text in content[]', () => {
         '',
         `> match — terms: caolan, async | body: ${first}`,
         ...quoted('', rest),
+      ].join('\n'),
+    );
+  });
+
+  it('serves a body of 60 copies of hit 7739084 whole on both surfaces, its links each once per copy', async () => {
+    const copies = 60;
+    const copyHtml = [...NODE_PARAGRAPHS, NODE_LINKS_RAW].join('<p>');
+    const textLines = Array.from({ length: copies }, (_, i) =>
+      i === 0 ? NODE_TEXT_LINES : ['', ...NODE_TEXT_LINES],
+    ).flat();
+    const { _highlightResult: _, ...plain } = nodeHit('', []);
+    serveSearch([{ ...plain, comment_text: Array(copies).fill(copyHtml).join('<p>') }]);
+
+    const { sc, text } = await call(searchHn, {
+      query: 'callback hell',
+      tags: 'comment',
+      storyId: 7738594,
+      count: 1,
+    });
+
+    expect(textLines.join('\n').length).toBeGreaterThan(70_000);
+    expect(sc.hits[0].text).toBe(textLines.join('\n'));
+    expect(text).toBe(
+      [
+        '## "callback hell" — search results',
+        '',
+        '### Comment on "Why Node.js is becoming the go-to technology in the Enterprise" (story id:7738594)',
+        'id:7739084 | yid | 2014-05-13T16:44:20Z',
+        ...quoted('', textLines),
       ].join('\n'),
     );
   });

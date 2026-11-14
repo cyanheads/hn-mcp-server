@@ -148,18 +148,34 @@ describe('hn_get_thread handler', () => {
     await expect(getThread.handler(parse(), ctx)).rejects.toThrow('Item 1 not found');
   });
 
-  it('returns item only with empty comments when depth is 0, with enrichment counts', async () => {
+  it('returns item only with empty comments when depth is 0, reporting the replies it left unread', async () => {
     hn.fetchItem.mockResolvedValue(mockStory);
     const result = await getThread.handler(parse({ depth: 0 }), ctx);
 
-    expect(result.item.id).toBe(1);
+    expect(result.item).toMatchObject({ id: 1, childCount: 2 });
     expect(result.comments).toEqual([]);
     expect(hn.fetchItems).not.toHaveBeenCalled();
 
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.totalLoaded).toBe(0);
-    expect(enrichment.totalAvailable).toBe(3);
-    expect(enrichment.notice).toBeUndefined();
+    expect(enrichment).toMatchObject({
+      totalLoaded: 0,
+      totalAvailable: 3,
+      truncated: true,
+      truncationReason: 'depth',
+    });
+    expect(enrichment).not.toHaveProperty('nextCursor');
+    expect(enrichment.notice).toBe(
+      'The depth limit (0) left replies unread with 0/3 comments loaded. Raise depth (max 10) to read them.',
+    );
+  });
+
+  it('counts the root’s direct replies in item.childCount at depth 1 as well', async () => {
+    hn.fetchItem.mockResolvedValue({ ...mockStory, kids: [10, 11, 12] });
+    hn.fetchItems.mockResolvedValueOnce(slotsOf([mockComment1, mockComment2]));
+
+    const result = await getThread.handler(parse({ depth: 1 }), ctx);
+
+    expect(result.item.childCount).toBe(3);
   });
 
   it('returns empty comments when story has no kids', async () => {
@@ -397,6 +413,7 @@ describe('hn_get_thread format', () => {
         url: 'https://example.com',
         score: 42,
         descendants: 0,
+        childCount: 0,
       },
       comments: [],
     };
@@ -412,7 +429,15 @@ describe('hn_get_thread format', () => {
 
   it('formats story with indented comment tree', () => {
     const result = {
-      item: { id: 1, type: 'story', by: 'alice', title: 'Test Story', score: 10, descendants: 2 },
+      item: {
+        id: 1,
+        type: 'story',
+        by: 'alice',
+        title: 'Test Story',
+        score: 10,
+        descendants: 2,
+        childCount: 1,
+      },
       comments: [
         {
           id: 10,
@@ -437,8 +462,8 @@ describe('hn_get_thread format', () => {
 
     const blocks = format(result as Parameters<typeof format>[0]);
     const text = firstText(blocks);
-    expect(text).toContain('**bob** (id:10');
-    expect(text).toContain('1 replies');
+    expect(text).toContain('id:1 | type:story | 10 pts | by alice | 2 comments | 1 replies');
+    expect(text).toContain('**bob** (id:10 | depth:0 | parent:1 | 1 replies');
     expect(text).toContain('Top-level');
     expect(text).toContain('**carol** (id:20');
     expect(text).toContain('\n  > Nested reply');
@@ -446,7 +471,7 @@ describe('hn_get_thread format', () => {
 
   it('marks OP comments with "(OP)" suffix in author line', () => {
     const result = {
-      item: { id: 1, type: 'story', by: 'alice', title: 'Test Story' },
+      item: { id: 1, type: 'story', by: 'alice', title: 'Test Story', childCount: 2 },
       comments: [
         {
           id: 10,
@@ -481,7 +506,7 @@ describe('hn_get_thread format', () => {
 
   it('formats comment as root with "Comment by author"', () => {
     const result = {
-      item: { id: 10, type: 'comment', by: 'bob', text: 'Some comment' },
+      item: { id: 10, type: 'comment', by: 'bob', text: 'Some comment', childCount: 0 },
       comments: [],
     };
 
@@ -516,9 +541,9 @@ describe('hn_get_thread input validation', () => {
     expect(() => getThread.input.parse({ itemId: 1, depth: 101 })).toThrow();
   });
 
-  it('defaults maxComments to 50 and accepts 1 up to the 1,000 ceiling', () => {
+  it('defaults maxComments to 25 and accepts 1 up to the 1,000 ceiling', () => {
     const defaults = getThread.input.parse({ itemId: 1 });
-    expect(defaults.maxComments).toBe(50);
+    expect(defaults.maxComments).toBe(25);
 
     const one = getThread.input.parse({ itemId: 1, maxComments: 1 });
     expect(one.maxComments).toBe(1);
@@ -596,7 +621,7 @@ describe('hn_get_thread — security and edge cases', () => {
 
   it('format() handles missing item author gracefully (no crash)', () => {
     const result = {
-      item: { id: 10, type: 'comment' as const },
+      item: { id: 10, type: 'comment' as const, childCount: 0 },
       comments: [],
     };
     expect(() => getThread.format!(result)).not.toThrow();
@@ -606,7 +631,7 @@ describe('hn_get_thread — security and edge cases', () => {
 
   it('format() caps indent depth at 10 regardless of actual depth value', () => {
     const result = {
-      item: { id: 1, type: 'story' as const, by: 'alice', title: 'Deep' },
+      item: { id: 1, type: 'story' as const, by: 'alice', title: 'Deep', childCount: 1 },
       comments: [
         {
           id: 99,
@@ -953,6 +978,26 @@ describe('hn_get_thread truncation', () => {
     }
   });
 
+  it('fetches a page in batches of at most 25, none larger than the comments still wanted', async () => {
+    const kids = Array.from({ length: 30 }, (_, i) => 1000 + i);
+    const byId: Record<number, HnItem> = {};
+    for (const id of kids) {
+      byId[id] = comment(id, 1, [id + 1000]);
+      byId[id + 1000] = comment(id + 1000, id);
+    }
+    hn.fetchItem.mockResolvedValue({ ...mockStory, descendants: 60, kids });
+    hn.fetchItems.mockImplementation(async (ids: number[]) => slotsOf(ids.map((id) => byId[id]!)));
+
+    const sc = okStructured(await call({ itemId: 1, depth: 2, maxComments: 40 }));
+
+    expect(hn.fetchItems.mock.calls.map(([ids]) => ids)).toEqual([
+      kids.slice(0, 25),
+      kids.slice(25),
+      kids.slice(0, 10).map((id) => id + 1000),
+    ]);
+    expect(sc).toMatchObject({ totalLoaded: 40, truncationReason: 'count' });
+  });
+
   it('hits the cap past the first level and still reports it as truncated', async () => {
     hn.fetchItem.mockResolvedValue({ ...mockStory, descendants: 10, kids: [10, 11] });
     hn.fetchItems
@@ -1181,27 +1226,13 @@ describe('hn_get_thread — maxComments and depth above the per-call cap', () =>
     it('continues an over-cap first page at the maxComments the next call passes', async () => {
       const { kids } = serveWide(300);
       const first = okStructured(await call({ itemId: 1, depth: 1, maxComments: 500 }));
-      const next = okStructured(await call({ itemId: 1, depth: 1, cursor: first.nextCursor }));
+      const next = okStructured(
+        await call({ itemId: 1, depth: 1, maxComments: 50, cursor: first.nextCursor }),
+      );
 
       expect(commentIds(next)).toEqual(kids.slice(200, 250));
       expect(next).toMatchObject({ shown: 50, cap: 50, truncationReason: 'count' });
       expect(next.notice).toBe(`Stopped at maxComments 50 with 250/300 comments loaded. ${resume}`);
-    });
-
-    it('leaves the sentence out when the byte budget, not the cap, stopped the page', async () => {
-      const ids = [10, 11, 12, 13, 14];
-      const long = (id: number): HnItem => ({ ...comment(id, 1), text: 'x'.repeat(20_000) });
-      serve({ descendants: 5, kids: ids }, Object.fromEntries(ids.map((id) => [id, long(id)])));
-
-      const result = await call({ itemId: 1, depth: 1, maxComments: 500 });
-      const sc = okStructured(result);
-
-      expect(commentIds(sc)).toEqual([10, 11, 12]);
-      expect(sc).toMatchObject({ truncationReason: 'size', shown: 3, cap: 200 });
-      expect(sc.notice).toBe(
-        `Stopped at the 64,000-byte response budget after 3 comments with 3/5 comments loaded. ${resume}`,
-      );
-      expect(allText(result)).not.toContain('per-call cap');
     });
 
     it('leaves the sentence out when the per-call item ceiling, not the cap, stopped the page', async () => {
@@ -1631,9 +1662,11 @@ describe('hn_get_thread — root relationships and state', () => {
     const result = await callStubbed({ itemId: 126809, depth: 0 });
     const sc = okStructured(result);
 
+    /** Options are the poll's parts, never replies: childCount counts its two kids alone. */
     expect(sc.item).toMatchObject({
       id: 126809,
       type: 'poll',
+      childCount: 2,
       parts: [126810, 126811, 126812],
       options: [
         { id: 126810, text: 'Yes', score: 30 },
@@ -1641,10 +1674,13 @@ describe('hn_get_thread — root relationships and state', () => {
         { id: 126812, text: 'Maybe', score: 5 },
       ],
     });
-    expect(sc).toMatchObject({ totalLoaded: 0 });
+    expect(sc).toMatchObject({ totalLoaded: 0, truncated: true, truncationReason: 'depth' });
+    expect(sc.notice).toBe(
+      'The depth limit (0) left replies unread with 0/2 comments loaded. Raise depth (max 10) to read them.',
+    );
     const text = allText(result);
     expect(text).toContain('## Poll: explicit polls?');
-    expect(text).toContain('parts:126810,126811,126812');
+    expect(text).toContain('parts:126810,126811,126812 | 47 pts | by pg | 2 comments | 2 replies');
     expect(text).toMatch(/id:126810 \| 30 pts: Yes/);
     expect(text.indexOf('id:126810')).toBeLessThan(text.indexOf('id:126812'));
   });
@@ -1712,9 +1748,13 @@ describe('hn_get_thread — root relationships and state', () => {
 
     const result = await callStubbed({ itemId: 39667625, depth: 0 });
 
-    expect(okStructured(result).item).toMatchObject({ parent: 39662907, storyId: 39662907 });
+    expect(okStructured(result).item).toMatchObject({
+      parent: 39662907,
+      storyId: 39662907,
+      storyTitle: 'Story',
+    });
     expect(allText(result)).toMatch(
-      /id:39667625 \| type:comment \| parent:39662907 \| story:39662907 \| by pg/,
+      /id:39667625 \| type:comment \| parent:39662907 \| story:"Story"#39662907 \| by pg/,
     );
   });
 
@@ -1767,7 +1807,17 @@ describe('hn_get_thread — root relationships and state', () => {
 
     const item = okStructured(await callStubbed({ itemId: 1, depth: 0 })).item as object;
 
-    for (const key of ['parent', 'storyId', 'poll', 'parts', 'options', 'deleted', 'dead']) {
+    for (const key of [
+      'parent',
+      'storyId',
+      'storyTitle',
+      'storyUrl',
+      'poll',
+      'parts',
+      'options',
+      'deleted',
+      'dead',
+    ]) {
       expect(Object.hasOwn(item, key)).toBe(false);
     }
   });
@@ -1905,58 +1955,60 @@ describe('hn_get_thread — resumable traversal', () => {
     expect(pages.flatMap(commentIds)).toEqual([10, 11, 20, 30]);
   });
 
-  it('cuts at the response budget between comments and resumes after the last one shown', async () => {
-    const long = (id: number) => ({
-      id,
-      type: 'comment',
-      by: `u${id}`,
-      text: 'x'.repeat(20_000),
-      parent: 1,
+  it('resumes a cursor issued at a size stop at the next unseen comment, each comment once in walk order', async () => {
+    /** Two short top-level comments, then 25,000-byte replies. */
+    const long = (id: number, parent: number, kids?: number[]) => ({
+      ...comment(id, parent, kids),
+      text: 'x'.repeat(25_000),
     });
     serveItems(
       storyTree(
-        { 1: [10, 11, 12, 13, 14] },
-        { 10: long(10), 11: long(11), 12: long(12), 13: long(13), 14: long(14) },
-        { descendants: 5 },
+        { 1: [10, 11], 10: [20, 21, 22], 11: [23], 20: [30], 21: [31] },
+        { 20: long(20, 10, [30]), 21: long(21, 10, [31]), 22: long(22, 10) },
+        { descendants: 8 },
       ),
     );
+    /**
+     * The nextCursor 0.6.1 issued for this tree at depth 3, whose first page
+     * stopped on `size` after 10, 11, 20, and 21: 22 and 23 unread at depth 1,
+     * 30 and 31 queued at depth 2.
+     */
+    const sizeStopCursor = 'AQEDBAAEARIBGAEUARgCJgEUAigBFAA';
 
-    const first = await callStubbed({ itemId: 1, depth: 1, maxComments: 50 });
-    const sc = okStructured(first);
+    const [uncut] = await readAll({ itemId: 1, depth: 3, maxComments: 200 });
+    const pages = await readAll({ itemId: 1, depth: 3, maxComments: 1, cursor: sizeStopCursor });
 
-    expect(commentIds(sc)).toEqual([10, 11, 12]);
-    expect(sc).toMatchObject({ truncated: true, truncationReason: 'size', shown: 3 });
-    expect(sc.notice).toMatch(/64,000-byte/);
-    const rendered = getThread.format!(sc as never)[0] as { text: string };
-    expect(Buffer.byteLength(rendered.text)).toBeLessThanOrEqual(64_000);
-    expect(allText(first)).toContain(sc.notice as string);
-
-    const next = okStructured(
-      await callStubbed({ itemId: 1, depth: 1, maxComments: 50, cursor: sc.nextCursor }),
+    expect(commentIds(uncut!)).toEqual([10, 11, 20, 21, 22, 23, 30, 31]);
+    expect([10, 11, 20, 21, ...pages.flatMap(commentIds)]).toEqual(commentIds(uncut!));
+    expect(pages[0]!.notice).toBe(
+      'Stopped at maxComments 1 with 5/8 comments loaded. Pass nextCursor as cursor, with the same itemId, to continue.',
     );
-    expect(commentIds(next)).toEqual([13, 14]);
-    expect(next).not.toHaveProperty('truncated');
+    expect(pages.flatMap((p) => p.comments as Array<Record<string, unknown>>)).toEqual([
+      expect.objectContaining({ id: 22, depth: 1, parentId: 10 }),
+      expect.objectContaining({ id: 23, depth: 1, parentId: 11 }),
+      expect.objectContaining({ id: 30, depth: 2, parentId: 20 }),
+      expect.objectContaining({ id: 31, depth: 2, parentId: 21 }),
+    ]);
   });
 
-  it('returns a single comment larger than the budget whole', async () => {
-    const huge = 'y'.repeat(100_000);
-    serveItems(
-      storyTree(
-        { 1: [10, 11] },
-        { 10: { id: 10, type: 'comment', by: 'big', text: huge, parent: 1 } },
-        { descendants: 2 },
-      ),
-    );
+  it('pages a thread of long comments at the default maxComments to every comment once, in walk order', async () => {
+    /** 30 top-level comments of 3,000 bytes, the first five with two replies each. */
+    const top = Array.from({ length: 30 }, (_, i) => 100 + i);
+    const kidsOf: Record<number, number[]> = { 1: top };
+    for (const [i, id] of top.slice(0, 5).entries()) kidsOf[id] = [200 + 2 * i, 201 + 2 * i];
+    const replies = top.slice(0, 5).flatMap((id) => kidsOf[id] ?? []);
+    const tree = storyTree(kidsOf, {}, { descendants: 40 });
+    for (const id of [...top, ...replies]) {
+      tree[id] = { ...(tree[id] as HnItem), text: 'y'.repeat(3_000) };
+    }
+    serveItems(tree);
 
-    const sc = okStructured(await callStubbed({ itemId: 1, depth: 1 }));
-    const comments = sc.comments as Array<{ id: number; text: string }>;
+    const pages = await readAll({ itemId: 1, depth: 2 });
 
-    expect(comments).toHaveLength(1);
-    expect(comments[0]!.text).toBe(huge);
-    expect(sc).toMatchObject({ truncated: true, truncationReason: 'size' });
-
-    const next = okStructured(await callStubbed({ itemId: 1, depth: 1, cursor: sc.nextCursor }));
-    expect(commentIds(next)).toEqual([11]);
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.flatMap(commentIds)).toEqual([...top, ...replies]);
+    for (const page of pages.slice(0, -1)) expect(typeof page.nextCursor).toBe('string');
+    expect(pages.at(-1)).not.toHaveProperty('nextCursor');
   });
 
   it('reports a depth cut on a comment root with no totalAvailable, naming depth rather than the cursor', async () => {
@@ -2002,6 +2054,16 @@ describe('hn_get_thread — resumable traversal', () => {
       expect(sc).not.toHaveProperty(key);
     }
     expect(allText(result)).not.toMatch(/cursor/i);
+  });
+
+  it('renders truncationReason and nextCursor in the trailer as code spans', async () => {
+    serveItems(storyTree({ 1: [10, 11, 12] }, {}, { descendants: 3 }));
+
+    const result = await callStubbed({ itemId: 1, depth: 1, maxComments: 2 });
+    const sc = okStructured(result);
+
+    expect(allText(result)).toContain('\n**truncationReason:** `count`\n');
+    expect(allText(result).endsWith(`\n**nextCursor:** \`${sc.nextCursor}\``)).toBe(true);
   });
 
   it('returns an empty terminal page for a story with no comments', async () => {
@@ -2303,10 +2365,10 @@ describe('hn_get_thread — resumable traversal', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The response budget on both whole surfaces — trailer, cursor, and JSON included
+// Page size — maxComments and the other stops, never the bytes a page takes
 // ---------------------------------------------------------------------------
 
-describe('hn_get_thread — the response budget on both whole surfaces', () => {
+describe('hn_get_thread — page size follows maxComments, not bytes', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     (getHnService as Mock).mockReturnValue(new HnService(3));
@@ -2317,8 +2379,6 @@ describe('hn_get_thread — the response budget on both whole surfaces', () => {
     vi.useRealTimers();
   });
 
-  const BUDGET = 64_000;
-
   /** Bytes of every content[] text block, and of the structuredContent JSON. */
   function surfaces(result: ToolResult) {
     const content = result.content.reduce(
@@ -2328,181 +2388,96 @@ describe('hn_get_thread — the response budget on both whole surfaces', () => {
     return { content, structured: Buffer.byteLength(JSON.stringify(result.structuredContent)) };
   }
 
-  /**
-   * `n` ids from two ranges 40,000,000 apart, alternating, so each one packs
-   * into the cursor as a 4-byte varint delta; `offset` keeps sets disjoint.
-   */
-  const scattered = (n: number, offset = 0) =>
-    Array.from({ length: n }, (_, i) => (i % 2 === 0 ? 50_000_000 : 10_000_000) + offset + i);
+  /** Top-level comments with `text`. */
+  const withText = (ids: number[], text: string) =>
+    Object.fromEntries(ids.map((id) => [id, { ...comment(id, 1), text }]));
 
-  const nulls = (ids: number[]) => Object.fromEntries(ids.map((id) => [id, null]));
-  /** Top-level comments with `text`, keeping the kids `kidsOf` gives them. */
-  const withText = (ids: number[], text: string, kidsOf: Record<number, number[]> = {}) =>
-    Object.fromEntries(ids.map((id) => [id, { ...comment(id, 1, kidsOf[id]), text }]));
+  const resume = 'Pass nextCursor as cursor, with the same itemId, to continue.';
 
-  /** Follow nextCursor to the last page, returning every page's result. */
-  async function pageThrough(input: Record<string, unknown>): Promise<ToolResult[]> {
-    const pages: ToolResult[] = [];
-    let cursor: string | undefined;
-    do {
-      const result = await callStubbed({ ...input, ...(cursor && { cursor }) });
-      pages.push(result);
-      cursor = okStructured(result).nextCursor as string | undefined;
-      expect(pages.length).toBeLessThan(40);
-    } while (cursor);
-    return pages;
-  }
+  it('serves 200 comments past 200,000 bytes on both surfaces, stopping on count, and the cursor reads the rest', async () => {
+    const kids = Array.from({ length: 250 }, (_, i) => 1000 + i);
+    serveItems(storyTree({ 1: kids }, withText(kids, 'z'.repeat(1_000)), { descendants: 250 }));
 
-  it('holds a size-stopped page to the budget on content[], the trailer and the cursor it issues included', async () => {
-    const long = Array.from({ length: 13 }, (_, i) => 10 + i);
-    const unread = scattered(1_700);
-    serveItems({
-      ...storyTree({ 1: [...long, ...unread] }, withText(long, 'x'.repeat(5_000)), {
-        descendants: 1_713,
-      }),
-      ...nulls(unread),
-    });
-
-    const pages = await pageThrough({ itemId: 1, depth: 1, maxComments: 50 });
-    const first = okStructured(pages[0]!);
-
-    expect(first).toMatchObject({ truncated: true, truncationReason: 'size' });
-    expect((first.nextCursor as string).length).toBeGreaterThan(8_000);
-    expect(allText(pages[0]!)).toContain(`**nextCursor:** \`${first.nextCursor}\``);
-    for (const page of pages) {
-      expect(surfaces(page).content).toBeLessThanOrEqual(BUDGET);
-      expect(surfaces(page).structured).toBeLessThanOrEqual(BUDGET);
-    }
-    /** Cut only between comments: every comment whole, each exactly once, in order. */
-    const comments = pages.flatMap((p) => okStructured(p).comments as Array<{ text: string }>);
-    expect(comments.every((c) => c.text.length === 5_000)).toBe(true);
-    expect(pages.map(okStructured).flatMap(commentIds)).toEqual(long);
-  });
-
-  it('stops on structuredContent when its JSON outgrows the rendered text', async () => {
-    /** A double quote is one byte in content[] and two in the JSON. */
-    const ids = [10, 11, 12];
-    serveItems(storyTree({ 1: ids }, withText(ids, '"'.repeat(15_000)), { descendants: 3 }));
-
-    const result = await callStubbed({ itemId: 1, depth: 1, maxComments: 50 });
+    const result = await callStubbed({ itemId: 1, depth: 1, maxComments: 200 });
     const sc = okStructured(result);
 
-    expect(commentIds(sc)).toEqual([10, 11]);
-    expect(sc).toMatchObject({ truncated: true, truncationReason: 'size', shown: 2 });
-    expect(surfaces(result).structured).toBeLessThanOrEqual(BUDGET);
-    expect(surfaces(result).content).toBeLessThan(BUDGET / 2);
-    expect(sc.notice).toBe(
-      'Stopped at the 64,000-byte response budget after 2 comments with 2/3 comments loaded. Pass nextCursor as cursor, with the same itemId, to continue.',
-    );
+    expect(commentIds(sc)).toEqual(kids.slice(0, 200));
+    expect(sc).toMatchObject({
+      totalLoaded: 200,
+      truncated: true,
+      truncationReason: 'count',
+      shown: 200,
+      cap: 200,
+    });
+    expect(sc.notice).toBe(`Stopped at maxComments 200 with 200/250 comments loaded. ${resume}`);
+    expect(surfaces(result).content).toBeGreaterThan(200_000);
+    expect(surfaces(result).structured).toBeGreaterThan(200_000);
 
     const next = okStructured(
-      await callStubbed({ itemId: 1, depth: 1, maxComments: 50, cursor: sc.nextCursor }),
+      await callStubbed({ itemId: 1, depth: 1, maxComments: 200, cursor: sc.nextCursor }),
     );
-    expect(commentIds(next)).toEqual([12]);
+    expect(commentIds(next)).toEqual(kids.slice(200));
     expect(next).not.toHaveProperty('nextCursor');
   });
 
-  it('drops a comment the cursor cannot fit beside, with the replies it queued and a deleted comment after it', async () => {
-    /**
-     * Five 14,000-byte top-level comments, each with 500 replies, and a deleted
-     * comment with two replies between the third and fourth. Four fit the page
-     * alone; with a cursor carrying their 2,000 queued replies they do not.
-     */
-    const top = [10, 11, 12, 13, 14];
-    const kidsOf: Record<number, number[]> = { 1: [10, 11, 12, 15, 13, 14], 15: [16, 17] };
-    for (const [k, id] of top.entries()) kidsOf[id] = scattered(500, k * 1_000);
+  it('returns every comment up to maxComments whole, however long, on a terminal page', async () => {
+    const huge = 'y'.repeat(100_000);
+    const rest = [11, 12, 13, 14];
     serveItems(
       storyTree(
-        kidsOf,
-        {
-          ...withText(top, 'x'.repeat(14_000), kidsOf),
-          15: { id: 15, type: 'comment', deleted: true, parent: 1, kids: [16, 17] },
-        },
-        { descendants: 2_507 },
+        { 1: [10, ...rest] },
+        { ...withText([10], huge), ...withText(rest, 'x'.repeat(20_000)) },
+        { descendants: 5 },
       ),
     );
 
-    const pages = await pageThrough({ itemId: 1, depth: 2, maxComments: 200 });
-    const [first, second] = pages.map(okStructured);
-
-    expect(commentIds(first!)).toEqual([10, 11, 12]);
-    expect(first).toMatchObject({ truncationReason: 'size' });
-    expect(first!.notice).not.toMatch(/deleted/);
-    expect(commentIds(second!).slice(0, 2)).toEqual([13, 14]);
-    expect(second!.notice).toMatch(/^1 deleted, 0 dead — omitted from this view\./);
-    for (const page of pages) {
-      expect(surfaces(page).content).toBeLessThanOrEqual(BUDGET);
-      expect(surfaces(page).structured).toBeLessThanOrEqual(BUDGET);
-    }
-    /** Breadth-first, each live comment once: the top level, then replies in parent order. */
-    const replies = [10, 11, 12, 15, 13, 14].flatMap((id) => kidsOf[id] ?? []);
-    expect(pages.map(okStructured).flatMap(commentIds)).toEqual([...top, ...replies]);
-  });
-
-  it('serves the longest page that fits when each dropped comment also drops the replies it queued', async () => {
-    /**
-     * Eight 9,000-byte top-level comments, each with 600 replies. The walk stops
-     * on size after seven; with the cursor carrying 4,200 queued replies they do
-     * not fit. Dropping a comment drops its 600 replies from the cursor too, so
-     * five comments and 3,000 queued replies fit where seven did not.
-     */
-    const top = Array.from({ length: 8 }, (_, i) => 10 + i);
-    const kidsOf: Record<number, number[]> = { 1: top };
-    for (const [k, id] of top.entries()) kidsOf[id] = scattered(600, k * 1_000);
-    serveItems(
-      storyTree({ 1: top }, withText(top, 'x'.repeat(9_000), kidsOf), { descendants: 4_808 }),
-    );
-
-    const result = await callStubbed({ itemId: 1, depth: 2, maxComments: 50 });
+    const result = await callStubbed({ itemId: 1, depth: 1 });
     const sc = okStructured(result);
+    const comments = sc.comments as Array<{ id: number; text: string }>;
 
-    expect(commentIds(sc)).toEqual([10, 11, 12, 13, 14]);
-    expect(sc).toMatchObject({ truncationReason: 'size', shown: 5 });
-    expect(surfaces(result).content).toBeLessThanOrEqual(BUDGET);
-    expect(surfaces(result).structured).toBeLessThanOrEqual(BUDGET);
-    expect(decodeThreadCursor(sc.nextCursor as string, 10)?.frontier.map((e) => e.id)).toEqual([
-      15,
-      16,
-      17,
-      ...top.slice(0, 5).flatMap((id) => kidsOf[id] ?? []),
+    expect(comments.map((c) => [c.id, c.text.length])).toEqual([
+      [10, 100_000],
+      [11, 20_000],
+      [12, 20_000],
+      [13, 20_000],
+      [14, 20_000],
     ]);
+    expect(sc).toMatchObject({ totalLoaded: 5, totalAvailable: 5 });
+    for (const key of ['truncated', 'truncationReason', 'nextCursor', 'shown', 'cap', 'notice']) {
+      expect(sc).not.toHaveProperty(key);
+    }
+    expect(allText(result)).toContain(`> ${huge}`);
   });
 
-  it('still returns a first comment larger than the budget whole beside a large cursor', async () => {
-    const huge = 'y'.repeat(100_000);
-    const unread = scattered(1_700);
-    serveItems({
-      ...storyTree({ 1: [10, ...unread] }, withText([10], huge), { descendants: 1_701 }),
-      ...nulls(unread),
-    });
+  it('serves 25 comments when maxComments is omitted', async () => {
+    const kids = Array.from({ length: 30 }, (_, i) => 1000 + i);
+    serveItems(storyTree({ 1: kids }, {}, { descendants: 30 }));
 
-    const sc = okStructured(await callStubbed({ itemId: 1, depth: 1 }));
-
-    expect(sc.comments).toEqual([expect.objectContaining({ id: 10, text: huge })]);
-    expect(sc).toMatchObject({ truncated: true, truncationReason: 'size' });
-  });
-
-  it('renders truncationReason and nextCursor in the trailer as code spans', async () => {
-    serveItems(storyTree({ 1: [10, 11, 12] }, {}, { descendants: 3 }));
-
-    const result = await callStubbed({ itemId: 1, depth: 1, maxComments: 2 });
+    const result = await callStubbed({ itemId: 1, depth: 1 });
     const sc = okStructured(result);
 
-    expect(allText(result)).toContain('\n**truncationReason:** `count`\n');
-    expect(allText(result).endsWith(`\n**nextCursor:** \`${sc.nextCursor}\``)).toBe(true);
+    expect(commentIds(sc)).toEqual(kids.slice(0, 25));
+    expect(sc).toMatchObject({ truncationReason: 'count', shown: 25, cap: 25 });
+    expect(sc.notice).toBe(`Stopped at maxComments 25 with 25/30 comments loaded. ${resume}`);
+    expect(allText(result)).toContain(sc.notice as string);
   });
 
-  it('leaves a size-stopped page that fits on both surfaces as it was', async () => {
-    const ids = [10, 11, 12, 13, 14];
-    serveItems(storyTree({ 1: ids }, withText(ids, 'x'.repeat(20_000)), { descendants: 5 }));
+  it('names count, depth, rate_limited, and time as the only truncation reasons, and describes no byte budget', () => {
+    const enrichment = getThread.enrichment!;
+    const reasons = z.toJSONSchema(enrichment.truncationReason) as { enum?: string[] };
 
-    const result = await callStubbed({ itemId: 1, depth: 1, maxComments: 50 });
-    const sc = okStructured(result);
-
-    expect(commentIds(sc)).toEqual([10, 11, 12]);
-    expect(sc).toMatchObject({ truncationReason: 'size', shown: 3, cap: 50, totalLoaded: 3 });
-    /** Byte counts of this page before the budget covered the whole surfaces. */
-    expect(surfaces(result)).toEqual({ content: 60_486, structured: 60_582 });
+    expect(reasons.enum).toEqual(['count', 'depth', 'rate_limited', 'time']);
+    const descriptions = [
+      getThread.input.shape.maxComments.description,
+      enrichment.truncated.description,
+      enrichment.truncationReason.description,
+      enrichment.nextCursor.description,
+      enrichment.notice.description,
+    ];
+    for (const description of descriptions) {
+      expect(description).toBeDefined();
+      expect(description).not.toMatch(/\bsize\b|\bbytes?\b/i);
+    }
   });
 });
 
@@ -2886,18 +2861,13 @@ describe('hn_get_thread — replies below dead and deleted comments', () => {
   });
 
   it('resumes a page cut between a dead comment and its reply at the reply', async () => {
-    const long = (id: number) => ({ ...comment(id, 1), text: 'x'.repeat(40_000) });
     serveItems(
-      storyTree(
-        { 1: [10, 11, 12], 10: [20] },
-        { 10: dead(10, 1, [20]), 11: long(11), 12: long(12) },
-        { descendants: 3 },
-      ),
+      storyTree({ 1: [10, 11, 12], 10: [20] }, { 10: dead(10, 1, [20]) }, { descendants: 3 }),
     );
 
-    const first = okStructured(await callStubbed({ itemId: 1, depth: 2 }));
+    const first = okStructured(await callStubbed({ itemId: 1, depth: 2, maxComments: 1 }));
     expect(tree(first)).toEqual([[11, 0, 1]]);
-    expect(first).toMatchObject({ truncationReason: 'size' });
+    expect(first).toMatchObject({ truncationReason: 'count' });
 
     const next = okStructured(await callStubbed({ itemId: 1, depth: 2, cursor: first.nextCursor }));
     expect(tree(next)).toEqual([
@@ -3060,7 +3030,7 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
     ]);
     const text = allText(result);
     expect(text).toMatch(
-      /id:50135223 \| type:comment \| parent:50135036 \| story:50126253 \| by verelo/,
+      /id:50135223 \| type:comment \| parent:50135036 \| story:"Story 50126253"#50126253 \| by verelo/,
     );
     expect(text).toContain('**verelo** (id:50135868');
     expect(text).not.toContain('(OP)');
@@ -3078,14 +3048,17 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
     expect(sc.item).toMatchObject({ id: 50128907, storyId: 50127979 });
     expect(sc).not.toHaveProperty('notice');
     const text = allText(result);
-    expect(text).toMatch(/\| parent:50128660 \| story:50127979 \|/);
+    expect(text).toMatch(/\| parent:50128660 \| story:"Story 50127979"#50127979 \|/);
     expect(
       text.match(/\*\*albinstman \(OP\)\*\* \(id:\d+ \| depth:0 \| parent:50128907 \| isOp:true/g),
     ).toHaveLength(2);
   });
 
-  it.each<[string, number, Record<number, unknown>, number, number[]]>([
-    ['a top-level comment', 10, { 1: story(1, 'op'), 10: reply(10, 'r', 1) }, 1, [10, 1]],
+  const depthZeroCut =
+    'The depth limit (0) left replies unread. Raise depth (max 10) to read them.';
+
+  it.each<[string, number, Record<number, unknown>, number, number[], number]>([
+    ['a top-level comment', 10, { 1: story(1, 'op'), 10: reply(10, 'r', 1) }, 1, [10, 1], 0],
     [
       'a deleted comment',
       20,
@@ -3096,6 +3069,7 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
       },
       1,
       [20, 10, 1],
+      1,
     ],
     [
       'a dead comment',
@@ -3107,6 +3081,7 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
       },
       1,
       [20, 10, 1],
+      0,
     ],
     [
       'a comment below a deleted and a dead ancestor',
@@ -3119,6 +3094,7 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
       },
       1,
       [30, 20, 10, 1],
+      0,
     ],
     [
       'a comment on a poll, without fetching the poll’s options',
@@ -3129,22 +3105,80 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
       },
       5,
       [10, 5],
+      0,
     ],
-  ])('resolves the story of %s at depth 0', async (_label, itemId, items, storyId, path) => {
-    const { requested } = serveItems(items);
+  ])(
+    'resolves the story of %s at depth 0',
+    async (_label, itemId, items, storyId, path, childCount) => {
+      const { requested } = serveItems(items);
 
-    const result = await callStubbed({ itemId, depth: 0 });
+      const result = await callStubbed({ itemId, depth: 0 });
+      const sc = okStructured(result);
+
+      /** The story the lookup ends on supplies its title, with no request of its own. */
+      const { title: storyTitle } = items[storyId] as { title: string };
+      expect(sc.item).toMatchObject({ id: itemId, storyId, storyTitle, childCount });
+      expect(sc.item).not.toHaveProperty('storyUrl');
+      expect(requested()).toEqual(path.map((id) => `/item/${id}.json`));
+      expect(allText(result)).toContain(`| story:"${storyTitle}"#${storyId} |`);
+      if (childCount === 0) {
+        expect(sc).not.toHaveProperty('notice');
+        expect(sc).not.toHaveProperty('truncated');
+      } else {
+        /** A deleted root's replies are still walked at depth 1, so depth 0 reports them cut. */
+        expect(sc).toMatchObject({ truncated: true, truncationReason: 'depth' });
+        expect(sc).not.toHaveProperty('nextCursor');
+        expect(sc.notice).toBe(depthZeroCut);
+      }
+    },
+  );
+
+  it('reports a comment root’s replies cut at depth 0 from its kids alone, fetching none of them', async () => {
+    /** Comment 50475661 with two direct replies, both dead here: depth 0 never reads them. */
+    const { requested } = serveItems({
+      50470488: story(50470488, 'op'),
+      50475661: reply(50475661, 'wildpeaks', 50470488, [50475887, 50476004]),
+      50475887: { id: 50475887, type: 'comment', dead: true, parent: 50475661 },
+      50476004: { id: 50476004, type: 'comment', deleted: true, parent: 50475661 },
+    });
+
+    const result = await callStubbed({ itemId: 50475661, depth: 0 });
     const sc = okStructured(result);
 
-    expect(sc.item).toMatchObject({ id: itemId, storyId });
-    expect(sc).not.toHaveProperty('notice');
-    expect(requested()).toEqual(path.map((id) => `/item/${id}.json`));
-    expect(allText(result)).toMatch(new RegExp(`\\| story:${storyId}\\b`));
+    expect(requested()).toEqual(['/item/50475661.json', '/item/50470488.json']);
+    expect(sc.item).toMatchObject({ id: 50475661, childCount: 2 });
+    expect(sc.comments).toEqual([]);
+    expect(sc).toMatchObject({ totalLoaded: 0, truncated: true, truncationReason: 'depth' });
+    expect(sc).not.toHaveProperty('totalAvailable');
+    expect(sc).not.toHaveProperty('nextCursor');
+    expect(sc).not.toHaveProperty('failedIds');
+    expect(sc.notice).toBe(depthZeroCut);
+    const text = allText(result);
+    expect(text).toMatch(/\| by wildpeaks \| 2 replies$/m);
+    expect(text).toContain(depthZeroCut);
   });
 
-  it.each<[string, number, Record<number, unknown>, string[]]>([
-    ['story', 1, { 1: story(1, 'op', { kids: [10] }) }, ['/item/1.json']],
-    ['job', 2, { 2: { id: 2, type: 'job', by: 'co', title: 'Hiring' } }, ['/item/2.json']],
+  it('reports a depth-1 cut on a comment root with childCount on item and the drill-in notice', async () => {
+    serveItems({
+      50470488: story(50470488, 'op'),
+      50475661: reply(50475661, 'wildpeaks', 50470488, [50475887, 50476004]),
+      50475887: reply(50475887, 'u1', 50475661),
+      50476004: reply(50476004, 'u2', 50475661, [50476100]),
+    });
+
+    const sc = okStructured(await callStubbed({ itemId: 50475661, depth: 1 }));
+
+    expect(sc.item).toMatchObject({ childCount: 2 });
+    expect(commentIds(sc)).toEqual([50475887, 50476004]);
+    expect(sc).toMatchObject({ truncated: true, truncationReason: 'depth' });
+    expect(sc.notice).toBe(
+      'The depth limit (1) left replies unread. Raise depth (max 10), or pass the id of a depth-0 comment that shows replies as itemId to read its subtree.',
+    );
+  });
+
+  it.each<[string, number, Record<number, unknown>, string[], number]>([
+    ['story', 1, { 1: story(1, 'op', { kids: [10] }) }, ['/item/1.json'], 1],
+    ['job', 2, { 2: { id: 2, type: 'job', by: 'co', title: 'Hiring' } }, ['/item/2.json'], 0],
     [
       'poll',
       5,
@@ -3153,25 +3187,36 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
         6: { id: 6, type: 'pollopt', by: 'op', poll: 5, text: 'Yes', score: 1 },
       },
       ['/item/5.json', '/item/6.json'],
+      0,
     ],
     [
       'poll option',
       6,
       { 6: { id: 6, type: 'pollopt', by: 'op', poll: 5, text: 'Yes', score: 1 } },
       ['/item/6.json'],
+      0,
     ],
   ])(
     'makes no extra request for a %s root, and gives it no storyId',
-    async (_label, itemId, items, paths) => {
+    async (_label, itemId, items, paths, childCount) => {
       const { requested } = serveItems(items);
 
       const result = await callStubbed({ itemId, depth: 0 });
       const sc = okStructured(result);
 
       expect(requested()).toEqual(paths);
-      expect(sc.item).not.toHaveProperty('storyId');
-      expect(sc).not.toHaveProperty('notice');
-      expect(allText(result)).not.toMatch(/story:\d/);
+      for (const key of ['storyId', 'storyTitle', 'storyUrl']) {
+        expect(sc.item).not.toHaveProperty(key);
+      }
+      expect(sc.item).toMatchObject({ childCount });
+      if (childCount === 0) {
+        expect(sc).not.toHaveProperty('notice');
+        expect(sc).not.toHaveProperty('truncated');
+      } else {
+        expect(sc).toMatchObject({ truncated: true, truncationReason: 'depth' });
+        expect(sc.notice).toBe(depthZeroCut);
+      }
+      expect(allText(result)).not.toMatch(/story:/);
     },
   );
 
@@ -3235,8 +3280,13 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
       expect(sc).not.toHaveProperty('truncated');
       if (storyId === undefined) expect(sc.item).not.toHaveProperty('storyId');
       else expect(sc.item).toMatchObject({ storyId });
+      /** A deleted story has no title or link to give, and neither has a story never reached. */
+      expect(sc.item).not.toHaveProperty('storyTitle');
+      expect(sc.item).not.toHaveProperty('storyUrl');
       expect(sc.notice).toMatch(notice);
       const text = allText(result);
+      if (storyId === undefined) expect(text).not.toMatch(/story:/);
+      else expect(text).toMatch(new RegExp(`\\| story:${storyId} \\| by r`));
       expect(text).toContain(sc.notice as string);
       expect(text).not.toContain('(OP)');
       expect(text).not.toContain('Failed to load');
@@ -3455,16 +3505,17 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
     );
   });
 
-  it.each<[string, Record<number, unknown>, string | undefined]>([
-    ['an author', thread, undefined],
+  it.each<[string, Record<number, unknown>, string | undefined, RegExp]>([
+    ['an author', thread, undefined, /\| story:"Story 1"#1 \|/],
     [
       'no author',
       { ...thread, 1: { id: 1, type: 'story', deleted: true } },
       'The story this comment belongs to (id 1) has no author on record, so no reply is marked isOp.',
+      /\| story:1 \|/,
     ],
   ])(
     'continues against the story the first page found, with %s, without walking up again',
-    async (_label, items, storyNotice) => {
+    async (_label, items, storyNotice, storyToken) => {
       const firstServed = serveItems(items);
       const first = okStructured(await callStubbed({ itemId: 20, depth: 1, maxComments: 1 }));
 
@@ -3485,10 +3536,12 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
       });
       const next = okStructured(result);
 
-      expect(nextServed.requested()).toEqual(['/item/20.json', '/item/31.json']);
+      /** The story is fetched once more for its title and link only; its parents are not. */
+      expect(nextServed.requested()).toEqual(['/item/20.json', '/item/1.json', '/item/31.json']);
       expect(commentIds(next)).toEqual([31]);
       expect(next.item).toMatchObject({ storyId: 1 });
-      expect(allText(result)).toMatch(/\| story:1\b/);
+      expect(next.item).toEqual(first.item);
+      expect(allText(result)).toMatch(storyToken);
       expect(commentIds(first)).toEqual([30]);
       const countCut =
         'Stopped at maxComments 1. Pass nextCursor as cursor, with the same itemId, to continue.';
@@ -3551,8 +3604,8 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
     expect(opIds(sc)).toEqual([31]);
   });
 
-  it('marks OP against a story root’s own author whatever story a cursor names', async () => {
-    serveItems({
+  it('marks OP against a story root’s own author whatever story a cursor names, and never fetches that story', async () => {
+    const { requested } = serveItems({
       1: story(1, 'op', { kids: [10, 11] }),
       10: reply(10, 'op', 1),
       11: reply(11, 'mallory', 1),
@@ -3569,15 +3622,333 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
       story: { id: 99, by: 'mallory' },
     });
 
-    const sc = okStructured(await callStubbed({ itemId: 1, depth: 1, cursor }));
+    const result = await callStubbed({ itemId: 1, depth: 1, cursor });
+    const sc = okStructured(result);
 
     expect(opIds(sc)).toEqual([10]);
-    expect(sc.item).not.toHaveProperty('storyId');
+    expect(requested()).toEqual(['/item/1.json', '/item/10.json', '/item/11.json']);
+    for (const key of ['storyId', 'storyTitle', 'storyUrl']) {
+      expect(sc.item).not.toHaveProperty(key);
+    }
+    expect(allText(result)).not.toMatch(/story:/);
   });
 
-  it('keeps isOp a literal true and adds storyId as an optional number', () => {
+  /** Comment 50483709, three links below story 50467087, which links out. */
+  const huangUrl =
+    'https://apnews.com/article/nvidia-megaspeed-china-singapore-huang-5403f152a601cf82ce939f1d24fffa0f';
+  const huangThread = {
+    50467087: { ...story(50467087, 'op'), title: 'Jensen Huang resigns', url: huangUrl },
+    50477314: reply(50477314, 'u50477314', 50467087),
+    50482252: reply(50482252, 'u50482252', 50477314),
+    50483709: { ...reply(50483709, 'dirck-norman', 50482252), time: 1794578892 },
+  };
+
+  it('returns a comment root’s story title and link on both surfaces from the story the lookup fetched', async () => {
+    const { requested } = serveItems(huangThread);
+
+    const result = await callStubbed({ itemId: 50483709, depth: 0 });
+    const sc = okStructured(result);
+
+    expect(requested()).toEqual([
+      '/item/50483709.json',
+      '/item/50482252.json',
+      '/item/50477314.json',
+      '/item/50467087.json',
+    ]);
+    const item = sc.item as Record<string, unknown>;
+    expect(item).toEqual({
+      id: 50483709,
+      type: 'comment',
+      by: 'dirck-norman',
+      time: 1794578892,
+      text: 'c50483709',
+      childCount: 0,
+      parent: 50482252,
+      storyId: 50467087,
+      storyTitle: 'Jensen Huang resigns',
+      storyUrl: huangUrl,
+    });
+    expect(Object.keys(item).filter((key) => item[key] !== undefined)).toEqual([
+      'id',
+      'type',
+      'by',
+      'time',
+      'text',
+      'childCount',
+      'parent',
+      'storyId',
+      'storyTitle',
+      'storyUrl',
+    ]);
+    expect(sc).not.toHaveProperty('notice');
+    expect(allText(result).split('\n').slice(0, 4)).toEqual([
+      '## Comment by dirck-norman',
+      'id:50483709 | type:comment | parent:50482252 | story:"Jensen Huang resigns"#50467087 | by dirck-norman | 2026-11-13 (t:1794578892)',
+      huangUrl,
+      '> c50483709',
+    ]);
+  });
+
+  it('gives a text post’s title alone, with no link line', async () => {
+    serveItems({
+      50338728: {
+        id: 50338728,
+        type: 'story',
+        by: 'whoishiring',
+        title: 'Ask HN: Who is hiring? (November 2026)',
+        text: 'Please state the location.',
+      },
+      50349000: reply(50349000, 'r', 50338728),
+    });
+
+    const result = await callStubbed({ itemId: 50349000, depth: 0 });
+    const sc = okStructured(result);
+
+    expect(sc.item).toMatchObject({
+      storyId: 50338728,
+      storyTitle: 'Ask HN: Who is hiring? (November 2026)',
+    });
+    expect(sc.item).not.toHaveProperty('storyUrl');
+    expect(allText(result).split('\n').slice(1, 3)).toEqual([
+      'id:50349000 | type:comment | parent:50338728 | story:"Ask HN: Who is hiring? (November 2026)"#50338728 | by r',
+      '> c50349000',
+    ]);
+  });
+
+  /** {@link thread} under a story with an encoded title and a link, and reply 31 by its author. */
+  const linkedThread = {
+    ...thread,
+    1: {
+      ...story(1, 'op'),
+      title: 'Linked &amp; &quot;quoted&quot;',
+      url: 'https://example.test/a',
+    },
+    31: reply(31, 'op', 20),
+  };
+  const linkedStory = {
+    storyId: 1,
+    storyTitle: 'Linked & "quoted"',
+    storyUrl: 'https://example.test/a',
+  };
+  /**
+   * Comment 31 left to read under root 20, story 1 by `op`, packed as the
+   * encoder packs it. The packed layout is the one earlier releases issue.
+   */
+  const ISSUED_CURSOR = 'ARQBAQABAAABFgECb3A';
+
+  it('returns the same item on a continuation page, at the cost of one request for the story', async () => {
+    const firstServed = serveItems(linkedThread);
+    const firstResult = await callStubbed({ itemId: 20, depth: 1, maxComments: 1 });
+    const first = okStructured(firstResult);
+
+    expect(firstServed.requested()).toEqual([
+      '/item/20.json',
+      '/item/10.json',
+      '/item/1.json',
+      '/item/30.json',
+    ]);
+
+    const nextServed = serveItems(linkedThread);
+    const nextResult = await callStubbed({
+      itemId: 20,
+      depth: 1,
+      maxComments: 1,
+      cursor: first.nextCursor,
+    });
+    const next = okStructured(nextResult);
+
+    expect(nextServed.requested()).toEqual(['/item/20.json', '/item/1.json', '/item/31.json']);
+    expect(first.item).toMatchObject(linkedStory);
+    expect(next.item).toEqual(first.item);
+    expect(opIds(first)).toEqual([30]);
+    expect(opIds(next)).toEqual([31]);
+    expect(next).not.toHaveProperty('notice');
+    for (const result of [firstResult, nextResult]) {
+      expect(allText(result).split('\n').slice(1, 3)).toEqual([
+        'id:20 | type:comment | parent:10 | story:"Linked & \\"quoted\\""#1 | by r | 2 replies',
+        'https://example.test/a',
+      ]);
+    }
+  });
+
+  it('resumes a cursor in the packed format earlier releases issued, adding the story’s title and link', async () => {
+    expect(
+      encodeThreadCursor({
+        itemId: 20,
+        depth: 1,
+        offset: 1,
+        depthCut: false,
+        frontier: [{ id: 31, level: 0, parentId: 20 }],
+        story: { id: 1, by: 'op' },
+      }),
+    ).toBe(ISSUED_CURSOR);
+    const { requested } = serveItems(linkedThread);
+
+    const sc = okStructured(await callStubbed({ itemId: 20, depth: 1, cursor: ISSUED_CURSOR }));
+
+    expect(requested()).toEqual(['/item/20.json', '/item/1.json', '/item/31.json']);
+    expect(sc.item).toMatchObject(linkedStory);
+    expect(commentIds(sc)).toEqual([31]);
+    expect(opIds(sc)).toEqual([31]);
+  });
+
+  it('keeps the cursor’s storyId and OP author, whatever the refetched story says', async () => {
+    serveItems({
+      ...linkedThread,
+      1: { id: 7, type: 'story', by: 'r', title: 'Retitled', url: 'https://example.test/b' },
+    });
+
+    const sc = okStructured(await callStubbed({ itemId: 20, depth: 1, cursor: ISSUED_CURSOR }));
+
+    expect(sc.item).toMatchObject({
+      storyId: 1,
+      storyTitle: 'Retitled',
+      storyUrl: 'https://example.test/b',
+    });
+    /** Reply 31 is by `op`, the author the cursor carries; the refetched story names `r`. */
+    expect(opIds(sc)).toEqual([31]);
+  });
+
+  it.each<[string, unknown, string[], number | undefined]>([
+    ['HN has no record of it', null, ['/item/20.json', '/item/1.json', '/item/31.json'], 0],
+    [
+      'it answers 500 on every attempt',
+      httpStatus(500),
+      [
+        '/item/20.json',
+        '/item/1.json',
+        '/item/1.json',
+        '/item/1.json',
+        '/item/1.json',
+        '/item/31.json',
+      ],
+      undefined,
+    ],
+    [
+      'it hangs past the lookup’s 20 seconds',
+      stall(Number.POSITIVE_INFINITY),
+      ['/item/20.json', '/item/1.json', '/item/1.json', '/item/31.json'],
+      20_000,
+    ],
+    [
+      'it is deleted',
+      { id: 1, type: 'story', deleted: true },
+      ['/item/20.json', '/item/1.json', '/item/31.json'],
+      0,
+    ],
+  ])(
+    'leaves the title and link out of a continuation page, with no notice, when the story %s',
+    async (_label, route, paths, settledAt) => {
+      const { requested } = serveItems({ ...linkedThread, 1: route });
+
+      const { result, settledAfter } = await timedCall({
+        itemId: 20,
+        depth: 1,
+        cursor: ISSUED_CURSOR,
+      });
+      const sc = okStructured(result);
+
+      expect(requested()).toEqual(paths);
+      if (settledAt === undefined) expect(settledAfter).toBeLessThanOrEqual(20_000);
+      else expect(settledAfter).toBe(settledAt);
+      expect(sc.item).toMatchObject({ storyId: 1 });
+      expect(sc.item).not.toHaveProperty('storyTitle');
+      expect(sc.item).not.toHaveProperty('storyUrl');
+      expect(commentIds(sc)).toEqual([31]);
+      expect(opIds(sc)).toEqual([31]);
+      for (const key of ['notice', 'failedIds', 'truncated', 'nextCursor']) {
+        expect(sc).not.toHaveProperty(key);
+      }
+      const text = allText(result);
+      expect(text).toMatch(/\| parent:10 \| story:1 \| by r \|/);
+      expect(text).not.toContain('example.test');
+    },
+  );
+
+  it('counts a continuation page’s 20 seconds for the story from the start of the call, so a slow root leaves it less', async () => {
+    serveItems({
+      ...linkedThread,
+      20: stall(9_500, linkedThread[20]),
+      1: stall(Number.POSITIVE_INFINITY),
+    });
+
+    const { result, settledAfter } = await timedCall({
+      itemId: 20,
+      depth: 1,
+      cursor: ISSUED_CURSOR,
+    });
+    const sc = okStructured(result);
+
+    /**
+     * Root at 9.5 s; the hung story's ladder ends by the lookup's deadline, 20 s
+     * after the call started — not 20 s after the refetch began, 29.5 s.
+     */
+    expect(settledAfter).toBeLessThanOrEqual(20_000);
+    expect(sc.item).toMatchObject({ storyId: 1 });
+    expect(sc.item).not.toHaveProperty('storyTitle');
+    expect(commentIds(sc)).toEqual([31]);
+    expect(opIds(sc)).toEqual([31]);
+  });
+
+  it('ends a continuation page on a 429 for the story as a 429 while finding it does, and the cursor reads on', async () => {
+    const { requested } = serveItems({
+      ...linkedThread,
+      1: httpStatus(429, { 'Retry-After': '120' }),
+    });
+
+    const sc = okStructured(await callStubbed({ itemId: 20, depth: 1, cursor: ISSUED_CURSOR }));
+
+    expect(requested()).toEqual(['/item/20.json', '/item/1.json']);
+    expect(sc.comments).toEqual([]);
+    expect(sc).toMatchObject({ truncated: true, truncationReason: 'rate_limited' });
+    expect(sc).not.toHaveProperty('failedIds');
+    expect(sc.item).toMatchObject({ storyId: 1 });
+    expect(sc.item).not.toHaveProperty('storyTitle');
+    expect(sc.notice).toBe(
+      'Stopped early: the HN API is rate-limiting this server. Wait 120 seconds, then pass nextCursor as cursor, with the same itemId, to resume; comments that failed to load are retried first.',
+    );
+    expect(sc.nextCursor).toBe(ISSUED_CURSOR);
+
+    serveItems(linkedThread);
+    const next = okStructured(
+      await callStubbed({ itemId: 20, depth: 1, cursor: sc.nextCursor as string }),
+    );
+
+    expect(commentIds(next)).toEqual([31]);
+    expect(next.item).toMatchObject(linkedStory);
+  });
+
+  it('propagates a cancellation that lands while a continuation page fetches the story', async () => {
+    const controller = new AbortController();
+    const { requested } = serveItems(
+      { ...linkedThread, 1: stall(Number.POSITIVE_INFINITY) },
+      {
+        onRequest: (route) => {
+          if (route === '/item/1.json') controller.abort();
+        },
+      },
+    );
+    const startedAt = Date.now();
+    let settledAfter = Number.NaN;
+
+    const pending = runToolContract(
+      getThread,
+      { itemId: 20, depth: 1, cursor: ISSUED_CURSOR } as never,
+      { context: { errors: getThread.errors, signal: controller.signal } },
+    ).finally(() => {
+      settledAfter = Date.now() - startedAt;
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await pending;
+
+    expect(wireError(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(settledAfter).toBe(0);
+    expect(requested()).toEqual(['/item/20.json', '/item/1.json']);
+  });
+
+  it('keeps isOp a literal true and adds storyId, storyTitle, and storyUrl as optional', () => {
     const isOp = getThread.output.shape.comments.element.shape.isOp;
-    const storyId = getThread.output.shape.item.shape.storyId;
+    const { childCount, storyId, storyTitle, storyUrl } = getThread.output.shape.item.shape;
 
     expect(isOp.safeParse(true).success).toBe(true);
     expect(isOp.safeParse(undefined).success).toBe(true);
@@ -3585,6 +3956,11 @@ describe('hn_get_thread — the story a comment root belongs to', () => {
     expect(storyId.safeParse(undefined).success).toBe(true);
     expect(storyId.safeParse(50126253).success).toBe(true);
     expect(storyId.safeParse('50126253').success).toBe(false);
+    for (const field of [storyTitle, storyUrl]) {
+      expect(field.safeParse(undefined).success).toBe(true);
+      expect(field.safeParse('x').success).toBe(true);
+    }
+    expect(childCount.safeParse(undefined).success).toBe(false);
     expect(isOp.description).toMatch(/story/);
     expect(isOp.description).not.toMatch(/root item author/);
   });
@@ -3652,7 +4028,7 @@ describe('hn_get_thread — the per-call time budget', () => {
     /** 103 hangs in the first batch (101–125), 128 in the second, which is never sent. */
     const { requested } = serveItems(wideStory(30, [103, 128]));
 
-    const { result, settledAfter } = await timedCall({ itemId: 1, depth: 2 });
+    const { result, settledAfter } = await timedCall({ itemId: 1, depth: 2, maxComments: 50 });
     const sc = okStructured(result);
 
     /** Unbounded, the hung 128 adds a second 47-second ladder: 94 s, past a 60 s client timeout. */
@@ -3678,13 +4054,14 @@ describe('hn_get_thread — the per-call time budget', () => {
 
   it('reads the rest of the thread exactly once when the cursor continues against a recovered API', async () => {
     serveItems(wideStory(30, [103, 128]));
-    const { result } = await timedCall({ itemId: 1, depth: 2 });
+    const { result } = await timedCall({ itemId: 1, depth: 2, maxComments: 50 });
     const first = okStructured(result);
 
     serveItems(wideStory(30));
     const { result: nextResult, settledAfter } = await timedCall({
       itemId: 1,
       depth: 2,
+      maxComments: 50,
       cursor: first.nextCursor,
     });
     const next = okStructured(nextResult);

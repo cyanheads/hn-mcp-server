@@ -128,6 +128,7 @@ describe('getStories', () => {
       expect(result.feed).toBe('top');
       expect(result.stories).toHaveLength(3);
       expect(result.stories[0]).toEqual({
+        rank: 1,
         id: 1,
         type: 'story',
         title: 'Story 1',
@@ -191,7 +192,7 @@ describe('getStories', () => {
         expect.anything(),
         expect.any(Number),
       );
-      expect(result.stories).toHaveLength(2);
+      expect(result.stories.map((s) => s.rank)).toEqual([11, 12]);
 
       const enrichment = getEnrichment(ctx);
       expect(enrichment.offset).toBe(10);
@@ -268,10 +269,9 @@ describe('getStories', () => {
       expect(enrichment.notice).toMatch(/100/);
     });
 
-    it('emits notice when page is empty due to filtered items', async () => {
+    it('counts the dropped items when a page is empty because every item was dead', async () => {
       const ids = Array.from({ length: 10 }, (_, i) => i + 1);
-      // All items are dead/deleted so settlePage returns no live items
-      const deadItems = ids.map((id) => makeItem({ id, dead: true }));
+      const deadItems = ids.slice(0, 5).map((id) => makeItem({ id, dead: true }));
       mockService.fetchFeed.mockResolvedValue(ids);
       mockService.fetchItems.mockResolvedValue(slotsOf(deadItems));
 
@@ -279,12 +279,12 @@ describe('getStories', () => {
       const input = getStories.input.parse({ feed: 'top', count: 5, offset: 0 });
       await getStories.handler(input, ctx);
 
-      const enrichment = getEnrichment(ctx);
-      // total=10, offset=0, stories=[]: no-live-items notice
-      expect(enrichment.notice).toBeDefined();
+      expect(getEnrichment(ctx).notice).toBe(
+        'No live stories on this page of the top feed (offset:0, total:10). 5 of the 5 items on this page are omitted: 5 dead. Pass offset: 5 for the next page, or raise count (max 100).',
+      );
     });
 
-    it('filters out dead, deleted, and absent items', async () => {
+    it('filters out dead, deleted, and absent items and counts them on the final page', async () => {
       const ids = [1, 2, 3, 4];
       const items = [
         makeItem({ id: 1 }),
@@ -299,8 +299,12 @@ describe('getStories', () => {
       const input = getStories.input.parse({ feed: 'top', count: 10 });
       const result = await getStories.handler(input, ctx);
 
-      expect(result.stories).toHaveLength(1);
-      expect(result.stories[0]!.id).toBe(1);
+      expect(result.stories.map((s) => [s.id, s.rank])).toEqual([[1, 1]]);
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.notice).toBe(
+        '3 of the 4 items on this page are omitted: 1 deleted, 1 dead, 1 missing.',
+      );
+      expect(enrichment).not.toHaveProperty('truncated');
     });
 
     it('passes text through stripHtml', async () => {
@@ -358,7 +362,7 @@ describe('getStories', () => {
 
     it('format() renders sparse stories without inventing facts', () => {
       const blocks = getStories.format!({
-        stories: [{ id: 42, type: 'story' }],
+        stories: [{ rank: 1, id: 42, type: 'story' }],
         feed: 'top',
       });
 
@@ -391,6 +395,7 @@ describe('getStories', () => {
       const blocks = getStories.format!({
         stories: [
           {
+            rank: 1,
             id: 1,
             title: 'Test Story',
             url: 'https://example.com',
@@ -418,6 +423,7 @@ describe('getStories', () => {
       const blocks = getStories.format!({
         stories: [
           {
+            rank: 1,
             id: 1,
             title: 'Ask HN: Best Editor?',
             score: 50,
@@ -435,42 +441,11 @@ describe('getStories', () => {
       expect(text).not.toMatch(/\(\)/);
     });
 
-    it('uses sequential rank starting from 1 (rank is relative to page, not absolute)', () => {
-      const blocks = getStories.format!({
-        stories: [
-          {
-            id: 5,
-            title: 'First on Page',
-            url: 'https://example.com/5',
-            score: 50,
-            by: 'author',
-            time: 1700000000,
-            descendants: 10,
-            type: 'story',
-          },
-          {
-            id: 6,
-            title: 'Second on Page',
-            url: 'https://example.com/6',
-            score: 40,
-            by: 'author2',
-            time: 1700000000,
-            descendants: 5,
-            type: 'story',
-          },
-        ],
-        feed: 'new',
-      });
-
-      const text = firstText(blocks);
-      expect(text).toContain('[1] First on Page');
-      expect(text).toContain('[2] Second on Page');
-    });
-
     it('omits comments section for items without descendants', () => {
       const blocks = getStories.format!({
         stories: [
           {
+            rank: 1,
             id: 1,
             title: 'Job Post',
             score: 10,
@@ -493,6 +468,7 @@ describe('getStories', () => {
       const blocks = getStories.format!({
         stories: [
           {
+            rank: 1,
             id: 1,
             title: 'Ask HN: Something',
             score: 75,
@@ -546,10 +522,15 @@ describe('getStories — security and edge cases', () => {
 
   it('output schema validates correctly on non-empty result', () => {
     const result = {
-      stories: [{ id: 1, type: 'story', title: 'Test', score: 10, by: 'alice', time: 1 }],
+      stories: [{ rank: 1, id: 1, type: 'story', title: 'Test', score: 10, by: 'alice', time: 1 }],
       feed: 'top',
     };
     expect(() => getStories.output.parse(result)).not.toThrow();
+  });
+
+  it('rejects a story without a rank', () => {
+    const result = { stories: [{ id: 1, type: 'story' }], feed: 'top' };
+    expect(() => getStories.output.parse(result)).toThrow();
   });
 
   it('format() does not emit internal env var values in any story field', async () => {
@@ -706,8 +687,9 @@ describe('getStories — pagination notices', () => {
     const notice = sc.notice as string;
 
     expect(sc).toMatchObject({ truncated: true, shown: 0, cap: 5 });
-    expect(notice).toContain('No live stories on this page');
-    expect(notice).toContain('Pass offset: 15 for the next page');
+    expect(notice).toBe(
+      'No live stories on this page of the new feed (offset:10, total:500). 5 of the 5 items on this page are omitted: 5 dead. Pass offset: 15 for the next page, or raise count (max 100).',
+    );
     expect(contentText(result)).toContain(notice);
   });
 
@@ -839,6 +821,21 @@ describe('getStories — count above the per-call cap', () => {
     );
   });
 
+  it('orders every sentence: page state, omitted count, over-cap, failure, next offset', async () => {
+    mockService.fetchItems.mockImplementation(async (ids) => [
+      { kind: 'failed', id: ids[0]!, error: new Error('upstream down') },
+      ...slotsOf([makeItem({ id: ids[1]!, dead: true })]),
+      ...slotsOf(ids.slice(2).map((id) => makeItem({ id }))),
+    ]);
+
+    const sc = structured(await call({ feed: 'top', count: 250, offset: 100 }));
+
+    expect(sc.failedIds).toEqual([101]);
+    expect(sc.notice).toBe(
+      'Showing items 101–200 of 500 in the top feed. 1 of the 100 items on this page is omitted: 1 dead. count 250 is above the per-call cap of 100, so this call served count: 100. Could not fetch 1 of 100 items on this page (id 101). Retry with offset: 100, or pass an id as itemId to hn_get_thread to fetch that story alone. Pass offset: 200 for the next page.',
+    );
+  });
+
   it('advertises the 1,000 ceiling and describes the per-call cap', () => {
     const schema = z.toJSONSchema(getStories.input) as {
       properties: Record<string, { maximum?: number; description?: string }>;
@@ -860,6 +857,29 @@ describe('getStories — output descriptions', () => {
     const description = schema.properties.stories.items.properties.descendants?.description;
     expect(description).toBe(
       "HN's count of live comments in the thread (descendants); dead and deleted comments are not counted. Absent for jobs.",
+    );
+  });
+
+  it('requires rank and describes it as the feed position, gaps marking omitted or failed items', () => {
+    const schema = z.toJSONSchema(getStories.output) as unknown as {
+      properties: {
+        stories: {
+          items: { properties: Record<string, { description?: string }>; required: string[] };
+        };
+      };
+    };
+    const { items } = schema.properties.stories;
+    expect(items.required).toContain('rank');
+    expect(items.properties.rank?.description).toBe(
+      "1-based position in the feed's ranking when fetched: offset plus the story's slot on this page, counted before omitted or failed items drop out. A gap between consecutive ranks marks an item omitted as deleted, dead, or missing, or one in failedIds.",
+    );
+  });
+
+  it('describes the notice as counting omitted items, absent only when nothing was omitted or failed', () => {
+    const { description } = getStories.enrichment!.notice!;
+    expect(description).toMatch(/how many items on this page were omitted, by kind/);
+    expect(description).toMatch(
+      /Absent on the last page of a non-empty result when nothing on it was omitted or failed\.$/,
     );
   });
 
@@ -951,7 +971,7 @@ describe('getStories — partial item failures', () => {
     );
   });
 
-  it('does not blame deletion when failures and dead items leave nothing live', async () => {
+  it('counts the dead item apart from the failed one when together they leave nothing live', async () => {
     feed([101, 102], { 101: httpStatus(500), 102: story(102, { dead: true }) });
 
     const result = await call({ feed: 'top', count: 2 });
@@ -959,7 +979,9 @@ describe('getStories — partial item failures', () => {
 
     expect(sc.stories).toEqual([]);
     expect(sc.failedIds).toEqual([101]);
-    expect(sc.notice).toMatch(/^Could not fetch 1 of 2 items on this page \(id 101\)/);
+    expect(sc.notice).toBe(
+      '1 of the 2 items on this page is omitted: 1 dead. Could not fetch 1 of 2 items on this page (id 101). Retry with offset: 0, or pass an id as itemId to hn_get_thread to fetch that story alone.',
+    );
     expect(sc.notice).not.toMatch(/deleted or flagged/);
     expect(contentText(result)).toContain('**Failed to load:** 101');
   });
@@ -1034,6 +1056,200 @@ describe('getStories — partial item failures', () => {
     expect(requested()).toEqual(['/topstories.json']);
     expect(sc).not.toHaveProperty('failedIds');
     expect(sc.notice).toMatch(/past the end/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Feed rank and omitted items — the real HnService against a stubbed HN API
+// ---------------------------------------------------------------------------
+
+describe('getStories — feed rank and omitted items', () => {
+  const story = (id: number, extra: Partial<HnItem> = {}): HnItem => ({
+    id,
+    type: 'story',
+    title: `Story ${id}`,
+    by: 'author',
+    score: 10,
+    ...extra,
+  });
+
+  /**
+   * The `top` feed of `ids`, every item a live story unless `overrides` replaces
+   * its route — `null` included, Firebase's answer for a missing item.
+   */
+  function feed(ids: number[], overrides: Record<number, unknown> = {}) {
+    return stubHnApi({
+      '/topstories.json': ids,
+      ...Object.fromEntries(
+        ids.map((id) => [
+          `/item/${id}.json`,
+          Object.hasOwn(overrides, id) ? overrides[id] : story(id),
+        ]),
+      ),
+    });
+  }
+
+  /** Run the tool, letting fake timers drive any retry backoff to completion. */
+  async function call(input: Record<string, unknown>): Promise<ToolResult> {
+    const pending = runToolContract(getStories, input as never, {
+      context: { errors: getStories.errors },
+    });
+    await vi.advanceTimersByTimeAsync(120_000);
+    return pending;
+  }
+
+  /** Each `[rank]` label `format()` rendered, in order. */
+  const labels = (result: ToolResult) => contentText(result).match(/^\[\d+\]/gm);
+
+  const ranksOf = (sc: Record<string, unknown>) =>
+    (sc.stories as Array<{ id: number; rank: number }>).map((s) => [s.id, s.rank]);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.mocked(getHnService).mockReturnValue(new HnService(3));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  describe('rank', () => {
+    it('labels each story with its position in the feed, offset included, on both surfaces', async () => {
+      feed(Array.from({ length: 40 }, (_, i) => 1001 + i));
+
+      const result = await call({ feed: 'top', count: 3, offset: 30 });
+
+      expect(ranksOf(structured(result))).toEqual([
+        [1031, 31],
+        [1032, 32],
+        [1033, 33],
+      ]);
+      expect(labels(result)).toEqual(['[31]', '[32]', '[33]']);
+      expect(contentText(result)).toContain('[31] Story 1031\n');
+    });
+
+    it.each([
+      ['dead', story(102, { dead: true }), []],
+      ['deleted', story(102, { deleted: true }), []],
+      ['missing', null, []],
+      ['failed', httpStatus(500), [102]],
+    ])(
+      'keeps rank 3 on the third story when the second slot is %s',
+      async (_kind, route, failedIds) => {
+        feed([101, 102, 103], { 102: route });
+
+        const result = await call({ feed: 'top', count: 3 });
+        const sc = structured(result);
+
+        expect(ranksOf(sc)).toEqual([
+          [101, 1],
+          [103, 3],
+        ]);
+        expect(labels(result)).toEqual(['[1]', '[3]']);
+        expect(sc.failedIds ?? []).toEqual(failedIds);
+      },
+    );
+
+    it('gives a job its position in the feed fetched', async () => {
+      const job = story(202, { type: 'job', title: 'Hiring' });
+      stubHnApi({
+        '/jobstories.json': [301, 302, 202],
+        '/topstories.json': [101, 202],
+        '/item/101.json': story(101),
+        '/item/202.json': job,
+        '/item/301.json': story(301, { type: 'job' }),
+        '/item/302.json': story(302, { type: 'job' }),
+      });
+
+      const jobs = structured(await call({ feed: 'jobs', count: 3 }));
+      const top = structured(await call({ feed: 'top', count: 2 }));
+
+      expect(ranksOf(jobs)).toContainEqual([202, 3]);
+      expect(ranksOf(top)).toContainEqual([202, 2]);
+    });
+  });
+
+  describe('omitted items', () => {
+    it('counts each kind on a final page, with no pagination hint', async () => {
+      feed([101, 102, 103, 104, 105], {
+        102: story(102, { dead: true }),
+        103: story(103, { deleted: true }),
+        104: null,
+      });
+
+      const result = await call({ feed: 'top', count: 5 });
+      const sc = structured(result);
+
+      expect(ranksOf(sc)).toEqual([
+        [101, 1],
+        [105, 5],
+      ]);
+      expect(sc.notice).toBe(
+        '3 of the 5 items on this page are omitted: 1 deleted, 1 dead, 1 missing.',
+      );
+      expect(sc.hasMore).toBe(false);
+      for (const key of ['truncated', 'shown', 'cap', 'failedIds']) {
+        expect(sc).not.toHaveProperty(key);
+      }
+      expect(contentText(result)).toContain(sc.notice as string);
+    });
+
+    it('puts the count between the page state and the next offset while more stories remain', async () => {
+      feed([101, 102, 103, 104, 105, 106, 107, 108, 109, 110], {
+        102: story(102, { dead: true }),
+      });
+
+      const sc = structured(await call({ feed: 'top', count: 3 }));
+
+      expect(sc).toMatchObject({ truncated: true, shown: 2, cap: 3 });
+      expect(sc.notice).toBe(
+        'Showing items 1–3 of 10 in the top feed. 1 of the 3 items on this page is omitted: 1 dead. Pass offset: 3 for the next page, or raise count (max 100).',
+      );
+    });
+
+    it('accounts for every slot apart: live, omitted, and failed, the failed id uncounted', async () => {
+      feed([101, 102, 103], { 102: httpStatus(500), 103: story(103, { dead: true }) });
+
+      const result = await call({ feed: 'top', count: 3 });
+      const sc = structured(result);
+
+      expect(ranksOf(sc)).toEqual([[101, 1]]);
+      expect(sc.failedIds).toEqual([102]);
+      expect(sc.notice).toBe(
+        '1 of the 3 items on this page is omitted: 1 dead. Could not fetch 1 of 3 items on this page (id 102). Retry with offset: 0, or pass an id as itemId to hn_get_thread to fetch that story alone.',
+      );
+      expect(sc).not.toHaveProperty('truncated');
+    });
+
+    it.each([
+      [
+        'every slot dropped',
+        [101, 102, 103],
+        { 101: story(101, { deleted: true }), 102: story(102, { dead: true }), 103: null },
+        'No live stories on this page of the top feed (offset:0, total:3). 3 of the 3 items on this page are omitted: 1 deleted, 1 dead, 1 missing.',
+      ],
+      [
+        'its one slot dead',
+        [101],
+        { 101: story(101, { dead: true }) },
+        'No live stories on this page of the top feed (offset:0, total:1). 1 of the 1 item on this page is omitted: 1 dead.',
+      ],
+    ])(
+      'replaces the deletion guess with the count on an empty final page: %s',
+      async (_label, ids, overrides, notice) => {
+        feed(ids, overrides);
+
+        const result = await call({ feed: 'top', count: 5 });
+        const sc = structured(result);
+
+        expect(sc.stories).toEqual([]);
+        expect(sc.notice).toBe(notice);
+        expect(sc).not.toHaveProperty('truncated');
+        expect(contentText(result)).toContain(notice);
+      },
+    );
   });
 });
 

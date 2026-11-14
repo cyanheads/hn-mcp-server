@@ -11,7 +11,6 @@ import {
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { quoteBody } from '@/mcp-server/tools/markdown-escape.js';
 import type { AlgoliaResponse } from '@/services/hn/types.js';
 import { expectLinearCpu } from '../helpers/cpu-time.js';
 
@@ -896,11 +895,11 @@ describe('hn_search_content input validation', () => {
     expect(searchHn.input.parse({ tags: 'ask_hn' })).toMatchObject({ tags: 'ask_hn' });
   });
 
-  it('applies defaults: sort=relevance, count=30, page=0', () => {
+  it('applies defaults: sort=relevance, count=10, page=0', () => {
     const parsed = searchHn.input.parse({ query: 'test' });
 
     expect(parsed.sort).toBe('relevance');
-    expect(parsed.count).toBe(30);
+    expect(parsed.count).toBe(10);
     expect(parsed.page).toBe(0);
   });
 
@@ -967,7 +966,7 @@ describe('hn_search_content input validation', () => {
     expect(searchHn.input.parse({ query: '  rust lang  ' }).query).toBe('rust lang');
   });
 
-  it.each(['', '   '])('rejects blank author (%j)', (author) => {
+  it.each(['', '   ', '@', ' @ '])('rejects blank author (%j)', (author) => {
     expect(() => searchHn.input.parse({ query: 'rust', author })).toThrow();
   });
 
@@ -1207,22 +1206,28 @@ describe('hn_search_content blank-string messages', () => {
     expect(mockSearch).not.toHaveBeenCalled();
   });
 
-  it.each(['', '   '])('names the trimmed-blank author and the fix (%j)', async (author) => {
+  it.each(['', '   ', '@'])('names the trimmed-blank author and the fix (%j)', async (author) => {
     const result = await callSearch({ query: 'rust', author });
     const error = wireError(result);
+    const message =
+      'author: blank after trimming whitespace and a leading @ — omit author to search all authors.';
 
     expect(error.data?.reason).toBe('invalid_arguments');
-    expect(error.data?.recovery?.hint).toContain('blank after trimming whitespace');
-    expect(error.data?.recovery?.hint).toContain('omit author to search all authors');
-    expect(contentText(result)).toContain(
-      'author: blank after trimming whitespace — omit author to search all authors',
-    );
+    expect(error.data?.recovery?.hint).toBe(message);
+    expect(contentText(result)).toContain(message);
     expect(contentText(result)).not.toContain('Too small');
+    expect(mockSearch).not.toHaveBeenCalled();
   });
 
-  it('still advertises minLength 1 on query and author', () => {
+  it('still advertises minLength 1 on query, and on author a string with minLength 1 and no pattern', () => {
+    const { type, minLength, pattern } = inputProperty('author') as SchemaNode & { type?: string };
+
     expect(inputProperty('query').minLength).toBe(1);
-    expect(inputProperty('author').minLength).toBe(1);
+    expect({ type, minLength, pattern }).toStrictEqual({
+      type: 'string',
+      minLength: 1,
+      pattern: undefined,
+    });
   });
 });
 
@@ -1708,7 +1713,7 @@ describe('hn_search_content minComments', () => {
       minPoints: 10,
       minComments: 300,
       sort: 'relevance',
-      count: 30,
+      count: 10,
       view: 'full',
     });
     expect(Object.keys(criteria).indexOf('minComments')).toBe(
@@ -1716,7 +1721,7 @@ describe('hn_search_content minComments', () => {
     );
     expect(criteria.minComments).toBe(sentParams().minComments);
     expect(contentText(result)).toContain(
-      '**criteria:** tags: story | minPoints: 10 | minComments: 300 | sort: relevance | count: 30 | view: full',
+      '**criteria:** tags: story | minPoints: 10 | minComments: 300 | sort: relevance | count: 10 | view: full',
     );
   });
 
@@ -1776,7 +1781,7 @@ describe('hn_search_content pagination notices', () => {
     const notice = structured(result).notice as string;
 
     expect(notice).toBe(
-      'Showing 5 of 76 hits (page 0 of 16). Pass page: 1 for more, or raise count (max 50).',
+      'Showing 5 of 76 hits (page 0 of 16). Pass count: 5, page: 1 for more, or keep page: 0 and raise count (max 50).',
     );
     expect(notice).not.toContain('narrow with filters');
     expect(contentText(result)).toContain(notice);
@@ -1791,7 +1796,9 @@ describe('hn_search_content pagination notices', () => {
     const result = await callSearch({ query: 'a', count: 50, page: 3 });
     const notice = structured(result).notice as string;
 
-    expect(notice).toBe('Showing 50 of 1000 hits (page 3 of 20). Pass page: 4 for more.');
+    expect(notice).toBe(
+      'Showing 50 of 1000 hits (page 3 of 20). Pass count: 50, page: 4 for more.',
+    );
   });
 
   it('reports the last page Algolia serves as terminal — no truncated, shown, or cap; the notice names the ceiling', async () => {
@@ -1879,6 +1886,231 @@ describe('hn_search_content pagination notices', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Page levers name the count their page is counted in, so each works as written
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content page levers', () => {
+  /**
+   * Algolia's paging over `total` matches whose hit ids are 1…total in rank
+   * order: page p at count c holds hits p·c+1 … p·c+c of the first 1,000, a
+   * page past the last holds none, and a page starting past the 1,000-hit
+   * ceiling answers nbHits and nbPages 0.
+   */
+  function serveMatches(total: number) {
+    const reachable = Array.from({ length: Math.min(total, 1000) }, (_, i) => ({
+      ...storyHit,
+      objectID: String(i + 1),
+    }));
+    mockSearch.mockImplementation(async (params) => {
+      const { count, page } = params as { count: number; page: number };
+      const start = page * count;
+      if (start >= 1000) {
+        return algoliaResponse({ nbHits: 0, nbPages: 0, page, hitsPerPage: count });
+      }
+      return algoliaResponse({
+        hits: reachable.slice(start, start + count),
+        nbHits: total,
+        nbPages: Math.ceil(reachable.length / count),
+        page,
+        hitsPerPage: count,
+      });
+    });
+  }
+
+  const ids = (sc: Record<string, unknown>) =>
+    (sc.hits as Array<{ id: number }>).map((hit) => hit.id);
+
+  /** Hit ids from..to, inclusive. */
+  const range = (from: number, to: number) =>
+    Array.from({ length: to - from + 1 }, (_, i) => from + i);
+
+  /** The original input without its paging arguments, which a lever replaces. */
+  function withoutPaging(input: Record<string, unknown>): Record<string, unknown> {
+    const { count: _count, page: _page, ...filters } = input;
+    return filters;
+  }
+
+  /** The arguments a notice names before `label` (e.g. `count: 30, page: 1` before `for more`), as input. */
+  function lever(notice: string, label: string): Record<string, number> {
+    const named = new RegExp(`((?:count: \\d+, )?page: \\d+) ${label}`).exec(notice)?.[1];
+    expect(named, `a "${label}" lever in: ${notice}`).toBeDefined();
+    return Object.fromEntries(
+      named!.split(', ').map((arg) => {
+        const [name, value] = arg.split(': ');
+        return [name!, Number(value)];
+      }),
+    );
+  }
+
+  it.each([
+    [
+      'count 30 on page 0',
+      { count: 30 },
+      'Showing 30 of 400 hits (page 0 of 14). Pass count: 30, page: 1 for more, or keep page: 0 and raise count (max 50).',
+    ],
+    [
+      'count 30 on a middle page',
+      { count: 30, page: 2 },
+      'Showing 30 of 400 hits (page 2 of 14). Pass count: 30, page: 3 for more.',
+    ],
+    [
+      'the default count on page 0',
+      {},
+      'Showing 10 of 400 hits (page 0 of 40). Pass page: 1 for more, or keep page: 0 and raise count (max 50).',
+    ],
+    [
+      'the default count on a middle page',
+      { page: 2 },
+      'Showing 10 of 400 hits (page 2 of 40). Pass page: 3 for more.',
+    ],
+    [
+      'count 10 passed explicitly',
+      { count: 10, page: 2 },
+      'Showing 10 of 400 hits (page 2 of 40). Pass page: 3 for more.',
+    ],
+    [
+      'count at the cap',
+      { count: 50 },
+      'Showing 50 of 400 hits (page 0 of 8). Pass count: 50, page: 1 for more.',
+    ],
+    [
+      'count above the cap',
+      { count: 100 },
+      'Showing 50 of 400 hits (page 0 of 8). Pass count: 50, page: 1 for more. count 100 is above the per-call cap of 50, so this call served count: 50.',
+    ],
+  ])(
+    'names the next page after %s, with the count it is counted in',
+    async (_label, paging, notice) => {
+      serveMatches(400);
+
+      const result = await callSearch({ query: 'rust', ...paging });
+
+      expect(structured(result).notice).toBe(notice);
+      expect(contentText(result)).toContain(notice);
+    },
+  );
+
+  it.each([
+    [
+      'past the end at count 30',
+      120,
+      { count: 30, page: 9 },
+      'Page 9 is past the last page of results (120 hits across 4 pages). Pass count: 30, page: 3 for the last page, or count: 30, page: 0 to start over.',
+    ],
+    [
+      'past the end at the default count',
+      120,
+      { page: 20 },
+      'Page 20 is past the last page of results (120 hits across 12 pages). Pass page: 11 for the last page, or page: 0 to start over.',
+    ],
+    [
+      'past the end of a one-page search at count 30',
+      20,
+      { count: 30, page: 2 },
+      'Page 2 is past the last page of results (20 hits across 1 page). Pass count: 30, page: 0 for that page.',
+    ],
+    [
+      'past the 1,000-hit ceiling at count 30',
+      2000,
+      { count: 30, page: 40 },
+      'Page 40 is past the last page Algolia serves for this search (at most 1,000 hits per search), where totalHits and totalPages read 0. Pass count: 30, page: 0 to start over; if that also returns nothing, the search itself matches nothing.',
+    ],
+  ])(
+    'names every lever on a page %s with the count it is counted in',
+    async (_label, total, paging, notice) => {
+      serveMatches(total);
+
+      const result = await callSearch({ query: 'rust', ...paging });
+
+      expect(structured(result).notice).toBe(notice);
+      expect(contentText(result)).toContain(notice);
+    },
+  );
+
+  it.each([
+    ['count 30 on page 0', { count: 30 }],
+    ['count 30 on a middle page', { count: 30, page: 2 }],
+    ['the default count on page 0', {}],
+    ['the default count on a middle page', { page: 2 }],
+    ['count at the cap', { count: 50 }],
+    ['count above the cap', { count: 100 }],
+  ])(
+    'the next-page lever after %s, sent as written, continues at the first hit not yet returned',
+    async (_label, paging) => {
+      serveMatches(400);
+      const original = { query: 'rust', tags: 'story', ...paging };
+
+      const first = structured(await callSearch(original));
+      const next = structured(
+        await callSearch({
+          ...withoutPaging(original),
+          ...lever(first.notice as string, 'for more'),
+        }),
+      );
+
+      const seen = ids(first);
+      const last = seen.at(-1)!;
+      expect(ids(next)).toStrictEqual(range(last + 1, last + seen.length));
+      expect(mockSearch.mock.calls[1]![0]).toMatchObject({ query: 'rust', tags: 'story' });
+    },
+  );
+
+  it.each([
+    ['count 30', { count: 30 }],
+    ['the default count', {}],
+  ])(
+    'the raise-count alternative after %s on page 0, sent as written, keeps every hit already returned',
+    async (_label, paging) => {
+      serveMatches(400);
+      const original = { query: 'rust', ...paging };
+
+      const first = structured(await callSearch(original));
+      const alternative = /or keep page: (\d+) and raise count \(max (\d+)\)/.exec(
+        first.notice as string,
+      );
+      expect(alternative, `a raise-count alternative in: ${first.notice}`).not.toBeNull();
+      const raised = structured(
+        await callSearch({
+          ...withoutPaging(original),
+          page: Number(alternative![1]),
+          count: Number(alternative![2]),
+        }),
+      );
+
+      expect(ids(raised)).toStrictEqual(range(1, 50));
+      expect(ids(raised).slice(0, ids(first).length)).toStrictEqual(ids(first));
+    },
+  );
+
+  it.each([
+    ['past the end', 'for the last page', 120, { count: 30, page: 9 }, range(91, 120)],
+    ['past the end', 'to start over', 120, { count: 30, page: 9 }, range(1, 30)],
+    [
+      'past the end of a one-page search',
+      'for that page',
+      20,
+      { count: 30, page: 2 },
+      range(1, 20),
+    ],
+    ['past the 1,000-hit ceiling', 'to start over', 2000, { count: 30, page: 40 }, range(1, 30)],
+  ])(
+    'on a page %s, the "%s" lever sent as written serves its page at the same count',
+    async (_where, label, total, paging, expected) => {
+      serveMatches(total);
+      const original = { query: 'rust', ...paging };
+
+      const past = structured(await callSearch(original));
+      const followed = structured(
+        await callSearch({ ...withoutPaging(original), ...lever(past.notice as string, label) }),
+      );
+
+      expect(ids(followed)).toStrictEqual(expected);
+      expect(followed.criteria).toMatchObject({ count: 30 });
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Notice sentences in full, so a notice is asserted as exactly the sentences it joins
 // ---------------------------------------------------------------------------
 
@@ -1944,7 +2176,7 @@ describe('composeSearchNotice', () => {
 
     expect(notice).toBe(
       joined(
-        'Showing 5 of 12 hits (page 0 of 3). Pass page: 1 for more, or raise count (max 50).',
+        'Showing 5 of 12 hits (page 0 of 3). Pass count: 5, page: 1 for more, or keep page: 0 and raise count (max 50).',
         droppedSentence('https://www.'),
         FRONT_PAGE_SENTENCE,
       ),
@@ -1977,7 +2209,7 @@ describe('composeSearchNotice', () => {
 
     expect(notice).toBe(
       joined(
-        'Page 4 is past the last page of results (12 hits across 3 pages). Pass page: 2 for the last page, or page: 0 to start over.',
+        'Page 4 is past the last page of results (12 hits across 3 pages). Pass count: 5, page: 2 for the last page, or count: 5, page: 0 to start over.',
         droppedSentence('https://www.'),
         FRONT_PAGE_SENTENCE,
       ),
@@ -1995,7 +2227,7 @@ describe('composeSearchNotice', () => {
     });
 
     expect(notice).toBe(
-      'Page 2 is past the last page of results (4 hits across 1 page). Pass page: 0 for that page.',
+      'Page 2 is past the last page of results (4 hits across 1 page). Pass count: 5, page: 0 for that page.',
     );
   });
 
@@ -2092,7 +2324,7 @@ describe('hn_search_content totals and capped coverage', () => {
     expect(sc).not.toHaveProperty('totalHitsExact');
     expect(sc).not.toHaveProperty('reachableHits');
     expect(sc.notice).toBe(
-      'Page 20 is past the last page Algolia serves for this search (at most 1,000 hits per search), where totalHits and totalPages read 0. Pass page: 0 to start over; if that also returns nothing, the search itself matches nothing.',
+      'Page 20 is past the last page Algolia serves for this search (at most 1,000 hits per search), where totalHits and totalPages read 0. Pass count: 50, page: 0 to start over; if that also returns nothing, the search itself matches nothing.',
     );
     expect(contentText(result)).not.toContain('totalHitsExact');
   });
@@ -2214,7 +2446,7 @@ describe('hn_search_content totals and capped coverage', () => {
 
     expect(sc).toMatchObject({ truncated: true, shown: 50, cap: 50 });
     expect(sc.notice).toBe(
-      'Showing 50 of about 45558373 hits (page 0 of 20). Pass page: 1 for more.',
+      'Showing 50 of about 45558373 hits (page 0 of 20). Pass count: 50, page: 1 for more.',
     );
     expect(contentText(result)).toContain(sc.notice as string);
   });
@@ -2230,7 +2462,7 @@ describe('hn_search_content totals and capped coverage', () => {
     const sc = structured(await callSearch({ query: 'rust', count: 5 }));
 
     expect(sc.notice).toBe(
-      'Showing 5 of 76 hits (page 0 of 16). Pass page: 1 for more, or raise count (max 50).',
+      'Showing 5 of 76 hits (page 0 of 16). Pass count: 5, page: 1 for more, or keep page: 0 and raise count (max 50).',
     );
   });
 
@@ -2434,7 +2666,7 @@ describe('hn_search_content URL queries', () => {
     expect(sc).toMatchObject({ truncated: true, shown: 3, cap: 3 });
     expect(notice).toBe(
       joined(
-        'Showing 3 of 11 hits (page 0 of 4). Pass page: 1 for more, or raise count (max 50).',
+        'Showing 3 of 11 hits (page 0 of 4). Pass count: 3, page: 1 for more, or keep page: 0 and raise count (max 50).',
         droppedSentence('https://www.'),
       ),
     );
@@ -2482,6 +2714,11 @@ describe('hn_search_content author casing', () => {
       { author: 'animats', tags: 'story' },
       'No items matched these filters: tags, author. Relax or change them.',
     ],
+    [
+      'a search by @handle',
+      { author: '@animats', tags: 'story' },
+      'No items matched these filters: tags, author. Relax or change them.',
+    ],
   ])(
     'adds the case clause after the relax text on an empty first page of %s',
     async (_label, input, relax) => {
@@ -2492,17 +2729,24 @@ describe('hn_search_content author casing', () => {
 
       expect(notice).toBe(joined(relax, AUTHOR_CASE_SENTENCE));
       expect(contentText(result)).toContain(notice);
+      expect(mockSearch).toHaveBeenCalledWith(
+        expect.objectContaining({ author: 'animats' }),
+        expect.anything(),
+      );
     },
   );
 
-  it('sends author as typed, with no case folding and one upstream call', async () => {
+  it.each([
+    ['Animats', 'Animats'],
+    ['@pg', 'pg'],
+  ])('sends author %j as %j, with no case folding and one upstream call', async (author, sent) => {
     mockSearch.mockResolvedValue(algoliaResponse());
 
-    await callSearch({ author: 'animats', query: 'rust' });
+    await callSearch({ author, query: 'rust' });
 
     expect(mockSearch).toHaveBeenCalledTimes(1);
     expect(mockSearch).toHaveBeenCalledWith(
-      expect.objectContaining({ author: 'animats' }),
+      expect.objectContaining({ author: sent }),
       expect.anything(),
     );
   });
@@ -2540,6 +2784,30 @@ describe('hn_search_content author casing', () => {
     expect(description).toMatch(/case-sensitive/i);
     expect(description).toMatch(/exact/i);
     expect(description).not.toMatch(/only shows recent submissions/);
+  });
+
+  it('fails a display name with the whitespace message on both surfaces, before any upstream call', async () => {
+    const result = await callSearch({ query: 'rust', author: 'Paul Graham' });
+    const error = wireError(result);
+    const message =
+      'author: contains whitespace — HN usernames have none; pass the account name from a by or author field, not a display name.';
+
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.data?.reason).toBe('invalid_arguments');
+    expect(error.data?.recovery?.hint).toBe(message);
+    expect(contentText(result)).toContain(message);
+    expect(mockSearch).not.toHaveBeenCalled();
+  });
+
+  it('describes the @ strip and the display-name rejection on author and criteria.author', () => {
+    expect(inputProperty('author').description).toBe(
+      'Filter results to a specific author — useful for finding a user\'s posts on a topic. Matches the HN username exactly and is case-sensitive, so a re-cased name finds nothing. Trimmed, and one leading @ is dropped, so "@pg" searches pg; a name that still holds whitespace is rejected as a display name. Omit the field to search all authors rather than passing a blank string.',
+    );
+    const criteria = z.toJSONSchema(searchHn.enrichment!.criteria!) as SchemaNode;
+    expect(criteria.properties?.author?.description).toBe(
+      'Author filter — the username as searched: trimmed, with one leading @ dropped.',
+    );
+    expect(criteria.description).toContain('author as searched (trimmed, one leading @ dropped)');
   });
 });
 
@@ -2608,7 +2876,7 @@ describe('hn_search_content front_page scope', () => {
     expect(sc).toMatchObject({ truncated: true, shown: 5, cap: 5 });
     expect(notice).toBe(
       joined(
-        'Showing 5 of 12 hits (page 0 of 3). Pass page: 1 for more, or raise count (max 50).',
+        'Showing 5 of 12 hits (page 0 of 3). Pass count: 5, page: 1 for more, or keep page: 0 and raise count (max 50).',
         FRONT_PAGE_SENTENCE,
       ),
     );
@@ -2682,8 +2950,8 @@ describe('hn_search_content applied criteria', () => {
     const criteria = criteriaOf(result);
 
     expect(Object.keys(criteria)).toEqual(['sort', 'count', 'view']);
-    expect(criteria).toStrictEqual({ sort: 'relevance', count: 30, view: 'full' });
-    expect(contentText(result)).toContain('**criteria:** sort: relevance | count: 30 | view: full');
+    expect(criteria).toStrictEqual({ sort: 'relevance', count: 10, view: 'full' });
+    expect(contentText(result)).toContain('**criteria:** sort: relevance | count: 10 | view: full');
   });
 
   it('echoes storyId and minPoints, and every value matches the params sent', async () => {
@@ -2719,8 +2987,8 @@ describe('hn_search_content applied criteria', () => {
     );
   });
 
-  const defaults = { sort: 'relevance', count: 30, view: 'full' };
-  const defaultsLine = 'sort: relevance | count: 30 | view: full';
+  const defaults = { sort: 'relevance', count: 10, view: 'full' };
+  const defaultsLine = 'sort: relevance | count: 10 | view: full';
 
   it.each([
     [
@@ -2776,14 +3044,18 @@ describe('hn_search_content applied criteria', () => {
     expect(contentText(result)).not.toContain('criteria');
   });
 
-  it('echoes author trimmed, as matched', async () => {
-    mockSearch.mockResolvedValue(algoliaResponse());
+  it.each([' dang ', ' @dang '])(
+    'echoes author %j as searched: trimmed, with one leading @ dropped, on both surfaces',
+    async (author) => {
+      mockSearch.mockResolvedValue(algoliaResponse());
 
-    const result = await callSearch({ author: ' dang ' });
+      const result = await callSearch({ author });
 
-    expect(criteriaOf(result).author).toBe('dang');
-    expect(sentParams().author).toBe('dang');
-  });
+      expect(criteriaOf(result).author).toBe('dang');
+      expect(sentParams().author).toBe('dang');
+      expect(contentText(result)).toContain('**criteria:** author: "dang" | sort: relevance');
+    },
+  );
 
   it.each([
     [{ start: '2024-05-05T10:00:00+02:00' }, { start: '2024-05-05T08:00:00Z' }],
@@ -2824,16 +3096,15 @@ describe('hn_search_content applied criteria', () => {
 
   it('escapes author in content[] and keeps it raw in structuredContent', async () => {
     mockSearch.mockResolvedValue(algoliaResponse());
-    const author = 'mallory"\n## Injected **bold** `x`';
+    const author = 'mallory"**bold**`x`[a](https://evil.test)<b>';
 
     const result = await callSearch({ author });
     const text = contentText(result);
 
     expect(criteriaOf(result).author).toBe(author);
     expect(text).toContain(
-      '**criteria:** author: "mallory\\" ## Injected \\*\\*bold\\*\\* \\`x\\`" | sort: relevance',
+      '**criteria:** author: "mallory\\"\\*\\*bold\\*\\*\\`x\\`[a\\](https://evil.test)\\<b>" | sort: relevance',
     );
-    expect(text).not.toMatch(/^## Injected/m);
   });
 
   it.each([
@@ -3280,7 +3551,7 @@ describe('hn_search_content count above the per-call cap', () => {
     expect(sentParams()).toMatchObject({ count: 50, page: 20 });
     expect(sc).not.toHaveProperty('truncated');
     expect(sc.notice).toBe(
-      'Page 20 is past the last page Algolia serves for this search (at most 1,000 hits per search), where totalHits and totalPages read 0. Pass page: 0 to start over; if that also returns nothing, the search itself matches nothing. count 1000 is above the per-call cap of 50, so this call served count: 50. Page 1 at count 1000 starts at the same hit as page 20 at count 50, the page served.',
+      'Page 20 is past the last page Algolia serves for this search (at most 1,000 hits per search), where totalHits and totalPages read 0. Pass count: 50, page: 0 to start over; if that also returns nothing, the search itself matches nothing. count 1000 is above the per-call cap of 50, so this call served count: 50. Page 1 at count 1000 starts at the same hit as page 20 at count 50, the page served.',
     );
   });
 
@@ -3293,7 +3564,7 @@ describe('hn_search_content count above the per-call cap', () => {
 
     expect(sentParams()).toMatchObject({ count: 50, page: 6 });
     expect(sc.notice).toBe(
-      'Page 6 is past the last page of results (120 hits across 3 pages). Pass count: 50, page: 2 for the last page, or page: 0 to start over. count 100 is above the per-call cap of 50, so this call served count: 50. Page 3 at count 100 starts at the same hit as page 6 at count 50, the page served.',
+      'Page 6 is past the last page of results (120 hits across 3 pages). Pass count: 50, page: 2 for the last page, or count: 50, page: 0 to start over. count 100 is above the per-call cap of 50, so this call served count: 50. Page 3 at count 100 starts at the same hit as page 6 at count 50, the page served.',
     );
   });
 
@@ -3451,103 +3722,28 @@ describe('composeSearchNotice — over-cap count', () => {
 });
 
 // ---------------------------------------------------------------------------
-// #46 — the full view's 64,000-byte response budget
+// #55 — page size is the caller's count; long bodies change neither the page nor compact
 // ---------------------------------------------------------------------------
 
-const BUDGET_BYTES = 64_000;
-
-const HIGHLIGHTS_OMITTED_SENTENCE =
-  'To stay within the 64,000-byte response budget, highlights.text is omitted from every hit; matchedWords still lists the matched terms.';
-
-/** The budget sentence for a page whose step 2 cut `ids`, after step 1 dropped highlights.text when `omitted`. */
-const cutSentence = (ids: number[], omitted = true) =>
-  `To stay within the 64,000-byte response budget, ${omitted ? 'highlights.text is omitted from every hit and ' : ''}the text of ${ids.length === 1 ? 'hit' : 'hits'} ${ids.join(', ')} is cut short; hn_get_thread with a cut hit's id returns its full text, and view: "compact" or a smaller count avoids the cut.`;
-
-/** The unquoted line content[] puts after a cut body. */
-const cutLine = (id: number) =>
-  `Text cut short to fit the response budget — hn_get_thread with itemId ${id} returns it whole.`;
-
-describe('composeSearchNotice — response budget', () => {
-  const page = { query: 'lisp', count: 30, shown: 4, page: 0, totalHits: 4, totalPages: 1 };
-
-  it('says nothing about the budget on a page that fit', () => {
-    expect(composeSearchNotice(page)).toBeUndefined();
-  });
-
-  it('names the omitted body highlights when only step 1 ran', () => {
-    expect(
-      composeSearchNotice({ ...page, budget: { highlightsTextOmitted: true, cutIds: [] } }),
-    ).toBe(HIGHLIGHTS_OMITTED_SENTENCE);
-  });
-
-  it('names the cut hits and the levers after step 2', () => {
-    expect(
-      composeSearchNotice({ ...page, budget: { highlightsTextOmitted: true, cutIds: [7, 9] } }),
-    ).toBe(cutSentence([7, 9]));
-    expect(
-      composeSearchNotice({ ...page, budget: { highlightsTextOmitted: false, cutIds: [7] } }),
-    ).toBe(cutSentence([7], false));
-  });
-
-  it('comes after the page-state and cause sentences', () => {
-    expect(
-      composeSearchNotice({
-        ...page,
-        author: 'pg',
-        count: 50,
-        overCap: { count: 100, page: 0 },
-        totalHits: 300,
-        totalPages: 6,
-        budget: { highlightsTextOmitted: true, cutIds: [5] },
-      }),
-    ).toBe(
-      joined(
-        'Showing 4 of 300 hits (page 0 of 6). Pass count: 50, page: 1 for more.',
-        'count 100 is above the per-call cap of 50, so this call served count: 50.',
-        cutSentence([5]),
-      ),
-    );
-  });
-});
-
-describe('hn_search_content response budget', () => {
-  const utf8 = new TextEncoder();
-  const bytes = (text: string) => utf8.encode(text).byteLength;
-
-  type WireHit = Record<string, any> & { id: number; text?: string; textTruncated?: boolean };
-
+describe('hn_search_content pages of long bodies', () => {
   /** The link of story 123, which every matched comment below belongs to. */
-  const STORY_URL = 'https://example.com/lisp';
+  const LISP_STORY_URL = 'https://example.com/lisp';
 
-  /** Both surfaces of an assembled result, sized as the caller receives them; `sc` is the wire JSON. */
-  function measure(result: ToolResult) {
-    structured(result);
-    const sc = JSON.parse(JSON.stringify(result.structuredContent)) as Record<string, any> & {
-      hits: WireHit[];
-    };
-    const blocks = result.content.filter(
-      (b): b is { type: 'text'; text: string } => b.type === 'text',
-    );
-    return {
-      sc,
-      text: blocks.map((b) => b.text).join(''),
-      contentBytes: blocks.reduce((sum, b) => sum + bytes(b.text), 0),
-      structuredBytes: bytes(JSON.stringify(result.structuredContent)),
-    };
-  }
+  /** A body of `n` UTF-16 units that matches `lisp` once, at its start. */
+  const lispBody = (n: number) => `lisp ${'macro '.repeat(Math.ceil(n / 6))}`.slice(0, n);
 
   /** A comment hit whose body matched the query, so Algolia repeats it in full as the highlight. */
-  function matchedComment(id: number, text: string) {
+  function lispComment(id: number, text: string) {
     return {
       ...commentHit,
       objectID: String(id),
       comment_text: text,
       parent_id: 123,
-      story_url: STORY_URL,
+      story_url: LISP_STORY_URL,
       _tags: ['comment', 'author_bob', 'story_123'],
       _highlightResult: {
         comment_text: {
-          value: text.replaceAll('lisp', '<em>lisp</em>'),
+          value: text.replace('lisp', '<em>lisp</em>'),
           matchLevel: 'full' as const,
           matchedWords: ['lisp'],
         },
@@ -3557,7 +3753,7 @@ describe('hn_search_content response budget', () => {
   }
 
   /** A story hit whose title matched, with no body. */
-  const titledStory = {
+  const lispStory = {
     ...storyHit,
     objectID: '900',
     title: 'Lisp in Small Pieces',
@@ -3571,253 +3767,409 @@ describe('hn_search_content response budget', () => {
     },
   };
 
-  /** A body of `n` UTF-16 units that matches `lisp` once, at its start, so its highlight runs 9 bytes longer. */
-  const body = (n: number, unit = 'macro ') =>
-    `lisp ${unit.repeat(Math.ceil(n / unit.length))}`.slice(0, n);
-
-  function servePage(hits: unknown[], overrides: Partial<AlgoliaResponse> = {}) {
+  /** Three hits carrying 150,000 bytes of body, served as page 0 of 40 at count 3. */
+  const A = lispBody(90_000);
+  const C = lispBody(60_000);
+  function serveHeavyPage() {
     mockSearch.mockResolvedValue(
       algoliaResponse({
-        hits: hits as AlgoliaResponse['hits'],
-        nbHits: hits.length,
-        nbPages: 1,
-        ...overrides,
+        hits: [lispComment(11, A), lispStory, lispComment(12, C)],
+        nbHits: 120,
+        nbPages: 40,
+        hitsPerPage: 3,
       }),
     );
   }
 
-  it('leaves a page under budget as it was: whole bodies, body highlights, no flags, no budget sentence', async () => {
-    const text = body(28_000);
-    const highlighted = text.replace('lisp', '<em>lisp</em>');
-    servePage([matchedComment(1, text)]);
+  const NEXT_PAGE =
+    'Showing 3 of 120 hits (page 0 of 40). Pass count: 3, page: 1 for more, or keep page: 0 and raise count (max 50).';
 
-    const {
-      sc,
-      text: rendered,
-      contentBytes,
-      structuredBytes,
-    } = measure(await callSearch({ query: 'lisp' }));
+  it('serves view "compact" over long bodies exactly as before, on both surfaces', async () => {
+    serveHeavyPage();
 
-    expect(contentBytes).toBeGreaterThan(56_000);
-    expect(contentBytes).toBeLessThan(BUDGET_BYTES);
-    expect(structuredBytes).toBeLessThan(BUDGET_BYTES);
-    expect(sc.hits).toStrictEqual([
+    const result = await callSearch({ query: 'lisp', count: 3, view: 'compact' });
+
+    expect(JSON.stringify(structured(result))).toBe(
+      JSON.stringify({
+        hits: [
+          {
+            id: 11,
+            type: 'comment',
+            author: 'bob',
+            points: 5,
+            createdAt: '2024-01-02T00:00:00Z',
+            storyTitle: 'Test Story',
+            storyId: 123,
+            parentId: 123,
+            storyUrl: LISP_STORY_URL,
+            highlights: { matchedWords: ['lisp'] },
+          },
+          {
+            id: 900,
+            type: 'story',
+            title: 'Lisp in Small Pieces',
+            url: 'https://example.com',
+            domain: 'example.com',
+            author: 'alice',
+            points: 100,
+            numComments: 50,
+            createdAt: '2024-01-01T00:00:00Z',
+            highlights: { title: '<em>Lisp</em> in Small Pieces', matchedWords: ['lisp'] },
+          },
+          {
+            id: 12,
+            type: 'comment',
+            author: 'bob',
+            points: 5,
+            createdAt: '2024-01-02T00:00:00Z',
+            storyTitle: 'Test Story',
+            storyId: 123,
+            parentId: 123,
+            storyUrl: LISP_STORY_URL,
+            highlights: { matchedWords: ['lisp'] },
+          },
+        ],
+        query: 'lisp',
+        criteria: { sort: 'relevance', count: 3, view: 'compact' },
+        totalHits: 120,
+        page: 0,
+        totalPages: 40,
+        truncated: true,
+        shown: 3,
+        cap: 3,
+        notice: NEXT_PAGE,
+      }),
+    );
+    expect(result.content).toStrictEqual([
       {
-        id: 1,
-        type: 'comment',
-        author: 'bob',
-        points: 5,
-        createdAt: '2024-01-02T00:00:00Z',
-        storyTitle: 'Test Story',
-        storyId: 123,
-        parentId: 123,
-        storyUrl: STORY_URL,
-        text,
-        highlights: { text: highlighted, matchedWords: ['lisp'] },
+        type: 'text',
+        text: [
+          '## "lisp" — search results',
+          '',
+          '### Comment on "Test Story" (story id:123)',
+          'id:11 | type:comment | parent:123 | bob | 5 pts | 2024-01-02T00:00:00Z',
+          LISP_STORY_URL,
+          '',
+          '> match — terms: lisp',
+          '',
+          '### Lisp in Small Pieces (example.com)',
+          'id:900 | type:story | alice | 100 pts | 50 comments | 2024-01-01T00:00:00Z',
+          'https://example.com',
+          '',
+          '> match — title: <em>Lisp</em> in Small Pieces | terms: lisp',
+          '',
+          '### Comment on "Test Story" (story id:123)',
+          'id:12 | type:comment | parent:123 | bob | 5 pts | 2024-01-02T00:00:00Z',
+          LISP_STORY_URL,
+          '',
+          '> match — terms: lisp',
+        ].join('\n'),
+      },
+      {
+        type: 'text',
+        text: [
+          '',
+          '',
+          '**criteria:** sort: relevance | count: 3 | view: compact',
+          '**totalHits:** 120',
+          '**page:** 0',
+          '**totalPages:** 40',
+          '**truncated:** true',
+          '**shown:** 3',
+          '**cap:** 3',
+          `> ${NEXT_PAGE}`,
+        ].join('\n'),
       },
     ]);
-    expect(sc).not.toHaveProperty('highlightsTextOmitted');
-    expect(sc).not.toHaveProperty('notice');
-    expect(rendered).toBe(
-      [
-        '## "lisp" — search results',
-        '',
-        '### Comment on "Test Story" (story id:123)',
-        'id:1 | type:comment | parent:123 | bob | 5 pts | 2024-01-02T00:00:00Z',
-        STORY_URL,
-        `> ${text}`,
-        '',
-        `> match — terms: lisp | body: ${highlighted}`,
-        '',
-        '**criteria:** sort: relevance | count: 30 | view: full',
-        '**totalHits:** 1',
-        '**page:** 0',
-        '**totalPages:** 1',
-      ].join('\n'),
-    );
   });
 
-  it('leaves compact pages unchanged, however long the bodies behind them', async () => {
-    servePage([matchedComment(1, body(200_000)), matchedComment(2, body(90_000))]);
+  it('keeps every hit of a full-view page of long bodies, with page, totalPages, shown, and cap', async () => {
+    serveHeavyPage();
 
-    const { sc, text } = measure(await callSearch({ query: 'lisp', view: 'compact' }));
+    const sc = structured(await callSearch({ query: 'lisp', count: 3 }));
 
-    expect(sc.hits.map((h) => 'text' in h)).toStrictEqual([false, false]);
-    expect(sc.hits.map((h) => h.highlights)).toStrictEqual([
-      { matchedWords: ['lisp'] },
-      { matchedWords: ['lisp'] },
+    expect((sc.hits as Array<{ id: number }>).map((h) => h.id)).toStrictEqual([11, 900, 12]);
+    expect(sc).toMatchObject({
+      criteria: { sort: 'relevance', count: 3, view: 'full' },
+      totalHits: 120,
+      page: 0,
+      totalPages: 40,
+      truncated: true,
+      shown: 3,
+      cap: 3,
+    });
+  });
+
+  it('serves every body and body highlight whole under view "full", however long, on both surfaces', async () => {
+    serveHeavyPage();
+    const highlightedA = A.replace('lisp', '<em>lisp</em>');
+    const highlightedC = C.replace('lisp', '<em>lisp</em>');
+
+    const result = await callSearch({ query: 'lisp', count: 3 });
+    const sc = structured(result);
+
+    /** 150,000 bytes of body, each served twice on each surface: as text and as its highlight. */
+    expect(JSON.stringify(sc).length).toBeGreaterThan(300_000);
+    expect(contentText(result).length).toBeGreaterThan(300_000);
+    expect(JSON.stringify(sc)).toBe(
+      JSON.stringify({
+        hits: [
+          {
+            id: 11,
+            type: 'comment',
+            author: 'bob',
+            points: 5,
+            createdAt: '2024-01-02T00:00:00Z',
+            storyTitle: 'Test Story',
+            storyId: 123,
+            parentId: 123,
+            storyUrl: LISP_STORY_URL,
+            text: A,
+            highlights: { text: highlightedA, matchedWords: ['lisp'] },
+          },
+          {
+            id: 900,
+            type: 'story',
+            title: 'Lisp in Small Pieces',
+            url: 'https://example.com',
+            domain: 'example.com',
+            author: 'alice',
+            points: 100,
+            numComments: 50,
+            createdAt: '2024-01-01T00:00:00Z',
+            highlights: { title: '<em>Lisp</em> in Small Pieces', matchedWords: ['lisp'] },
+          },
+          {
+            id: 12,
+            type: 'comment',
+            author: 'bob',
+            points: 5,
+            createdAt: '2024-01-02T00:00:00Z',
+            storyTitle: 'Test Story',
+            storyId: 123,
+            parentId: 123,
+            storyUrl: LISP_STORY_URL,
+            text: C,
+            highlights: { text: highlightedC, matchedWords: ['lisp'] },
+          },
+        ],
+        query: 'lisp',
+        criteria: { sort: 'relevance', count: 3, view: 'full' },
+        totalHits: 120,
+        page: 0,
+        totalPages: 40,
+        truncated: true,
+        shown: 3,
+        cap: 3,
+        notice: NEXT_PAGE,
+      }),
+    );
+    expect(result.content).toStrictEqual([
+      {
+        type: 'text',
+        text: [
+          '## "lisp" — search results',
+          '',
+          '### Comment on "Test Story" (story id:123)',
+          'id:11 | type:comment | parent:123 | bob | 5 pts | 2024-01-02T00:00:00Z',
+          LISP_STORY_URL,
+          `> ${A}`,
+          '',
+          `> match — terms: lisp | body: ${highlightedA}`,
+          '',
+          '### Lisp in Small Pieces (example.com)',
+          'id:900 | type:story | alice | 100 pts | 50 comments | 2024-01-01T00:00:00Z',
+          'https://example.com',
+          '',
+          '> match — title: <em>Lisp</em> in Small Pieces | terms: lisp',
+          '',
+          '### Comment on "Test Story" (story id:123)',
+          'id:12 | type:comment | parent:123 | bob | 5 pts | 2024-01-02T00:00:00Z',
+          LISP_STORY_URL,
+          `> ${C}`,
+          '',
+          `> match — terms: lisp | body: ${highlightedC}`,
+        ].join('\n'),
+      },
+      {
+        type: 'text',
+        text: [
+          '',
+          '',
+          '**criteria:** sort: relevance | count: 3 | view: full',
+          '**totalHits:** 120',
+          '**page:** 0',
+          '**totalPages:** 40',
+          '**truncated:** true',
+          '**shown:** 3',
+          '**cap:** 3',
+          `> ${NEXT_PAGE}`,
+        ].join('\n'),
+      },
     ]);
-    expect(sc).not.toHaveProperty('highlightsTextOmitted');
-    expect(sc).not.toHaveProperty('notice');
-    expect(text).not.toContain('Text cut short');
   });
 
-  it('drops highlights.text from every hit first, keeping matchedWords, the title highlight, and whole bodies', async () => {
-    const long = body(40_000);
-    const short = body(300);
-    servePage([matchedComment(1, long), titledStory, matchedComment(2, short)]);
-
-    const { sc, text, contentBytes, structuredBytes } = measure(
-      await callSearch({ query: 'lisp' }),
+  it('serves one hit of 300,000 bytes whole, with no notice on its one page', async () => {
+    const huge = lispBody(300_000);
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: [lispComment(5, huge)], nbHits: 1, nbPages: 1 }),
     );
 
-    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(sc.highlightsTextOmitted).toBe(true);
-    expect(sc.hits.map((h) => h.highlights)).toStrictEqual([
-      { matchedWords: ['lisp'] },
-      { title: '<em>Lisp</em> in Small Pieces', matchedWords: ['lisp'] },
-      { matchedWords: ['lisp'] },
+    const result = await callSearch({ query: 'lisp', count: 1 });
+    const highlighted = huge.replace('lisp', '<em>lisp</em>');
+
+    expect(JSON.stringify(structured(result))).toBe(
+      JSON.stringify({
+        hits: [
+          {
+            id: 5,
+            type: 'comment',
+            author: 'bob',
+            points: 5,
+            createdAt: '2024-01-02T00:00:00Z',
+            storyTitle: 'Test Story',
+            storyId: 123,
+            parentId: 123,
+            storyUrl: LISP_STORY_URL,
+            text: huge,
+            highlights: { text: highlighted, matchedWords: ['lisp'] },
+          },
+        ],
+        query: 'lisp',
+        criteria: { sort: 'relevance', count: 1, view: 'full' },
+        totalHits: 1,
+        page: 0,
+        totalPages: 1,
+      }),
+    );
+    expect(contentText(result)).toContain(
+      `\n${LISP_STORY_URL}\n> ${huge}\n\n> match — terms: lisp | body: ${highlighted}\n`,
+    );
+  });
+
+  it('counts an omitted count as 10, so page counts in pages of 10', async () => {
+    const ten = Array.from({ length: 10 }, (_, i) => ({ ...storyHit, objectID: String(i + 1) }));
+    mockSearch.mockResolvedValue(
+      algoliaResponse({ hits: ten, nbHits: 100, nbPages: 10, page: 2, hitsPerPage: 10 }),
+    );
+
+    const result = await callSearch({ query: 'rust', page: 2 });
+    const sc = structured(result);
+
+    expect(mockSearch).toHaveBeenCalledTimes(1);
+    expect(mockSearch).toHaveBeenCalledWith(
+      expect.objectContaining({ count: 10, page: 2 }),
+      expect.anything(),
+    );
+    expect(sc).toMatchObject({
+      criteria: { sort: 'relevance', count: 10, view: 'full' },
+      page: 2,
+      totalPages: 10,
+      truncated: true,
+      shown: 10,
+      cap: 10,
+      notice: 'Showing 10 of 100 hits (page 2 of 10). Pass page: 3 for more.',
+    });
+  });
+
+  it('advertises only the fields a hit and a page carry, and no byte budget', () => {
+    const output = z.toJSONSchema(searchHn.output) as unknown as {
+      properties: { hits: { items: { properties: Record<string, unknown> } } };
+    };
+    const advertised = JSON.stringify([
+      z.toJSONSchema(searchHn.input),
+      output,
+      z.toJSONSchema(z.object(searchHn.enrichment!)),
     ]);
-    expect(sc.hits.map((h) => h.text)).toStrictEqual([long, undefined, short]);
-    expect(sc.hits.some((h) => 'textTruncated' in h)).toBe(false);
-    expect(sc.notice).toBe(HIGHLIGHTS_OMITTED_SENTENCE);
 
-    expect(text).not.toContain('<em>lisp</em>');
-    expect(text).not.toContain('Text cut short');
-    expect(text).toContain(`\n> ${long}\n\n> match — terms: lisp\n\n`);
-    expect(text).toContain('> match — title: <em>Lisp</em> in Small Pieces | terms: lisp');
-    expect(text).toContain('**highlightsTextOmitted:** true');
-    expect(text).toContain(`> ${HIGHLIGHTS_OMITTED_SENTENCE}`);
+    expect(Object.keys(output.properties.hits.items.properties)).toStrictEqual([
+      'id',
+      'type',
+      'title',
+      'url',
+      'domain',
+      'author',
+      'points',
+      'numComments',
+      'createdAt',
+      'storyTitle',
+      'storyId',
+      'parentId',
+      'storyUrl',
+      'text',
+      'highlights',
+    ]);
+    expect(Object.keys(searchHn.enrichment!)).toStrictEqual([
+      'criteria',
+      'totalHits',
+      'totalHitsExact',
+      'page',
+      'totalPages',
+      'reachableHits',
+      'truncated',
+      'shown',
+      'cap',
+      'notice',
+    ]);
+    expect(advertised).not.toMatch(/budget|\bbytes?\b|cut short/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An absent highlight is Algolia's answer, not proof the body lacks the terms
+// ---------------------------------------------------------------------------
+
+describe('hn_search_content highlight absence', () => {
+  /** The advertised `highlights` node of a hit, with its `text` property. */
+  function highlightsSchema() {
+    const output = z.toJSONSchema(searchHn.output) as unknown as {
+      properties: {
+        hits: { items: { properties: { highlights: SchemaNode } } };
+      };
+    };
+    return output.properties.hits.items.properties.highlights;
+  }
+
+  it('reads an absent body highlight as Algolia returning none, not as a body without the terms', () => {
+    expect(highlightsSchema().properties?.text?.description).toBe(
+      'The matched body in full, not a snippet (comment_text or story_text), HTML stripped, with matched terms wrapped in `<em>…</em>` — the same text as `text` plus its markers. A literal `<em>` typed into the body is indistinguishable from a marker. Absent when Algolia returned no highlight for the body, which does not mean the body lacks the query terms: Algolia leaves some bodies that hold every term unhighlighted. Always absent under view "compact", where matchedWords still lists the matched terms.',
+    );
   });
 
-  it('then cuts the longest bodies to one shared limit, the largest that fits, keeping every hit and the paging fields', async () => {
-    const a = body(60_000);
-    const b = body(45_000, 'lisp\nmacro\n\n[1]: x\n');
-    const short = body(500);
-    servePage(
-      [matchedComment(11, a), titledStory, matchedComment(12, b), matchedComment(13, short)],
-      { nbHits: 120, nbPages: 3 },
+  it('reads absent highlights as Algolia returning none for any field', () => {
+    expect(highlightsSchema().description).toBe(
+      'Algolia per-field highlight metadata showing which terms matched and where. Absent when Algolia returned no highlight and no matched terms for any field, which does not mean the hit lacks the query terms: Algolia leaves some hits that hold every term unhighlighted.',
     );
-
-    const { sc, text, contentBytes, structuredBytes } = measure(
-      await callSearch({ query: 'lisp' }),
-    );
-
-    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    /** One byte more for each cut body would not fit: the limit is the largest. */
-    expect(Math.max(contentBytes, structuredBytes)).toBeGreaterThan(BUDGET_BYTES - 64);
-
-    expect(sc.hits.map((h) => h.id)).toStrictEqual([11, 900, 12, 13]);
-    expect(sc).toMatchObject({ page: 0, totalPages: 3, truncated: true, shown: 4, cap: 30 });
-    expect(sc.highlightsTextOmitted).toBe(true);
-    expect(sc.hits.every((h) => h.highlights?.text === undefined)).toBe(true);
-
-    const [cutA, story, cutB, whole] = sc.hits;
-    expect(a.startsWith(cutA!.text!)).toBe(true);
-    expect(b.startsWith(cutB!.text!)).toBe(true);
-    expect(bytes(cutA!.text!)).toBeLessThan(bytes(a));
-    expect(bytes(cutA!.text!)).toBe(bytes(cutB!.text!));
-    expect(bytes(cutA!.text!)).toBeGreaterThan(bytes(short));
-    expect(cutA!.textTruncated).toBe(true);
-    expect(cutB!.textTruncated).toBe(true);
-    expect(whole!.text).toBe(short);
-    expect(whole).not.toHaveProperty('textTruncated');
-    expect(story).not.toHaveProperty('textTruncated');
-
-    expect(sc.notice).toBe(
-      joined(
-        'Showing 4 of 120 hits (page 0 of 3). Pass page: 1 for more, or raise count (max 50).',
-        cutSentence([11, 12]),
-      ),
-    );
-
-    /** content[] carries the same cut prefix, quoted, then the unquoted pointer after a blank line. */
-    expect(text).toContain(
-      `\n${quoteBody(cutA!.text!)}\n\n${cutLine(11)}\n\n> match — terms: lisp\n\n`,
-    );
-    expect(text).toContain(
-      `\n${quoteBody(cutB!.text!)}\n\n${cutLine(12)}\n\n> match — terms: lisp\n\n`,
-    );
-    expect(text).toContain(`\n> ${short}\n\n> match — terms: lisp\n\n`);
-    expect(text).not.toContain(cutLine(13));
-    expect(text).not.toContain(cutLine(900));
   });
 
-  it('cuts a single hit larger than the budget to fit', async () => {
-    const huge = body(300_000);
-    servePage([matchedComment(5, huge)]);
-
-    const { sc, text, contentBytes, structuredBytes } = measure(
-      await callSearch({ query: 'lisp', count: 1 }),
+  it('drops highlights from a full-view hit whose body holds the query but which Algolia left unhighlighted (hit 9997508)', async () => {
+    mockSearch.mockResolvedValue(
+      algoliaResponse({
+        hits: [
+          {
+            ...commentHit,
+            objectID: '9997508',
+            comment_text: 'We moved the queue from Redis to Postgres last year.',
+            _highlightResult: {
+              author: { value: 'bob', matchLevel: 'none' as const, matchedWords: [] },
+              comment_text: {
+                value: 'We moved the queue from Redis to Postgres last year.',
+                matchLevel: 'none' as const,
+                matchedWords: [],
+              },
+              story_title: { value: 'Test Story', matchLevel: 'none' as const, matchedWords: [] },
+            },
+          },
+        ],
+        nbHits: 1,
+        nbPages: 1,
+      }),
     );
 
-    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(Math.max(contentBytes, structuredBytes)).toBeGreaterThan(BUDGET_BYTES - 64);
-    expect(sc.hits[0]!.textTruncated).toBe(true);
-    expect(huge.startsWith(sc.hits[0]!.text!)).toBe(true);
-    expect(sc.notice).toBe(cutSentence([5]));
-    expect(text).toContain(`\n\n${cutLine(5)}\n\n`);
-  });
+    const sc = structured(await callSearch({ query: 'postgres', tags: 'comment' }));
+    const [hit] = sc.hits as Array<Record<string, unknown>>;
 
-  it('cuts on a code-point boundary, identically on both surfaces', async () => {
-    const emoji = `lisp ${'😀é'.repeat(25_000)}`;
-    servePage([matchedComment(6, emoji)]);
-
-    const { sc, text, contentBytes, structuredBytes } = measure(
-      await callSearch({ query: 'lisp' }),
-    );
-    const cut = sc.hits[0]!.text!;
-
-    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(cut.length).toBeLessThan(emoji.length);
-    expect(emoji.startsWith(cut)).toBe(true);
-    expect(cut).not.toMatch(/[\uD800-\uDBFF]$/);
-    expect(text).toContain(`\n> ${cut}\n\n${cutLine(6)}`);
-  });
-
-  it('goes straight to cutting when no hit carries a body highlight, and claims no omission', async () => {
-    servePage([{ ...commentHit, objectID: '8', comment_text: body(100_000) }]);
-
-    const { sc, contentBytes, structuredBytes } = measure(
-      await callSearch({ author: 'bob', tags: 'comment' }),
-    );
-
-    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(sc).not.toHaveProperty('highlightsTextOmitted');
-    expect(sc.hits[0]!.textTruncated).toBe(true);
-    expect(sc.notice).toBe(cutSentence([8], false));
-  });
-
-  it('measures parentId and storyUrl on both surfaces, and neither step cuts or drops them', async () => {
-    /**
-     * Ten 3,000-byte bodies fit with room to spare on their own; ten copies of a
-     * 4,000-byte story link push the page over the budget even once step 1 has
-     * dropped the body highlights, so step 2 must cut the bodies around them.
-     */
-    const longUrl = `https://example.com/lisp?ref=${'a'.repeat(3_971)}`;
-    const ids = Array.from({ length: 10 }, (_, i) => 31 + i);
-    servePage(
-      ids.map((id) => ({
-        ...matchedComment(id, body(3_000)),
-        parent_id: id - 1,
-        story_url: longUrl,
-      })),
-    );
-
-    const { sc, text, contentBytes, structuredBytes } = measure(
-      await callSearch({ query: 'lisp' }),
-    );
-
-    expect(longUrl).toHaveLength(4_000);
-    expect(contentBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    expect(structuredBytes).toBeLessThanOrEqual(BUDGET_BYTES);
-    /** The links are counted once each, not missed or double-counted: the cut is the largest that fits. */
-    expect(Math.max(contentBytes, structuredBytes)).toBeGreaterThan(BUDGET_BYTES - 64);
-
-    expect(sc.highlightsTextOmitted).toBe(true);
-    expect(sc.notice).toBe(cutSentence(ids));
-    expect(sc.hits.map((h) => [h.id, h.parentId, h.storyUrl, h.textTruncated])).toStrictEqual(
-      ids.map((id) => [id, id - 1, longUrl, true]),
-    );
-    for (const id of ids) {
-      expect(text).toContain(
-        `id:${id} | type:comment | parent:${id - 1} | bob | 5 pts | 2024-01-02T00:00:00Z\n${longUrl}\n> lisp`,
-      );
-    }
+    expect(hit!.text).toBe('We moved the queue from Redis to Postgres last year.');
+    expect(hit).not.toHaveProperty('highlights');
   });
 });

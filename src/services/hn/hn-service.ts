@@ -303,24 +303,103 @@ export type ItemSlot =
 type FailedSlot = Extract<ItemSlot, { kind: 'failed' }>;
 
 /**
- * Settle one page of a batch for the paged tools: the live items in input
- * order, and the IDs whose fetch failed. Dead, deleted, and absent slots drop
- * out of both. When every slot failed, throws the page's dominant cause
- * ({@link pageFailure}), since an empty success would read as a page with
- * nothing on it.
+ * The slots of a page that answered but hold nothing to show, by kind:
+ * `deleted` (an item flagged both deleted and dead counts here, once),
+ * `dead`, and `missing` (HN answered `null`). Failed fetches are never counted.
  */
-export function settlePage(slots: readonly ItemSlot[]): { items: HnItem[]; failedIds: number[] } {
-  const items: HnItem[] = [];
+export interface OmittedCounts {
+  dead: number;
+  deleted: number;
+  missing: number;
+}
+
+/** One settled page: see {@link settlePage}. */
+export interface SettledPage {
+  /** The IDs whose fetch failed, in input order. */
+  failedIds: number[];
+  /** The live items, in input order: `live` without the slot indexes. */
+  items: HnItem[];
+  /**
+   * Each live item, in input order, with `slot`, its index in the slots
+   * passed: its position in the requested window, counted before anything
+   * dropped.
+   */
+  live: { item: HnItem; slot: number }[];
+  omitted: OmittedCounts;
+}
+
+/**
+ * Settle one page of a batch for the paged tools: the live items in input
+ * order with their slot indexes, the IDs whose fetch failed, and how many
+ * dead, deleted, and absent slots dropped out, by kind. Every slot is exactly
+ * one of live, omitted, or failed. When every slot failed, throws the page's
+ * dominant cause ({@link pageFailure}), since an empty success would read as a
+ * page with nothing on it.
+ */
+export function settlePage(slots: readonly ItemSlot[]): SettledPage {
+  const live: SettledPage['live'] = [];
   const failed: FailedSlot[] = [];
-  for (const slot of slots) {
+  const omitted: OmittedCounts = { deleted: 0, dead: 0, missing: 0 };
+  for (const [slotIndex, slot] of slots.entries()) {
     if (slot.kind === 'failed') {
       failed.push(slot);
-    } else if (slot.kind === 'item' && !slot.item.deleted && !slot.item.dead) {
-      items.push(slot.item);
+    } else if (slot.kind === 'absent') {
+      omitted.missing++;
+    } else if (slot.item.deleted) {
+      omitted.deleted++;
+    } else if (slot.item.dead) {
+      omitted.dead++;
+    } else {
+      live.push({ item: slot.item, slot: slotIndex });
     }
   }
   if (failed.length > 0 && failed.length === slots.length) throw pageFailure(failed);
-  return { items, failedIds: failed.map((slot) => slot.id) };
+  return {
+    items: live.map(({ item }) => item),
+    live,
+    failedIds: failed.map((slot) => slot.id),
+    omitted,
+  };
+}
+
+/**
+ * The words for a page's {@link OmittedCounts}: `total`, and `kinds` listing
+ * each nonzero kind as `{n} {kind}` in the order deleted, dead, missing, joined
+ * by `, ` (`2 deleted, 1 dead`). Undefined when nothing was omitted.
+ */
+export function describeOmitted(
+  omitted: OmittedCounts,
+): { total: number; kinds: string } | undefined {
+  const counts = [
+    [omitted.deleted, 'deleted'],
+    [omitted.dead, 'dead'],
+    [omitted.missing, 'missing'],
+  ] as const;
+  const nonzero = counts.filter(([n]) => n > 0);
+  if (nonzero.length === 0) return;
+  return {
+    total: nonzero.reduce((sum, [n]) => sum + n, 0),
+    kinds: nonzero.map(([n, kind]) => `${n} ${kind}`).join(', '),
+  };
+}
+
+/**
+ * The sentence a paged tool adds when a page dropped items:
+ * `{total} of the {slotCount} {unit}(s) {place} {is|are} omitted: {kinds}.`
+ * Undefined when nothing was omitted. `unit` is singular; `place` names the
+ * window (`on this page`).
+ */
+export function omittedSentence(
+  omitted: OmittedCounts,
+  slotCount: number,
+  unit: string,
+  place: string,
+): string | undefined {
+  const dropped = describeOmitted(omitted);
+  return (
+    dropped &&
+    `${dropped.total} of the ${slotCount} ${unit}${slotCount === 1 ? '' : 's'} ${place} ${dropped.total === 1 ? 'is' : 'are'} omitted: ${dropped.kinds}.`
+  );
 }
 
 /** The cause of a fetch the upstream never answered. */

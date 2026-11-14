@@ -6,16 +6,8 @@
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
-import { escapeInline, quoteBody } from '@/mcp-server/tools/markdown-escape.js';
-import {
-  byteLength,
-  enrichmentBytes,
-  fitsBudget,
-  longestFittingPrefix,
-  RESPONSE_BUDGET_TEXT,
-  type ResponseBytes,
-} from '@/mcp-server/tools/response-budget.js';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeInline, escapeQuoted, quoteBody } from '@/mcp-server/tools/markdown-escape.js';
 import { servedAtCap } from '@/mcp-server/tools/served-at-cap.js';
 import {
   type CursorStory,
@@ -60,7 +52,11 @@ const DEPTH_CEILING = 100;
  */
 const OMITTED_IDS_NAMED = 10;
 
-/** Most comments one batch fetches — bounds the fetches a size cut leaves unused. */
+/**
+ * Most comments one batch fetches. The walk checks its stops — a rate limit,
+ * the item ceiling, the time budget — between batches, so this bounds the
+ * fetches sent after one is reached.
+ */
 const FETCH_CHUNK = 25;
 
 /**
@@ -122,6 +118,11 @@ const ItemSchema = z
       .describe(
         "HN's count of live comments in the thread; dead and deleted comments are not counted.",
       ),
+    childCount: z
+      .number()
+      .describe(
+        "Number of direct replies to the root, dead and deleted ones included (may exceed what was resolved). A poll's options are not replies.",
+      ),
     parent: z
       .number()
       .optional()
@@ -133,6 +134,18 @@ const ItemSchema = z
       .optional()
       .describe(
         'For a comment root, the ID of the story or poll its discussion belongs to — pass it as itemId for the whole thread, or as storyId to hn_search_content. Absent for other roots, and when the story could not be found (notice says why).',
+      ),
+    storyTitle: z
+      .string()
+      .optional()
+      .describe(
+        'For a comment root, the title of the story or poll at storyId. Absent for other roots, when storyId is absent, when that story has no title (deleted, for example), and when it could not be loaded.',
+      ),
+    storyUrl: z
+      .string()
+      .optional()
+      .describe(
+        "External link URL of a comment root's story. Absent when that story is a text post with no link or could not be loaded, and on every root that is not a comment.",
       ),
     poll: z.number().optional().describe('For a poll-option root, the ID of its poll.'),
     parts: z.array(z.number()).optional().describe('For a poll root, its option IDs in HN order.'),
@@ -186,8 +199,7 @@ type ThreadOption = z.infer<typeof OptionSchema>;
 type ThreadComment = z.infer<typeof CommentSchema>;
 
 // ---------------------------------------------------------------------------
-// Rendering — format() and the response budget share these, so the budget
-// measures exactly the text format() produces.
+// Rendering
 // ---------------------------------------------------------------------------
 
 const TYPE_LABELS: Record<string, string> = {
@@ -231,18 +243,24 @@ function renderRoot(item: ThreadItem): string {
     `id:${item.id}`,
     `type:${item.type}`,
     item.parent != null ? `parent:${item.parent}` : null,
-    item.storyId != null ? `story:${item.storyId}` : null,
+    item.storyId == null
+      ? null
+      : item.storyTitle != null
+        ? `story:"${escapeQuoted(item.storyTitle)}"#${item.storyId}`
+        : `story:${item.storyId}`,
     item.poll != null ? `poll:${item.poll}` : null,
     item.parts?.length ? `parts:${item.parts.join(',')}` : null,
     item.score != null ? `${item.score} pts` : null,
     item.by ? `by ${item.by}` : null,
     item.descendants != null ? `${item.descendants} comments` : null,
+    item.childCount > 0 ? `${item.childCount} replies` : null,
     date,
   ]
     .filter(Boolean)
     .join(' | ');
   const lines = [`## ${rootHeading(item)}\n${meta}`];
   if (item.url) lines.push(item.url);
+  if (item.storyUrl) lines.push(item.storyUrl);
   if (item.text) lines.push(quoteBody(item.text));
   if (item.options?.length) {
     lines.push(`\n**Options:**\n${item.options.map(renderOption).join('\n')}`);
@@ -274,22 +292,6 @@ function renderThread(item: ThreadItem, comments: readonly ThreadComment[]): str
   return parts.join('\n');
 }
 
-/** Bytes format() adds before the first comment, and between two comments. */
-const DIVIDER_BYTES = byteLength(`\n${COMMENTS_DIVIDER}\n`);
-const SEPARATOR_BYTES = byteLength(COMMENT_SEPARATOR);
-
-/** The content[] trailer's string fields render here, so the response budget sizes them as sent. */
-const codeSpan = (value: string | undefined) =>
-  markdown()
-    .inlineCode(value ?? '')
-    .build();
-
-const threadTrailer = {
-  failedIds: { render: (ids?: number[]) => `**Failed to load:** ${(ids ?? []).join(', ')}` },
-  truncationReason: { render: (reason?: string) => `**truncationReason:** ${codeSpan(reason)}` },
-  nextCursor: { render: (cursor?: string) => `**nextCursor:** ${codeSpan(cursor)}` },
-};
-
 // ---------------------------------------------------------------------------
 // Traversal
 // ---------------------------------------------------------------------------
@@ -298,46 +300,11 @@ const threadTrailer = {
  * Why a walk stopped with comments still to read. `examined` is the per-call
  * item ceiling; `time` is the call's time budget.
  */
-type WalkStop = 'count' | 'examined' | 'size' | 'rate_limited' | 'time';
+type WalkStop = 'count' | 'examined' | 'rate_limited' | 'time';
 
-/** How far a walk had read at one point: enough to serve the page that ends there. */
-interface WalkMark {
-  /** Comments accepted. */
-  comments: number;
-  failed: number;
-  /** The next entry to visit, at `level`; every level above is read. */
-  head: number;
-  /** Entries queued per level; later ones were queued after this point. */
-  lengths: number[];
-  level: number;
-  liveDepthCut: boolean;
-  omittedDead: number;
-  omittedDeleted: number;
-  omittedDepthCut: number;
-  /** The page's own size on each surface — root block and comments, no enrichment. */
-  pageBytes: ResponseBytes;
-  rateLimit: McpError | undefined;
-  timeCut: boolean;
-}
-
+/** What a walk read, and why it stopped. */
 interface WalkResult {
   /** Every comment accepted, in traversal order. */
-  comments: ThreadComment[];
-  /** Where the walk stopped. */
-  end: WalkMark;
-  /** Every entry whose fetch failed, in traversal order. */
-  failed: FrontierEntry[];
-  /** Each depth's queue, appended to as comments are visited. */
-  levels: FrontierEntry[][];
-  /** `marks[i]` is the walk just after accepting `comments[i]`. */
-  marks: WalkMark[];
-  /** Every dead or deleted comment whose replies the depth limit cut, in traversal order. */
-  omittedDepthCut: number[];
-  stop: WalkStop | undefined;
-}
-
-/** A page a walk can serve: what it read up to one of its marks, and why it stops there. */
-interface WalkPage {
   comments: ThreadComment[];
   /** Entries whose fetch failed this call, in traversal order. */
   failed: FrontierEntry[];
@@ -351,48 +318,10 @@ interface WalkPage {
    * the notice can name them.
    */
   omittedDepthCut: number[];
-  pageBytes: ResponseBytes;
   rateLimit: McpError | undefined;
   /** Entries not yet visited, in traversal order. */
   rest: FrontierEntry[];
   stop: WalkStop | undefined;
-}
-
-/**
- * The page `walk` serves at `index`: `marks[index]`, or its end at
- * `marks.length`. The end stops as the walk did. A page cut back to an earlier
- * mark leaves everything after it unvisited, so it stops on `size` — or on
- * `rate_limited` when a rate limit had already failed a fetch by then.
- */
-function pageAt(walk: WalkResult, index: number): WalkPage {
-  const mark = walk.marks[index] ?? walk.end;
-  const rest = walk.levels.flatMap((queue, level) =>
-    level < mark.level
-      ? []
-      : queue.slice(level === mark.level ? mark.head : 0, mark.lengths[level]),
-  );
-  const stop =
-    mark === walk.end
-      ? walk.stop
-      : mark.rateLimit
-        ? 'rate_limited'
-        : rest.length > 0
-          ? 'size'
-          : mark.timeCut
-            ? 'time'
-            : undefined;
-  return {
-    comments: walk.comments.slice(0, mark.comments),
-    failed: walk.failed.slice(0, mark.failed),
-    liveDepthCut: mark.liveDepthCut,
-    omittedDead: mark.omittedDead,
-    omittedDeleted: mark.omittedDeleted,
-    omittedDepthCut: walk.omittedDepthCut.slice(0, mark.omittedDepthCut),
-    pageBytes: mark.pageBytes,
-    rateLimit: mark.rateLimit,
-    rest,
-    stop,
-  };
 }
 
 /**
@@ -401,16 +330,13 @@ function pageAt(walk: WalkResult, index: number): WalkPage {
  * than the comments still wanted, so filtered and failed items never push a
  * later sibling out of the page — anything unvisited stays queued.
  *
- * Stops on `maxComments`, the item ceiling, the response budget, a rate limit,
- * or the call's time budget. The budget check here sizes the page alone, on
- * both surfaces, and keeps the first comment whatever its size; the enrichment
- * is known only once the walk stops, so the handler fits it by serving the page
- * at an earlier mark. After a rate limit nothing more is fetched: every level
- * below would pay its own retry ladder against a throttled upstream. No batch
- * is sent with less than one request timeout left before `deadline`, so a fetch
- * the deadline cuts has always had a full attempt to answer; an entry held back
- * stays queued. A batch the deadline cut, the last one included, stops the walk
- * on `time`, so its failed entries ride a cursor.
+ * Stops on `maxComments`, the item ceiling, a rate limit, or the call's time
+ * budget. After a rate limit nothing more is fetched: every level below would
+ * pay its own retry ladder against a throttled upstream. No batch is sent with
+ * less than one request timeout left before `deadline`, so a fetch the deadline
+ * cuts has always had a full attempt to answer; an entry held back stays
+ * queued. A batch the deadline cut, the last one included, stops the walk on
+ * `time`, so its failed entries ride a cursor.
  */
 async function walkThread(
   hn: HnService,
@@ -422,8 +348,6 @@ async function walkThread(
     maxComments: number;
     /** The story's author, whose replies are marked `isOp`. */
     opAuthor: string | undefined;
-    /** The page before any comment: the root block, and the JSON of the root with no comments. */
-    page: ResponseBytes;
     rateLimit: McpError | undefined;
     seed: readonly FrontierEntry[];
   },
@@ -433,7 +357,7 @@ async function walkThread(
 
   const comments: ThreadComment[] = [];
   const failed: FrontierEntry[] = [];
-  let { page, rateLimit } = args;
+  let { rateLimit } = args;
   let omittedDeleted = 0;
   let omittedDead = 0;
   let liveDepthCut = false;
@@ -444,21 +368,6 @@ async function walkThread(
   /** The level being read, and its next entry; every level above is read. */
   let atLevel = 0;
   let atHead = 0;
-  const marks: WalkMark[] = [];
-  const mark = (): WalkMark => ({
-    comments: comments.length,
-    failed: failed.length,
-    head: atHead,
-    lengths: levels.map((queue) => queue.length),
-    level: atLevel,
-    liveDepthCut,
-    omittedDead,
-    omittedDeleted,
-    omittedDepthCut: omittedDepthCut.length,
-    pageBytes: page,
-    rateLimit,
-    timeCut,
-  });
 
   /** Queue a visited comment's replies one level down; true when the depth limit cut them instead. */
   const enqueueKids = (c: HnItem, level: number): boolean => {
@@ -479,10 +388,9 @@ async function walkThread(
       else if (args.deadline - Date.now() < REQUEST_TIMEOUT_MS) stop = 'time';
       if (stop) break walk;
 
-      const head = atHead;
       const batch = queue.slice(
-        head,
-        head +
+        atHead,
+        atHead +
           Math.min(args.maxComments - comments.length, FETCH_CHUNK, MAX_ITEMS_EXAMINED - examined),
       );
       examined += batch.length;
@@ -498,7 +406,7 @@ async function walkThread(
         if (!slot) break;
         if (slot.kind === 'item' && !slot.item.deleted && !slot.item.dead) {
           const c = slot.item;
-          const comment: ThreadComment = {
+          comments.push({
             id: c.id,
             by: c.by,
             time: c.time,
@@ -507,26 +415,8 @@ async function walkThread(
             parentId: entry.parentId,
             childCount: c.kids?.length ?? 0,
             ...(c.by != null && c.by === args.opAuthor && { isOp: true as const }),
-          };
-          /** The comment's rendered block and its JSON array element, each with its separator. */
-          const first = comments.length === 0;
-          const grown: ResponseBytes = {
-            contentBytes:
-              page.contentBytes +
-              byteLength(renderComment(comment)) +
-              (first ? DIVIDER_BYTES : SEPARATOR_BYTES),
-            structuredBytes:
-              page.structuredBytes + byteLength(JSON.stringify(comment)) + (first ? 0 : 1),
-          };
-          if (!first && !fitsBudget(grown)) {
-            stop = 'size';
-            break;
-          }
-          comments.push(comment);
-          page = grown;
+          });
           if (enqueueKids(c, level)) liveDepthCut = true;
-          atHead = head + i + 1;
-          marks.push(mark());
         } else if (slot.kind === 'failed') {
           failed.push(entry);
           if (isRateLimited(slot.error)) rateLimit ??= slot.error;
@@ -539,8 +429,7 @@ async function walkThread(
         }
         visited++;
       }
-      atHead = head + visited;
-      if (stop) break walk;
+      atHead += visited;
     }
   }
 
@@ -548,7 +437,20 @@ async function walkThread(
   if (!stop && rateLimit && failed.length > 0) stop = 'rate_limited';
   else if (!stop && timeCut) stop = 'time';
 
-  return { comments, end: mark(), failed, levels, marks, omittedDepthCut, stop };
+  const rest = levels.flatMap((queue, level) =>
+    level < atLevel ? [] : queue.slice(level === atLevel ? atHead : 0),
+  );
+  return {
+    comments,
+    failed,
+    liveDepthCut,
+    omittedDead,
+    omittedDeleted,
+    omittedDepthCut,
+    rateLimit,
+    rest,
+    stop,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -564,8 +466,20 @@ interface StoryLookup {
   /** A 429 that ended the lookup; the traversal then fetches nothing more. */
   rateLimit?: McpError;
   story?: CursorStory;
+  /** The story's title and link as `item` carries them; never in the cursor. */
+  storyTitle?: string;
+  storyUrl?: string;
   /** The lookup ended on a failure a later call may get past. */
   transient?: true;
+}
+
+/** A story item's title and link, decoded and keyed only when HN sets them. */
+function storyTitleAndUrl(story: HnItem): Pick<StoryLookup, 'storyTitle' | 'storyUrl'> {
+  const storyUrl = normalizeUrl(story.url);
+  return {
+    ...(story.title && { storyTitle: decodeHtmlEntities(story.title) }),
+    ...(storyUrl && { storyUrl }),
+  };
 }
 
 /**
@@ -605,12 +519,37 @@ async function findStory(
     }
     if (slot?.kind !== 'item') return { hops, gap: `ancestor ${next} does not exist` };
     if (slot.item.type !== 'comment') {
-      return { hops, story: { id: slot.item.id, by: slot.item.by } };
+      return {
+        hops,
+        story: { id: slot.item.id, by: slot.item.by },
+        ...storyTitleAndUrl(slot.item),
+      };
     }
     below = `ancestor ${slot.item.id}`;
     next = slot.item.parent;
   }
   return { hops, gap: `HN lists no parent for ${below}` };
+}
+
+/**
+ * Fetch the title and link of the story a cursor names, the one request a
+ * continuation page spends on it, bounded by the lookup's `deadline`. The
+ * story's ID and author stay the cursor's, so a refetch never re-keys OP marks.
+ * A missing story or a failed fetch leaves the title and link out; a 429 ends
+ * the page as one during the lookup does; a cancellation propagates.
+ */
+async function reloadStory(
+  hn: HnService,
+  ctx: Context,
+  story: CursorStory,
+  deadline: number,
+): Promise<StoryLookup> {
+  const [slot] = await hn.fetchItems([story.id], ctx, deadline);
+  if (slot?.kind === 'item') return { hops: 0, story, ...storyTitleAndUrl(slot.item) };
+  if (slot?.kind === 'failed' && isRateLimited(slot.error)) {
+    return { hops: 0, story, rateLimit: slot.error };
+  }
+  return { hops: 0, story };
 }
 
 function projectOption(option: HnItem): ThreadOption {
@@ -730,9 +669,9 @@ export const getThread = tool('hn_get_thread', {
       .int()
       .min(1)
       .max(MAX_COMMENTS_CEILING)
-      .default(50)
+      .default(25)
       .describe(
-        `Maximum comments in one response, across all depth levels, at most ${MAX_COMMENTS_CAP} per call. A larger value is served at ${MAX_COMMENTS_CAP}, and nextCursor continues from there. Highest-ranked top-level comments resolve first; replies fill in only after the level above is exhausted. A response also stops between comments to stay within a fixed ${RESPONSE_BUDGET_TEXT}-byte budget on each surface — all content[] text, nextCursor and the rest of the trailer included, and the structuredContent JSON — though its first comment is always returned whole. When either limit stops the traversal, nextCursor continues it.`,
+        `Maximum comments in one response, across all depth levels, at most ${MAX_COMMENTS_CAP} per call. A larger value is served at ${MAX_COMMENTS_CAP}, and nextCursor continues from there. Highest-ranked top-level comments resolve first; replies fill in only after the level above is exhausted. When this limit stops the traversal, nextCursor continues it.`,
       ),
     cursor: z
       .string()
@@ -764,19 +703,19 @@ export const getThread = tool('hn_get_thread', {
       .boolean()
       .optional()
       .describe(
-        'True when comments remain unread: reachable through nextCursor (truncationReason count, size, rate_limited, or time), or below the depth limit (depth). Absent on a terminal page — including a thread that loads in full at exactly maxComments.',
+        'True when comments remain unread: reachable through nextCursor (truncationReason count, rate_limited, or time), or below the depth limit (depth). Absent on a terminal page — including a thread that loads in full at exactly maxComments.',
       ),
     truncationReason: z
-      .enum(['count', 'size', 'depth', 'rate_limited', 'time'])
+      .enum(['count', 'depth', 'rate_limited', 'time'])
       .optional()
       .describe(
-        `Why the traversal stopped short: count = maxComments (or the 1,000-item ceiling per call) was reached; size = the page stopped between comments to keep content[] and structuredContent each within the ${RESPONSE_BUDGET_TEXT}-byte response budget; rate_limited = the HN API throttled the fetches; time = the call's ${CALL_BUDGET_MS / 1000}-second time budget ran short because the HN API answered slowly or not at all; depth = replies lie below the depth limit, which nextCursor does not reach — raise depth or pass a comment id as itemId. When a cursor reason and a depth cut both apply, the cursor reason is reported.`,
+        `Why the traversal stopped short: count = maxComments (or the 1,000-item ceiling per call) was reached; rate_limited = the HN API throttled the fetches; time = the call's ${CALL_BUDGET_MS / 1000}-second time budget ran short because the HN API answered slowly or not at all; depth = replies lie below the depth limit, which nextCursor does not reach — raise depth or pass a comment id as itemId. When a cursor reason and a depth cut both apply, the cursor reason is reported.`,
       ),
     nextCursor: z
       .string()
       .optional()
       .describe(
-        'Pass as cursor, with the same itemId, to continue from the next unseen comment. Present when truncationReason is count, size, rate_limited, or time; absent on the last page.',
+        'Pass as cursor, with the same itemId, to continue from the next unseen comment. Present when truncationReason is count, rate_limited, or time; absent on the last page.',
       ),
     shown: z.number().optional().describe('Number of comments returned.'),
     cap: z
@@ -795,10 +734,12 @@ export const getThread = tool('hn_get_thread', {
       .string()
       .optional()
       .describe(
-        'Traversal context: counts of deleted/dead comments dropped, the IDs that failed to load and how to retry them, then what stopped the traversal and how to continue — nextCursor for a count, size, rate-limit, or time-budget stop, or a larger depth or a comment id as itemId for a depth cut — noting when the maxComments or depth that stopped it was served at its per-call cap. Dead or deleted comments whose replies the depth limit cut are named by id, to pass as itemId, on the page that reaches them, since comments omits them. Absent when nothing was dropped, failed, or left unread.',
+        'Traversal context: counts of deleted/dead comments dropped, the IDs that failed to load and how to retry them, then what stopped the traversal and how to continue — nextCursor for a count, rate-limit, or time-budget stop, or a larger depth or a comment id as itemId for a depth cut — noting when the maxComments or depth that stopped it was served at its per-call cap. Dead or deleted comments whose replies the depth limit cut are named by id, to pass as itemId, on the page that reaches them, since comments omits them. Absent when nothing was dropped, failed, or left unread.',
       ),
   },
-  enrichmentTrailer: threadTrailer,
+  enrichmentTrailer: {
+    failedIds: { render: (ids?: number[]) => `**Failed to load:** ${(ids ?? []).join(', ')}` },
+  },
 
   async handler(input, ctx) {
     const startedAt = Date.now();
@@ -828,15 +769,16 @@ export const getThread = tool('hn_get_thread', {
 
     /**
      * OP on a comment root means the author of the story above it. A cursor
-     * carries the story an earlier page found; one issued before it was found
-     * looks again.
+     * carries the story an earlier page found, and that story alone is fetched
+     * again for its title and link; one issued before it was found looks again.
      */
+    const lookupDeadline = startedAt + STORY_LOOKUP_DEADLINE_MS;
     const lookup: StoryLookup | undefined =
       root.type !== 'comment'
         ? undefined
         : resume?.story
-          ? { hops: 0, story: resume.story }
-          : await findStory(hn, ctx, root, startedAt + STORY_LOOKUP_DEADLINE_MS);
+          ? await reloadStory(hn, ctx, resume.story, lookupDeadline)
+          : await findStory(hn, ctx, root, lookupDeadline);
 
     const options: ThreadOption[] = [];
     const failedOptionIds: number[] = [];
@@ -865,8 +807,11 @@ export const getThread = tool('hn_get_thread', {
       text: root.text ? stripHtml(root.text) : undefined,
       score: root.score,
       descendants: root.descendants,
+      childCount: root.kids?.length ?? 0,
       ...(root.parent != null && { parent: root.parent }),
       ...(lookup?.story && { storyId: lookup.story.id }),
+      ...(lookup?.storyTitle != null && { storyTitle: lookup.storyTitle }),
+      ...(lookup?.storyUrl != null && { storyUrl: lookup.storyUrl }),
       ...(root.poll != null && { poll: root.poll }),
       ...(root.parts && root.parts.length > 0 && { parts: root.parts }),
       ...(root.deleted && { deleted: true as const }),
@@ -884,220 +829,180 @@ export const getThread = tool('hn_get_thread', {
       depth,
       maxComments,
       opAuthor: lookup ? lookup.story?.by : root.by,
-      page: {
-        contentBytes: byteLength(renderRoot(item)),
-        structuredBytes: byteLength(JSON.stringify({ item, comments: [] })),
-      },
       rateLimit: optionRateLimit ?? lookup?.rateLimit,
       seed,
     });
+    const { comments, stop } = traversal;
     const totalAvailable = root.descendants;
+    const totalLoaded = comments.length;
+    /** Comments returned across every page so far, this one included. */
+    const loadedSoFar = (resume?.offset ?? 0) + totalLoaded;
+    const failedCommentIds = traversal.failed.map((entry) => entry.id);
+    const failedIds = [...failedCommentIds, ...failedOptionIds];
 
-    /** The enrichment serving `walk`, every field in the order it is written. */
-    const enrichmentFor = (walk: WalkPage) => {
-      const { comments, stop } = walk;
-      const totalLoaded = comments.length;
-      /** Comments returned across every page so far, this one included. */
-      const loadedSoFar = (resume?.offset ?? 0) + totalLoaded;
-      const failedCommentIds = walk.failed.map((entry) => entry.id);
-      const failedIds = [...failedCommentIds, ...failedOptionIds];
+    const omittedCut = traversal.omittedDepthCut;
+    /** Depth 0 walks nothing, so the root's own replies are what its limit leaves unread. */
+    const depthCut =
+      (depth === 0 && item.childCount > 0) ||
+      traversal.liveDepthCut ||
+      omittedCut.length > 0 ||
+      resume?.depthCut === true;
+    /** Failed comments lead the cursor, so continuing retries them rather than skipping them. */
+    const nextCursor =
+      stop &&
+      encodeThreadCursor({
+        offset: loadedSoFar,
+        itemId: input.itemId,
+        depth,
+        frontier: [...traversal.failed, ...traversal.rest],
+        depthCut,
+        ...(lookup?.story && { story: lookup.story }),
+      });
 
-      const omittedCut = walk.omittedDepthCut;
-      const depthCut = walk.liveDepthCut || omittedCut.length > 0 || resume?.depthCut === true;
-      /** Failed comments lead the cursor, so continuing retries them rather than skipping them. */
-      const nextCursor =
-        stop &&
-        encodeThreadCursor({
-          offset: loadedSoFar,
-          itemId: input.itemId,
-          depth,
-          frontier: [...walk.failed, ...walk.rest],
-          depthCut,
-          ...(lookup?.story && { story: lookup.story }),
-        });
+    const noticeParts: string[] = [];
+    if (lookup?.gap) {
+      const retry = !lookup.transient
+        ? ''
+        : nextCursor
+          ? ' Continuing with nextCursor retries the lookup.'
+          : lookup.rateLimit
+            ? ` Wait ${waitFor(lookup.rateLimit)}, then call again.`
+            : ' Call again to retry.';
+      noticeParts.push(
+        `Could not find the story this comment belongs to: ${lookup.gap}. storyId is absent and replies by the story's author are not marked isOp.${retry}`,
+      );
+    } else if (lookup?.story && !lookup.story.by) {
+      noticeParts.push(
+        `The story this comment belongs to (id ${lookup.story.id}) has no author on record, so no reply is marked isOp.`,
+      );
+    }
+    if (traversal.omittedDeleted > 0 || traversal.omittedDead > 0) {
+      noticeParts.push(
+        `${traversal.omittedDeleted} deleted, ${traversal.omittedDead} dead — omitted from this view.`,
+      );
+    }
+    if (failedCommentIds.length > 0) {
+      const n = failedCommentIds.length;
+      const retry = nextCursor
+        ? `nextCursor carries ${plural(n, 'it', 'them')}, so continuing retries ${plural(n, 'it', 'them')}; or pass an id as itemId to fetch that comment and its replies.`
+        : 'Call again to retry, or pass an id as itemId to fetch that comment and its replies.';
+      noticeParts.push(
+        `Could not fetch ${n} ${plural(n, 'comment')} (${plural(n, 'id')} ${failedCommentIds.join(', ')}); ${plural(n, 'its', 'their')} replies were not reached either. ${retry}`,
+      );
+    }
+    if (failedOptionIds.length > 0) {
+      const n = failedOptionIds.length;
+      noticeParts.push(
+        `Could not fetch ${n} poll ${plural(n, 'option')} (${plural(n, 'id')} ${failedOptionIds.join(', ')}). Call again to retry.`,
+      );
+    }
 
-      const noticeParts: string[] = [];
-      if (lookup?.gap) {
-        const retry = !lookup.transient
-          ? ''
-          : nextCursor
-            ? ' Continuing with nextCursor retries the lookup.'
-            : lookup.rateLimit
-              ? ` Wait ${waitFor(lookup.rateLimit)}, then call again.`
-              : ' Call again to retry.';
+    const loaded =
+      totalAvailable != null ? ` with ${loadedSoFar}/${totalAvailable} comments loaded` : '';
+    const resumeHint = 'Pass nextCursor as cursor, with the same itemId, to continue.';
+    /** Below the depth cap a larger depth reaches every omitted subtree, so a few names do. */
+    const named = depth < DEPTH_CAP ? omittedCut.slice(0, OMITTED_IDS_NAMED) : omittedCut;
+    const unnamed = omittedCut.length - named.length;
+    const omittedIds = `${plural(omittedCut.length, 'id')} ${named.join(', ')}${unnamed > 0 ? `, and ${unnamed} more` : ''}`;
+    switch (stop) {
+      case 'count':
         noticeParts.push(
-          `Could not find the story this comment belongs to: ${lookup.gap}. storyId is absent and replies by the story's author are not marked isOp.${retry}`,
+          `Stopped at maxComments ${maxComments}${loaded}.`,
+          ...(input.maxComments > MAX_COMMENTS_CAP
+            ? [servedAtCap('maxComments', input.maxComments, MAX_COMMENTS_CAP)]
+            : []),
+          resumeHint,
         );
-      } else if (lookup?.story && !lookup.story.by) {
+        break;
+      case 'examined':
         noticeParts.push(
-          `The story this comment belongs to (id ${lookup.story.id}) has no author on record, so no reply is marked isOp.`,
+          `Stopped after examining ${MAX_ITEMS_EXAMINED.toLocaleString('en-US')} items in one call${loaded}. ${resumeHint}`,
         );
-      }
-      if (walk.omittedDeleted > 0 || walk.omittedDead > 0) {
+        break;
+      case 'rate_limited':
         noticeParts.push(
-          `${walk.omittedDeleted} deleted, ${walk.omittedDead} dead — omitted from this view.`,
+          `Stopped early: the HN API is rate-limiting this server${loaded}. Wait ${waitFor(traversal.rateLimit)}, then pass nextCursor as cursor, with the same itemId, to resume; comments that failed to load are retried first.`,
         );
-      }
-      if (failedCommentIds.length > 0) {
-        const n = failedCommentIds.length;
-        const retry = nextCursor
-          ? `nextCursor carries ${plural(n, 'it', 'them')}, so continuing retries ${plural(n, 'it', 'them')}; or pass an id as itemId to fetch that comment and its replies.`
-          : 'Call again to retry, or pass an id as itemId to fetch that comment and its replies.';
+        break;
+      case 'time':
         noticeParts.push(
-          `Could not fetch ${n} ${plural(n, 'comment')} (${plural(n, 'id')} ${failedCommentIds.join(', ')}); ${plural(n, 'its', 'their')} replies were not reached either. ${retry}`,
+          `Stopped early to stay within this call's ${CALL_BUDGET_MS / 1000}-second time budget${loaded}. ${resumeHint}`,
         );
-      }
-      if (failedOptionIds.length > 0) {
-        const n = failedOptionIds.length;
-        noticeParts.push(
-          `Could not fetch ${n} poll ${plural(n, 'option')} (${plural(n, 'id')} ${failedOptionIds.join(', ')}). Call again to retry.`,
-        );
-      }
-
-      const loaded =
-        totalAvailable != null ? ` with ${loadedSoFar}/${totalAvailable} comments loaded` : '';
-      const resumeHint = 'Pass nextCursor as cursor, with the same itemId, to continue.';
-      /** Below the depth cap a larger depth reaches every omitted subtree, so a few names do. */
-      const named = depth < DEPTH_CAP ? omittedCut.slice(0, OMITTED_IDS_NAMED) : omittedCut;
-      const unnamed = omittedCut.length - named.length;
-      const omittedIds = `${plural(omittedCut.length, 'id')} ${named.join(', ')}${unnamed > 0 ? `, and ${unnamed} more` : ''}`;
-      switch (stop) {
-        case 'count':
+        break;
+      case undefined:
+        if (depthCut && depth === 0) {
+          /** No comment was returned to drill into, so a larger depth is the only way in. */
           noticeParts.push(
-            `Stopped at maxComments ${maxComments}${loaded}.`,
-            ...(input.maxComments > MAX_COMMENTS_CAP
-              ? [servedAtCap('maxComments', input.maxComments, MAX_COMMENTS_CAP)]
-              : []),
-            resumeHint,
+            `The depth limit (${depth}) left replies unread${loaded}. Raise depth (max ${DEPTH_CAP}) to read them.`,
           );
-          break;
-        case 'examined':
+        } else if (depthCut) {
+          const raise = depth < DEPTH_CAP ? `Raise depth (max ${DEPTH_CAP}), or pass` : 'Pass';
+          /** With a cursor its depth applies; the cap is named only when it is what was served. */
+          const overCap = input.depth > DEPTH_CAP && depth === DEPTH_CAP;
+          /**
+           * Name only drill-in targets this page can vouch for. A cut carried from
+           * an earlier page may have fallen below a comment shown there or one
+           * named there as omitted, and this page cannot tell which.
+           */
+          const targets = [
+            traversal.liveDepthCut
+              ? `a depth-${depth - 1} comment that shows replies`
+              : resume?.depthCut
+                ? `a depth-${depth - 1} comment with replies on an earlier page (shown there, or named as omitted)`
+                : undefined,
+            omittedCut.length === 1
+              ? `omitted comment ${omittedCut[0]}`
+              : omittedCut.length > 1
+                ? `an omitted comment with replies (${omittedIds})`
+                : undefined,
+          ].filter((target) => target != null);
           noticeParts.push(
-            `Stopped after examining ${MAX_ITEMS_EXAMINED.toLocaleString('en-US')} items in one call${loaded}. ${resumeHint}`,
+            `The depth limit (${depth}) left replies unread${loaded}.`,
+            ...(overCap ? [servedAtCap('depth', input.depth, DEPTH_CAP)] : []),
+            `${raise} the id of ${targets.join(', or of ')}${targets.length > 1 ? ',' : ''} as itemId to read its subtree.`,
           );
-          break;
-        case 'size':
+        } else if (resume && totalLoaded === 0 && noticeParts.length === 0) {
           noticeParts.push(
-            `Stopped at the ${RESPONSE_BUDGET_TEXT}-byte response budget after ${totalLoaded} ${plural(totalLoaded, 'comment')}${loaded}. ${resumeHint}`,
+            'No comments remain past this cursor; the thread has been read to the end.',
           );
-          break;
-        case 'rate_limited':
-          noticeParts.push(
-            `Stopped early: the HN API is rate-limiting this server${loaded}. Wait ${waitFor(walk.rateLimit)}, then pass nextCursor as cursor, with the same itemId, to resume; comments that failed to load are retried first.`,
-          );
-          break;
-        case 'time':
-          noticeParts.push(
-            `Stopped early to stay within this call's ${CALL_BUDGET_MS / 1000}-second time budget${loaded}. ${resumeHint}`,
-          );
-          break;
-        case undefined:
-          if (depthCut) {
-            const raise = depth < DEPTH_CAP ? `Raise depth (max ${DEPTH_CAP}), or pass` : 'Pass';
-            /** With a cursor its depth applies; the cap is named only when it is what was served. */
-            const overCap = input.depth > DEPTH_CAP && depth === DEPTH_CAP;
-            /**
-             * Name only drill-in targets this page can vouch for. A cut carried from
-             * an earlier page may have fallen below a comment shown there or one
-             * named there as omitted, and this page cannot tell which.
-             */
-            const targets = [
-              walk.liveDepthCut
-                ? `a depth-${depth - 1} comment that shows replies`
-                : resume?.depthCut
-                  ? `a depth-${depth - 1} comment with replies on an earlier page (shown there, or named as omitted)`
-                  : undefined,
-              omittedCut.length === 1
-                ? `omitted comment ${omittedCut[0]}`
-                : omittedCut.length > 1
-                  ? `an omitted comment with replies (${omittedIds})`
-                  : undefined,
-            ].filter((target) => target != null);
-            noticeParts.push(
-              `The depth limit (${depth}) left replies unread${loaded}.`,
-              ...(overCap ? [servedAtCap('depth', input.depth, DEPTH_CAP)] : []),
-              `${raise} the id of ${targets.join(', or of ')}${targets.length > 1 ? ',' : ''} as itemId to read its subtree.`,
-            );
-          } else if (resume && totalLoaded === 0 && noticeParts.length === 0) {
-            noticeParts.push(
-              'No comments remain past this cursor; the thread has been read to the end.',
-            );
-          }
-          break;
-      }
-      /** A page nextCursor continues reports the depth cut later, by flag alone, so it names them now. */
-      if (stop && omittedCut.length > 0) {
-        const n = omittedCut.length;
-        const raiseAll = unnamed > 0 ? `, or raise depth (max ${DEPTH_CAP}) to read them all` : '';
-        noticeParts.push(
-          `${n} omitted ${plural(n, 'comment')} (${omittedIds}) ${plural(n, 'has', 'have')} replies below the depth limit, which nextCursor does not reach; pass ${plural(n, 'its id', 'an id')} as itemId to read ${plural(n, 'its', "that comment's")} subtree${raiseAll}.`,
-        );
-      }
-
-      const notice = noticeParts.join(' ');
-      const capped = stop === 'count' || stop === 'examined' || stop === 'size';
-      return {
-        totalLoaded,
-        ...(totalAvailable != null && { totalAvailable }),
-        ...(failedIds.length > 0 && { failedIds }),
-        ...((capped || stop === 'rate_limited' || stop === 'time' || depthCut) && {
-          truncated: true as const,
-        }),
-        ...(capped && { shown: totalLoaded, cap: maxComments }),
-        ...(notice.length > 0 && { notice }),
-        ...((stop || depthCut) && {
-          truncationReason: stop === 'examined' ? ('count' as const) : (stop ?? ('depth' as const)),
-          ...(nextCursor && { nextCursor }),
-        }),
-      };
-    };
-
-    /**
-     * Serve the longest page that fits the response budget on both surfaces,
-     * enrichment included: the walk's own, or one cut back to an earlier
-     * comment. The first comment stays whatever its size.
-     */
-    const served = new Map<
-      number,
-      { page: WalkPage; enrichment: ReturnType<typeof enrichmentFor> }
-    >();
-    const serve = (index: number) => {
-      let at = served.get(index);
-      if (!at) {
-        const page = pageAt(traversal, index);
-        at = { page, enrichment: enrichmentFor(page) };
-        served.set(index, at);
-      }
-      return at;
-    };
-    const { page, enrichment } = serve(
-      longestFittingPrefix(traversal.marks.length + 1, (index) => {
-        const { page, enrichment } = serve(index);
-        const added = enrichmentBytes(enrichment, threadTrailer);
-        return {
-          contentBytes: page.pageBytes.contentBytes + added.contentBytes,
-          structuredBytes: page.pageBytes.structuredBytes + added.structuredBytes,
-        };
-      }),
-    );
+        }
+        break;
+    }
+    /** A page nextCursor continues reports the depth cut later, by flag alone, so it names them now. */
+    if (stop && omittedCut.length > 0) {
+      const n = omittedCut.length;
+      const raiseAll = unnamed > 0 ? `, or raise depth (max ${DEPTH_CAP}) to read them all` : '';
+      noticeParts.push(
+        `${n} omitted ${plural(n, 'comment')} (${omittedIds}) ${plural(n, 'has', 'have')} replies below the depth limit, which nextCursor does not reach; pass ${plural(n, 'its id', 'an id')} as itemId to read ${plural(n, 'its', "that comment's")} subtree${raiseAll}.`,
+      );
+    }
 
     ctx.log.info('Resolved thread', {
       itemId: input.itemId,
-      comments: page.comments.length,
-      failed: page.failed.length + failedOptionIds.length,
-      stop: page.stop,
-      ...(page.comments.length < traversal.comments.length && {
-        fittedFrom: traversal.comments.length,
-      }),
+      comments: totalLoaded,
+      failed: failedIds.length,
+      stop,
       ...(lookup && { storyId: lookup.story?.id, storyHops: lookup.hops }),
     });
 
-    const { notice, truncationReason, nextCursor, ...fields } = enrichment;
-    ctx.enrich(fields);
+    const capped = stop === 'count' || stop === 'examined';
+    ctx.enrich({
+      totalLoaded,
+      ...(totalAvailable != null && { totalAvailable }),
+      ...(failedIds.length > 0 && { failedIds }),
+      ...((stop || depthCut) && { truncated: true }),
+      ...(capped && { shown: totalLoaded, cap: maxComments }),
+    });
+    const notice = noticeParts.join(' ');
     if (notice) ctx.enrich.notice(notice);
-    if (truncationReason) ctx.enrich({ truncationReason, ...(nextCursor && { nextCursor }) });
+    if (stop || depthCut) {
+      ctx.enrich({
+        truncationReason: stop === 'examined' ? 'count' : (stop ?? 'depth'),
+        ...(nextCursor && { nextCursor }),
+      });
+    }
 
-    return { item, comments: page.comments };
+    return { item, comments };
   },
 
   format: (result) => [{ type: 'text', text: renderThread(result.item, result.comments) }],
