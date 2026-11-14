@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-11-13 · ⚠️ Breaking
+
+The 64,000-byte response budget is gone: pages hold whole records at the caller's count, and hn_get_thread maxComments and hn_search_content count now default to 25 and 10. Feed stories carry rank, omitted items are counted, thread roots report replies and story title, and @name usernames resolve.
+
 ## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-11-12
 
 hn_search_content gains a minComments filter and parentId and storyUrl on comment hits; a stories or user page on which every item failed throws its dominant cause, with a new upstream_no_response reason when the HN API gave no answer.

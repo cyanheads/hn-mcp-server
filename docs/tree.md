@@ -1,6 +1,6 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-11-14 06:46:33
+Generated on: 2026-11-14 07:28:34
 
 ```text
 hn-mcp-server/
@@ -30,6 +30,7 @@ hn-mcp-server/
 │   ├── 0.4.x/
 │   ├── 0.5.x/
 │   ├── 0.6.x/
+│   ├── 0.7.x/
 │   └── template.md
 ├── claude-plans/
 ├── docs/
