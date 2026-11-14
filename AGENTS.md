@@ -220,9 +220,9 @@ src/
       types.ts                          # HN domain types
   mcp-server/
     tools/markdown-escape.ts           # format() boundary: escape titles, quote bodies
-    tools/response-budget.ts           # 64,000-byte budget per response surface: measure both surfaces, largest shared body cut, code-point cut
     tools/served-at-cap.ts             # notice sentence for a size input served at its per-call cap
     tools/thread-cursor.ts             # hn_get_thread cursor codec: packed frontier, JSON format still decoded
+    tools/username-input.ts            # shared input schema for an HN account name: username and author
     tools/definitions/
       get-stories.tool.ts              # hn_get_stories — Fetch stories from an HN feed
       get-thread.tool.ts               # hn_get_thread — Get item + comment tree

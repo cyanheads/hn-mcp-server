@@ -1,6 +1,6 @@
 # hn-mcp-server - Directory Structure
 
-Generated on: 2026-10-28 17:06:46
+Generated on: 2026-11-14 06:46:33
 
 ```text
 hn-mcp-server/
@@ -158,9 +158,9 @@ hn-mcp-server/
 │   │       │   ├── get-user.tool.ts
 │   │       │   └── search-content.tool.ts
 │   │       ├── markdown-escape.ts
-│   │       ├── response-budget.ts
 │   │       ├── served-at-cap.ts
-│   │       └── thread-cursor.ts
+│   │       ├── thread-cursor.ts
+│   │       └── username-input.ts
 │   ├── services/
 │   │   └── hn/
 │   │       ├── hn-service.ts
@@ -184,10 +184,10 @@ hn-mcp-server/
 │       ├── get-thread.tool.test.ts
 │       ├── get-user.tool.test.ts
 │       ├── markdown-escape.test.ts
-│       ├── response-budget.test.ts
 │       ├── search-content.tool.test.ts
 │       ├── thread-cursor.test.ts
-│       └── upstream-text-rendering.test.ts
+│       ├── upstream-text-rendering.test.ts
+│       └── username-input.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes
